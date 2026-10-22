@@ -76,7 +76,7 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 |---|---|---|
 | `KEYSTONE_ENV` | `dev` | `dev`, `test` or `prod` |
 | `KEYSTONE_DATABASE_URL` | `postgresql+asyncpg://keystone:keystone@localhost:55432/keystone` | Postgres DSN |
-| `KEYSTONE_REDIS_URL` | `redis://localhost:56379/0` | Redis URL |
+| `KEYSTONE_REDIS_URL` | `redis://localhost:56379/0` | Redis URL. Session state lives here. Set it to an empty string to keep session state in the gateway process instead (one process only, lost on restart). |
 | `KEYSTONE_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` |
 | `KEYSTONE_CONFIG` | unset | Path to a YAML file with the same keys |
 | `KEYSTONE_ALLOWED_HOSTS` | `["127.0.0.1:*","localhost:*","[::1]:*"]` | JSON list of `Host` header values the MCP endpoint accepts (DNS rebinding guard). `:*` matches any port. Add the service name, for example `keystone:*`, to reach it from another container. |
@@ -212,6 +212,20 @@ that keeps the standalone GET stream open receives it; others see the change at 
 
 Without `--tenant`, `add` uses the config's only tenant, and fails when the config names none or
 several.
+
+## Sessions
+
+Each MCP session has a state object (flags, taint, call count, spend) stored as JSON in Redis
+under `ks:sess:{session id}`. The key lives 24 hours from its last use: both reading and writing
+a session restart the clock. Postgres holds one `sessions` row per session, written when the
+session makes its first call, as the durable reference that audit records will point at. The row's
+`last_seen_at`, flags and taint are updated at most once a minute per session.
+
+If Redis cannot be reached, a call is refused with `KS_DENIED` ("session state is unavailable") and
+audited, because a call must not run without the flags and taint of its session. If Postgres
+cannot write the row, the call goes ahead and the failure is logged. A request that names no MCP
+session id gets a throwaway state that is never stored. Redis database 15 belongs to the tests;
+they empty it.
 
 ## The MCP endpoint
 
