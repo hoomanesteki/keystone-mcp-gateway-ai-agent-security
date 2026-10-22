@@ -104,8 +104,9 @@ arrives in Phase 5.
 
 Every result carries `keystone/call_id` in its `_meta`. A call that Keystone refuses (unknown
 tool, invalid arguments) comes back as a normal result with
-`isError` set. Its text starts with `[keystone:<CODE>] call <id>`, and the machine-readable copy is
-in the `_meta` of the first content block (ADR-0007).
+`isError` set. Its text starts with `[keystone:<CODE>] call <id>`, and the machine-readable copy
+(`keystone/code`, `keystone/call_id`) is in the `_meta` of the result and of the first content
+block (ADR-0007).
 
 Health endpoints: `GET /healthz` always returns 200. `GET /readyz` probes Postgres and Redis with
 a 1 second limit each and returns 503 if either is down.

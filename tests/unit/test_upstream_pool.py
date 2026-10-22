@@ -1,6 +1,7 @@
 from typing import Any
 
 import anyio
+import anyio.lowlevel
 import pytest
 from anyio.abc import TaskGroup
 from pydantic import SecretStr
@@ -107,6 +108,121 @@ async def test_least_recently_used_client_is_evicted_and_closed() -> None:
         assert await pool.get("b1", None) is not b  # b1 comes back as a new client
 
     assert len(factory.created) == 4
+
+
+@pytest.mark.phase(2)
+async def test_an_evicted_client_closes_after_its_last_in_flight_call() -> None:
+    factory = Factory()
+    holding = anyio.Event()
+    release = anyio.Event()
+
+    async def hold(pool: UpstreamPool) -> None:
+        async with pool.lease("a1", None):
+            holding.set()
+            await release.wait()
+
+    async with UpstreamPool(factory, max_clients=1) as pool, anyio.create_task_group() as tasks:
+        tasks.start_soon(hold, pool)
+        await holding.wait()
+        busy = factory.created[0]
+
+        async with pool.lease("b1", None):  # evicts a1 while a call is running on it
+            assert busy.closed == 0
+            # A new call for the same upstream never gets the evicted client.
+            async with pool.lease("a1", None) as replacement:
+                assert replacement is not busy
+            assert busy.closed == 0
+
+        release.set()
+        await anyio.lowlevel.checkpoint()
+
+    assert busy.closed == 1
+    assert [c.closed for c in factory.created] == [1, 1, 1]
+
+
+@pytest.mark.phase(2)
+async def test_an_evicted_client_with_two_calls_closes_after_the_second() -> None:
+    factory = Factory()
+    first_done = anyio.Event()
+    second_done = anyio.Event()
+    holding = anyio.Event()
+
+    async def call(pool: UpstreamPool, done: anyio.Event) -> None:
+        async with pool.lease("a1", None):
+            holding.set()
+            await done.wait()
+
+    async with UpstreamPool(factory, max_clients=1) as pool, anyio.create_task_group() as tasks:
+        tasks.start_soon(call, pool, first_done)
+        await holding.wait()
+        tasks.start_soon(call, pool, second_done)
+        await anyio.sleep(0.01)
+        busy = factory.created[0]
+        assert len(factory.created) == 1  # both calls share the one client
+
+        await pool.get("b1", None)  # evicts a1
+        assert busy.closed == 0
+        first_done.set()
+        await anyio.sleep(0.01)
+        assert busy.closed == 0  # the second call is still running
+        second_done.set()
+        await anyio.sleep(0.01)
+        assert busy.closed == 1
+
+
+@pytest.mark.phase(2)
+async def test_a_call_that_fails_still_lets_the_evicted_client_close() -> None:
+    factory = Factory()
+
+    async with UpstreamPool(factory, max_clients=1) as pool:
+        with pytest.raises(RuntimeError, match="call failed"):
+            async with pool.lease("a1", None):
+                await pool.get("b1", None)
+                assert factory.created[0].closed == 0
+                raise RuntimeError("call failed")
+
+        assert factory.created[0].closed == 1
+
+
+@pytest.mark.phase(2)
+async def test_a_cancelled_call_still_lets_the_evicted_client_close() -> None:
+    factory = Factory()
+
+    async with UpstreamPool(factory, max_clients=1) as pool:
+        with anyio.move_on_after(0.05):
+            async with pool.lease("a1", None):
+                await pool.get("b1", None)
+                await anyio.sleep(5)
+
+        assert factory.created[0].closed == 1
+
+
+@pytest.mark.phase(2)
+async def test_every_client_is_closed_once_across_eviction_and_shutdown() -> None:
+    factory = Factory()
+
+    async with UpstreamPool(factory, max_clients=1) as pool:
+        async with pool.lease("a1", None):
+            await pool.get("b1", None)  # evicts a1, which is still leased
+        await pool.get("c1", None)  # evicts b1
+
+    assert [c.closed for c in factory.created] == [1, 1, 1]
+
+
+@pytest.mark.phase(2)
+async def test_shutdown_closes_a_leased_client_and_a_late_release_does_not_close_it_again() -> None:
+    factory = Factory()
+    lease = None
+
+    async with UpstreamPool(factory, max_clients=1) as pool:
+        lease = pool.lease("a1", None)
+        await lease.__aenter__()
+        await pool.get("b1", None)  # evicts a1 while it is leased
+        assert factory.created[0].closed == 0
+
+    assert factory.created[0].closed == 1
+    await lease.__aexit__(None, None, None)
+    assert factory.created[0].closed == 1
 
 
 @pytest.mark.phase(1)
