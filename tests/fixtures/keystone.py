@@ -14,10 +14,12 @@ import pytest
 from fastapi import FastAPI
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
+from pydantic import SecretStr
 
 from keystone.app import create_app
 from keystone.audit.sink import InMemoryAuditSink
-from keystone.settings import Settings, UpstreamConfig
+from keystone.registry.config import UpstreamConfig
+from keystone.settings import Settings, TenantConfig
 from tests.fixtures.servers import ServerThread
 
 # Re-exported so tests/conftest.py can name one module: tests/unit/test_phase_plugin.py copies the
@@ -55,13 +57,20 @@ class KeystoneApp:
 def keystone_app_factory(
     demo_upstreams: DemoUpstreams,  # noqa: F811 - the re-exported fixture above
     clean_env: None,
+    test_database_url: str,
+    clean_db: None,
 ) -> Iterator[Callable[..., KeystoneApp]]:
-    """Start Keystone. Keyword arguments go to create_app (a spy dispatcher, an interceptor)."""
+    """Start Keystone against the test database. Keyword arguments go to create_app (a spy
+    dispatcher, an interceptor). Tests that use it need Postgres, so they carry the `services`
+    marker, and `clean_db` empties the tables the app wrote."""
     started: list[KeystoneApp] = []
 
     def start(**app_options: Any) -> KeystoneApp:
         settings = Settings(
             env="test",
+            database_url=SecretStr(test_database_url),
+            tenants=[TenantConfig(id="acme", name="Acme Corp")],
+            allow_private_upstreams=True,
             upstreams=[
                 UpstreamConfig(id=name, tenant="acme", url=demo_upstreams.url(name))
                 for name in NAMES

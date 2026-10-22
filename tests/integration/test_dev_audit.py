@@ -7,6 +7,7 @@ from keystone.settings import Settings
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_the_dev_audit_count_follows_the_calls(
     keystone_app: KeystoneApp, mcp_client: McpConnect

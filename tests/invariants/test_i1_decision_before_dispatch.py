@@ -70,6 +70,7 @@ class Approves:
 SEND_ARGS = {"to": "x@acme.test", "subject": "s", "body": "b"}
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_i1(
     keystone_app_factory: Any, mcp_client: McpConnect, demo_upstreams: DemoUpstreams
@@ -94,6 +95,7 @@ async def test_i1(
     assert [r["dispatched"] for r in app.audit.records] == [True, True, False, False]
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 @pytest.mark.parametrize("effect", [Effect.DENY, Effect.REQUIRE_APPROVAL])
 async def test_i1_a_decision_that_is_not_allow_stops_the_call(
@@ -121,6 +123,7 @@ async def test_i1_a_decision_that_is_not_allow_stops_the_call(
     assert [r["dispatched"] for r in app.audit.records] == [False]
 
 
+@pytest.mark.services
 @pytest.mark.phase(2)
 async def test_i1_a_policy_slot_that_decides_nothing_stops_the_call(
     keystone_app_factory: Any, mcp_client: McpConnect, demo_upstreams: DemoUpstreams
@@ -148,6 +151,7 @@ async def test_i1_a_policy_slot_that_decides_nothing_stops_the_call(
     ]
 
 
+@pytest.mark.services
 @pytest.mark.phase(2)
 async def test_i1_require_approval_dispatches_only_with_an_approval_id(
     keystone_app_factory: Any, mcp_client: McpConnect, demo_upstreams: DemoUpstreams

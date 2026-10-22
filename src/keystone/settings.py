@@ -11,7 +11,7 @@ from pydantic_settings import (
 )
 
 from keystone.core.types import Principal
-from keystone.registry.naming import check_upstream_id
+from keystone.registry.config import UpstreamConfig
 
 CONFIG_ENV_VAR = "KEYSTONE_CONFIG"
 
@@ -24,22 +24,6 @@ DEFAULT_REDIS_URL = "redis://localhost:56379/0"
 class TenantConfig(BaseModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")
     name: str = Field(min_length=1)
-
-
-class UpstreamConfig(BaseModel):
-    """One upstream MCP server. The gateway checks that an http upstream has a tenant and a url
-    when it starts, so a half-written entry loads here and fails there with a clear message."""
-
-    id: str
-    tenant: str | None = None
-    transport: Literal["http", "builtin"] = "http"
-    url: str | None = None
-
-    @field_validator("id")
-    @classmethod
-    def _valid_id(cls, value: str) -> str:
-        check_upstream_id(value)
-        return value
 
 
 # Host header values the MCP endpoint accepts. A browser on another site can be tricked into
@@ -69,6 +53,9 @@ class Settings(BaseSettings):
     config_path: Path | None = Field(default=None, validation_alias=CONFIG_ENV_VAR)
     tenants: list[TenantConfig] = Field(default_factory=list)
     upstreams: list[UpstreamConfig] = Field(default_factory=list)
+    # Off by default: an upstream URL that resolves to a loopback, private or link-local address
+    # is refused (KS-202). Local compose and the tests turn it on: their upstreams are local.
+    allow_private_upstreams: bool = False
     # Who every caller is until real authentication arrives (KS-304). Never allowed in prod.
     dev_principal: Principal | None = None
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))
