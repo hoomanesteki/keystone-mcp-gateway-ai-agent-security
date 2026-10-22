@@ -8,6 +8,7 @@ from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, Decision, Effect, ToolResult
 from keystone.gateway.pipeline import Dispatcher
 from tests.fixtures.keystone import KeystoneApp, McpConnect
+from tests.fixtures.mcp_results import texts
 from tests.fixtures.upstreams import DemoUpstreams
 
 
@@ -40,6 +41,33 @@ class SetsEffect:
 
     async def after_call(self, ctx: CallContext) -> None:
         return None
+
+
+class LeavesDecisionEmpty:
+    """A policy slot that does nothing, like a pass-through stub that forgot to decide."""
+
+    name = "policy"
+
+    async def before_call(self, ctx: CallContext) -> None:
+        return None
+
+    async def after_call(self, ctx: CallContext) -> None:
+        return None
+
+
+class Approves:
+    """An approval slot that plays a consumed approval (Phase 6 does this for real)."""
+
+    name = "approval"
+
+    async def before_call(self, ctx: CallContext) -> None:
+        ctx.approval_id = "01JAPPROVED"
+
+    async def after_call(self, ctx: CallContext) -> None:
+        return None
+
+
+SEND_ARGS = {"to": "x@acme.test", "subject": "s", "body": "b"}
 
 
 @pytest.mark.phase(1)
@@ -91,3 +119,54 @@ async def test_i1_a_decision_that_is_not_allow_stops_the_call(
     assert spy.decisions == []
     assert demo_upstreams.state("mail")["sent"] == []
     assert [r["dispatched"] for r in app.audit.records] == [False]
+
+
+@pytest.mark.phase(2)
+async def test_i1_a_policy_slot_that_decides_nothing_stops_the_call(
+    keystone_app_factory: Any, mcp_client: McpConnect, demo_upstreams: DemoUpstreams
+) -> None:
+    spy: SpyDispatcher | None = None
+
+    def wrap(inner: Dispatcher) -> Dispatcher:
+        nonlocal spy
+        spy = SpyDispatcher(inner)
+        return spy
+
+    app: KeystoneApp = keystone_app_factory(
+        wrap_dispatcher=wrap, interceptors={"policy": LeavesDecisionEmpty()}
+    )
+    async with mcp_client(app) as client:
+        result = await client.call_tool("mail__send_email", SEND_ARGS)
+
+    assert result.is_error
+    assert texts(result)[0].startswith("[keystone:KS_DENIED] call ")
+    assert spy is not None
+    assert spy.tools == []
+    assert demo_upstreams.state("mail")["sent"] == []
+    assert [(r["dispatched"], r["reject_code"]) for r in app.audit.records] == [
+        (False, "KS_DENIED")
+    ]
+
+
+@pytest.mark.phase(2)
+async def test_i1_require_approval_dispatches_only_with_an_approval_id(
+    keystone_app_factory: Any, mcp_client: McpConnect, demo_upstreams: DemoUpstreams
+) -> None:
+    spy: SpyDispatcher | None = None
+
+    def wrap(inner: Dispatcher) -> Dispatcher:
+        nonlocal spy
+        spy = SpyDispatcher(inner)
+        return spy
+
+    policy = SetsEffect(Effect.REQUIRE_APPROVAL)
+    app: KeystoneApp = keystone_app_factory(
+        wrap_dispatcher=wrap, interceptors={"policy": policy, "approval": Approves()}
+    )
+    async with mcp_client(app) as client:
+        result = await client.call_tool("mail__send_email", SEND_ARGS)
+
+    assert not result.is_error
+    assert spy is not None
+    assert [d.effect if d else None for d in spy.decisions] == [Effect.REQUIRE_APPROVAL]
+    assert len(demo_upstreams.state("mail")["sent"]) == 1  # type: ignore[arg-type]
