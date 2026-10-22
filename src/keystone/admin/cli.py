@@ -18,6 +18,7 @@ from keystone.app import create_app
 from keystone.core.types import ToolStatus
 from keystone.db.models import Tool, Upstream
 from keystone.db.session import create_engine, make_sessionmaker
+from keystone.defense.description_check import check_description
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
 from keystone.logging import configure_logging
 from keystone.registry.config import tool_overrides
@@ -397,8 +398,12 @@ def render_tool(tool: Tool) -> str:
         command = f"keystone tool approve-change {tool.name} --expect {fingerprint[:12]}"
         lines.append(f"          to accept it: {command}")
     lines += ["", "description (current):", indent(tool.description)]
+    if hits := check_description(tool.description):
+        lines.append(f"  screening: {', '.join(hits)}")
     if tool.pending_description is not None and tool.pending_schema is not None:
         lines += ["", "description (pending):", indent(tool.pending_description)]
+        if hits := check_description(tool.pending_description):
+            lines.append(f"  screening: {', '.join(hits)}")
         description_diff = unified_diff(tool.description, tool.pending_description, "description")
         schema_diff = unified_diff(
             schema_text(tool.input_schema), schema_text(tool.pending_schema), "schema"

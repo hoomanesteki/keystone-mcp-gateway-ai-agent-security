@@ -21,6 +21,7 @@ from keystone.core.canonical import canonical_json, sha256_hex
 from keystone.core.errors import Reject
 from keystone.core.types import Risk, ToolRef, ToolStatus, ToolTag
 from keystone.db.models import Tool, Upstream
+from keystone.defense.description_check import check_description
 from keystone.gateway.upstreams import (
     UpstreamDirectory,
     UpstreamPool,
@@ -29,7 +30,7 @@ from keystone.gateway.upstreams import (
 )
 from keystone.registry.config import ToolOverride
 from keystone.registry.naming import make_tool_name
-from keystone.registry.pinning import CHANGE_REASONS, REMOVED, change_reason
+from keystone.registry.pinning import CHANGE_REASONS, REMOVED, SUSPICIOUS, change_reason
 from keystone.registry.repo import ToolRepo, UpstreamRepo
 
 log = structlog.get_logger()
@@ -204,8 +205,7 @@ class RegistrySyncer:
             ref = build_tool_ref(row, name, tool, overrides.get(tool.name))
             old = stored.get(name)
             if old is None:
-                await self.tools.upsert(ref)
-                report.created.append(name)
+                await self._create(ref, report)
             elif (old.description_hash, old.schema_hash) != (ref.description_hash, ref.schema_hash):
                 await self._hold_change(row, old, ref, report)
             else:
@@ -227,6 +227,20 @@ class RegistrySyncer:
             report.removed,
         ):
             names.sort()
+
+    async def _create(self, ref: ToolRef, report: SyncReport) -> None:
+        """Store a tool seen for the first time. One whose description trips the screening is
+        stored quarantined, so it never reaches a model before a person has read it."""
+        hits = check_description(ref.description)
+        if not hits:
+            await self.tools.upsert(ref)
+        else:
+            reason = f"{SUSPICIOUS}:{','.join(hits)}"
+            held = ref.model_copy(update={"status": ToolStatus.QUARANTINED})
+            await self.tools.upsert(held, quarantine_reason=reason)
+            report.quarantined.append(ref.name)
+            log.warning("tool_quarantined", upstream=ref.upstream_id, tool=ref.name, reason=reason)
+        report.created.append(ref.name)
 
     async def _settle(self, row: Upstream, old: Tool) -> None:
         """The upstream lists the definition we hold. A tool that sync disabled because it was
