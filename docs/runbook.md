@@ -166,7 +166,7 @@ What a sync does to a tool:
 | for the first time | created, status `active` |
 | with the definition we hold | unchanged; the config's overrides are applied again |
 | with a different description or schema | reported as `changed`; pinning (KS-205) decides what happens |
-| no longer, in a complete list | `disabled`, reason `removed_from_upstream`. It returns to `active` if the upstream lists it again with the same definition. |
+| no longer, in a complete list | an `active` tool becomes `disabled`, reason `removed_from_upstream`, and returns to `active` if the upstream lists it again with the same definition. A quarantined tool stays quarantined, so vanishing and coming back is no way around a review. |
 
 A sync that fails, because the upstream is down, slow or sent a broken answer, writes the error to
 the upstream's `last_error` and changes no tool. Only a complete list can show that a tool is
@@ -192,7 +192,7 @@ change back, the tool is released by the next sync. A newer offer replaces an ol
 | `keystone tool list [--status S] [--json]` | Every tool with its status and reason. |
 | `keystone tool show NAME` | The pinned definition, the pending one, a diff, and a fingerprint of the pending definition. |
 | `keystone tool approve-change NAME [--expect FP] [--note TEXT]` | Make the pending definition the pinned one, recompute the hashes and set the tool `active`. With `--expect`, refuses if the pending definition is no longer the one with that fingerprint. The note goes in the log. |
-| `keystone tool disable NAME` / `enable NAME` | Take a tool out of service by hand. Sync never re-enables a tool you disabled. `enable` refuses a quarantined tool (approve it instead) and one the upstream stopped listing. |
+| `keystone tool disable NAME` / `enable NAME` | Take a tool out of service by hand. Sync never re-enables a tool you disabled. `disable` and `enable` both refuse a quarantined tool (review it and approve it instead), and `enable` refuses one the upstream stopped listing. |
 
 A tool seen for the first time is screened too (`keystone.defense.description_check`). Five
 rules look for characters a reader cannot see (tag characters, zero-width and bidirectional

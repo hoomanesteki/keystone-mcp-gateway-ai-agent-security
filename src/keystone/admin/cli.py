@@ -530,6 +530,10 @@ def tool_disable(
 
     async def action(settings: Settings, sessions: Sessionmaker) -> str:
         found = await find_tool(settings, sessions, name, tenant)
+        if found.status == ToolStatus.QUARANTINED.value:
+            # It is out of service already. Disabling it would lose the fact that it awaits a
+            # review, and `enable` would then put it back without one.
+            raise CliError(f"{name} is quarantined and cannot be called; review it with tool show")
         await ToolRepo(sessions).set_status(
             found.tenant_id, name, ToolStatus.DISABLED, reason=OPERATOR_DISABLED
         )

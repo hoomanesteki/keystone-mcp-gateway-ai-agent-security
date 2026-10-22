@@ -219,7 +219,10 @@ class RegistrySyncer:
                 report.unchanged.append(name)
 
         for name, old in stored.items():
-            if name not in seen and old.status != ToolStatus.DISABLED:
+            # Only an active tool is disabled as gone, because a disabled tool comes back on its
+            # own when the upstream lists it again. A tool held for review stays held: if it
+            # vanished and returned, that would be a way around the review.
+            if name not in seen and old.status == ToolStatus.ACTIVE:
                 await self.tools.set_status(
                     row.tenant_id, name, ToolStatus.DISABLED, reason=REMOVED
                 )

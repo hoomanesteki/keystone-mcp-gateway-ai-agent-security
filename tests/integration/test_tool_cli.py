@@ -153,7 +153,7 @@ async def test_enable_will_not_override_a_quarantine_or_a_removal(
     assert removed.exit_code == 1 and "no longer lists it" in removed.output
 
 
-async def test_disabling_a_quarantined_tool_keeps_it_out_and_enabling_drops_the_pending_offer(
+async def test_a_quarantined_tool_cannot_be_disabled_into_an_enabled_one(
     clean_env: None, test_database_url: str, sessionmaker: Sessions
 ) -> None:
     fleet = {"mail": FakeUpstream(tool("read"))}
@@ -162,18 +162,15 @@ async def test_disabling_a_quarantined_tool_keeps_it_out_and_enabling_drops_the_
         fleet["mail"].tools = [tool("read", description="poisoned")]
         await env.service.sync_all()
 
-        await invoke(test_database_url, ["tool", "disable", "mail__read"])
+        disabled = await invoke(test_database_url, ["tool", "disable", "mail__read"])
         enabled = await invoke(test_database_url, ["tool", "enable", "mail__read"])
         row = await env.tools.get("acme", "mail__read")
 
-    assert enabled.exit_code == 0
-    # Enabling is not approving: the poisoned offer must not become the live definition.
+    # Otherwise disable then enable would be a way past the review.
+    assert disabled.exit_code == 1 and "is quarantined" in disabled.output
+    assert enabled.exit_code == 1 and "use approve-change" in enabled.output
     assert row is not None
-    assert (row.status, row.description, row.pending_description) == (
-        "active",
-        "read does a thing",
-        None,
-    )
+    assert (row.status, row.pending_description) == ("quarantined", "poisoned")
 
 
 async def test_show_lists_the_screening_hits_of_a_tool_held_on_first_sight(
