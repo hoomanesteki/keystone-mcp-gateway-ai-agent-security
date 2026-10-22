@@ -1,0 +1,9 @@
+# Allow list: the image needs only the files the Dockerfile copies.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src/
+**/__pycache__
+**/*.pyc
