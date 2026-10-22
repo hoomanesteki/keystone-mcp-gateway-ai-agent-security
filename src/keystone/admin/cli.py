@@ -54,6 +54,8 @@ tool_app = typer.Typer(
     help="Review, approve and disable tools.", no_args_is_help=True, add_completion=False
 )
 app.add_typer(tool_app, name="tool")
+agent_app = typer.Typer(help="Agents that may connect.", no_args_is_help=True, add_completion=False)
+app.add_typer(agent_app, name="agent")
 log = structlog.get_logger()
 
 
@@ -566,3 +568,29 @@ def tool_enable(
         return f"enabled {name}"
 
     typer.echo(run_with_database(action))
+
+
+def unknown_agent_policy(settings: Settings) -> str:
+    return "allowed with trust low" if settings.auth.allow_unknown_agents else "refused (403)"
+
+
+@agent_app.command("list")
+def agent_list(
+    as_json: Annotated[bool, typer.Option("--json", help="Print JSON instead of a table.")] = False,
+) -> None:
+    """List the agents in the config with their trust level, and say what an unlisted one gets."""
+    settings = Settings()
+    agents = sorted(settings.agents.items())
+    policy = unknown_agent_policy(settings)
+    if as_json:
+        listed = [{"id": agent_id, "trust": agent.trust} for agent_id, agent in agents]
+        typer.echo(json.dumps({"agents": listed, "unknown_agents": policy}, indent=2))
+        return
+    if agents:
+        table = [("AGENT", "TRUST"), *((agent_id, agent.trust) for agent_id, agent in agents)]
+        width = max(len(row[0]) for row in table)
+        for agent_id, trust in table:
+            typer.echo(f"{agent_id.ljust(width)}  {trust}".rstrip())
+    else:
+        typer.echo("no agents configured")
+    typer.echo(f"\nunknown agents: {policy}")

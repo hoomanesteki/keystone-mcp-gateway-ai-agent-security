@@ -26,6 +26,25 @@ class TenantConfig(BaseModel):
     name: str = Field(min_length=1)
 
 
+class AgentConfig(BaseModel):
+    """What the config says about one agent: the OAuth client that acts for users (KS-308). The
+    key under `agents` is the client id, which a token carries in `azp`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    trust: Literal["low", "standard", "high"] = "standard"
+
+
+class AuthSettings(BaseModel):
+    """How callers are identified."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # An agent that is not listed under `agents` is refused with 403. With this on it gets in with
+    # trust `low` instead.
+    allow_unknown_agents: bool = False
+
+
 class RegistrySettings(BaseModel):
     """How the registry keeps its tool list current (KS-203)."""
 
@@ -94,6 +113,8 @@ class Settings(BaseSettings):
     allow_private_upstreams: bool = False
     registry: RegistrySettings = Field(default_factory=RegistrySettings)
     health: HealthSettings = Field(default_factory=HealthSettings)
+    agents: dict[str, AgentConfig] = Field(default_factory=dict)
+    auth: AuthSettings = Field(default_factory=AuthSettings)
     # Who every caller is until real authentication arrives (KS-304). Never allowed in prod.
     dev_principal: Principal | None = None
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))

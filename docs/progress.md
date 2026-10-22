@@ -53,12 +53,12 @@ the "Found" list at the end.
 |---|---|---|---|---|---|
 | KS-301 | Keycloak realm for local identity | 3 | done | | `feat/ks-301-identity-fixtures`. Users have fixed ids, so a token's `sub` is the user name (`alice`). A `support` group exists although the story's group list omits it, because alice is "acme, support". Placeholders in the realm file are filled from Keycloak's environment; the dev values are in `.env.example` and repeated in compose, and `tests/unit/test_dev_secrets.py` fails if they differ. Verified by hand: an edited realm file is imported after `make reset && make up` but not after a plain `make up`. The runbook has the table of what to run. |
 | KS-302 | Fake IdP for tests | 2 | done | | Same branch. Paths match Keycloak's (`/realms/keystone/...`). The first RSA and EC keys are made once per test process because RSA generation takes 0.1 s. `make_token` can also forge `alg=none` and the HS256 key-confusion token for KS-303. `token_for(user)` mirrors the realm's users, and `tests/unit/test_realm.py` checks that. |
-| KS-303 | JWT validation to principal | 5 | todo | | |
+| KS-303 | JWT validation to principal | 5 | done | | `feat/ks-303-jwt-principals`. `identity/jwt.py` reads the header first and refuses any `alg` outside RS256 and ES256 before a key is looked up, then checks that the key is RSA (2048 bits or more) for RS256 or EC P-256 for ES256, then gives the decoder that one algorithm. `exp`, `iat`, `iss`, `aud` and `sub` are required. Keys: 3 s timeout, and an unknown `kid` refreshes them once a minute (the first load does not count against that, so the first rotation is picked up at once). Keys that cannot be fetched give 503, not 401. Beyond the story, a header with `jku`, `jwk`, `x5u`, `crit` or `b64` is refused, and so are encryption keys and RSA keys under 2048 bits in the JWKS. I broke the validator twelve ways to check the tests notice (allow HS256, look up the key first, skip the audience check and so on). |
 | KS-304 | MCP auth wiring and session binding | 5 | todo | | |
 | KS-305 | Credential vault | 5 | todo | | |
 | KS-306 | Credential injection and the canary invariant | 3 | todo | | |
 | KS-307 | Tenant isolation | 3 | todo | | |
-| KS-308 | Agent identity and trust | 2 | todo | | |
+| KS-308 | Agent identity and trust | 2 | done | | Same branch. `agents` and `auth.allow_unknown_agents` in the settings; an unlisted agent is `Forbidden` (403) unless allowed, then trust `low`. `tests/integration/test_agents.py::test_unknown_agent_rejected` checks the rule on a real token from the fake IdP; the 403 over HTTP arrives with KS-304. |
 
 ## Phase 4: Policy engine
 
