@@ -34,6 +34,9 @@ the "Found" list at the end.
 
 | ID | Title | Pts | Status | PR | Notes |
 |---|---|---|---|---|---|
+| KS-191 | Pipeline refuses to dispatch without an allow decision | 1 | todo | | Found at gate 1. Structural I1: dispatch only when `decision.effect` is `allow`, or `require_approval` with a consumed approval. |
+| KS-192 | Pool eviction waits for in-flight calls | 2 | todo | | Found at gate 1. |
+| KS-193 | Rejection meta on the MCP result | 1 | todo | | Found at gate 1. Copy `keystone/*` meta to the result-level `_meta`. |
 | KS-201 | Schema for upstreams, tools and sessions | 3 | todo | | |
 | KS-202 | Upstream config, admin CLI and SSRF guard | 5 | todo | | |
 | KS-203 | Tool discovery and sync | 5 | todo | | |
