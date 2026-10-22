@@ -23,7 +23,7 @@ the "Found" list at the end.
 |---|---|---|---|---|---|
 | KS-101 | Spike: MCP SDK proxy pattern | 2 | done | | `spike/ks-101-mcp-proxy`. The SDK is `mcp` 2.3.0, a new major version; findings in `docs/spikes/mcp-proxy.md`. ADR-0003, 0005 and 0007 written. |
 | KS-102 | Core types, errors and naming | 3 | done | | `feat/ks-102-core-types`. `ToolResult` has no result-level meta field and the contract is unchanged, so `to_tool_result` puts `_meta` on the text content block. An upstream id may not end in `_`, or `mail_` + `__` + `x` would not split back. |
-| KS-103 | Interceptor pipeline with stubs | 5 | todo | | |
+| KS-103 | Interceptor pipeline with stubs | 5 | done | | `feat/ks-103-pipeline`. A hook that raises anything but `Reject` fails closed (denied before dispatch, output blocked after) and the audit outcome is `error`. The audit write is shielded from cancellation. `jsonschema` is now a direct dependency. |
 | KS-104 | Demo upstreams: mail, files, bank, echo | 5 | todo | | |
 | KS-105 | Upstream client and session pool | 5 | todo | | |
 | KS-106 | Gateway MCP server | 5 | todo | | |
