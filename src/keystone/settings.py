@@ -26,6 +26,15 @@ class TenantConfig(BaseModel):
     name: str = Field(min_length=1)
 
 
+class AgentConfig(BaseModel):
+    """What the config says about one agent: the OAuth client that acts for users (KS-308). The
+    key under `agents` is the client id, which a token carries in `azp`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    trust: Literal["low", "standard", "high"] = "standard"
+
+
 class RegistrySettings(BaseModel):
     """How the registry keeps its tool list current (KS-203)."""
 

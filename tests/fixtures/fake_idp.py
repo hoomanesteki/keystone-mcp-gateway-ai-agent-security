@@ -4,6 +4,7 @@ It serves the discovery document and the JWKS on a random port, with the paths K
 signs tokens with an RSA 2048 key and an EC P-256 key. `make_token` builds a valid token by
 default and takes options that break it in one chosen way: an expired token, a wrong audience, a
 missing claim, `alg=none`, and the classic HS256 forgery that signs with the RSA public key.
+Tokens are signed here with `cryptography`, not PyJWT, so a header can hold anything.
 
 The first pair of keys is made once per test process (RSA generation takes about 0.1 s) and
 shared by every instance. Each instance gives its keys new ids, and `rotate()` makes new keys.
@@ -23,10 +24,10 @@ from functools import cache
 from typing import Any
 
 import anyio
-import jwt
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from jwt.algorithms import ECAlgorithm, RSAAlgorithm
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -86,6 +87,14 @@ class SigningKey:
             serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
         )
 
+    def sign(self, data: bytes) -> bytes:
+        """A JWS signature over `data`. Made here, not by PyJWT, so a test can sign a header that
+        PyJWT would refuse to write."""
+        if isinstance(self.private, rsa.RSAPrivateKey):
+            return self.private.sign(data, padding.PKCS1v15(), hashes.SHA256())
+        r, s = decode_dss_signature(self.private.sign(data, ec.ECDSA(hashes.SHA256())))
+        return r.to_bytes(32, "big") + s.to_bytes(32, "big")
+
 
 class FakeIdp:
     """The provider. Use the `fake_idp` fixture, or `FakeIdp()` and `stop()`."""
@@ -98,6 +107,7 @@ class FakeIdp:
         self.jwks_status = 200
         self.jwks_delay_s = 0.0
         self.discovery_issuer: str | None = None  # what the document claims, if not the issuer
+        self.extra_keys: list[dict[str, Any]] = []  # more JWKs to publish, for key selection tests
         self._keys: dict[str, SigningKey] = {}
         rsa_key, ec_key = _first_keys()
         self._install(rsa_key, ec_key)
@@ -123,11 +133,11 @@ class FakeIdp:
         self._thread.stop()
 
     def jwks(self) -> dict[str, Any]:
-        return {"keys": [key.jwk() for key in self._keys.values()]}
+        return {"keys": [*(key.jwk() for key in self._keys.values()), *self.extra_keys]}
 
     def key_for(self, alg: str) -> SigningKey:
-        """The current signing key for an algorithm: the RSA key for RS256 (and the other RSA
-        algorithms), the EC key for ES256."""
+        """The current signing key for an algorithm: the EC key for ES256, the RSA key for the
+        rest (HS256 tokens are signed with its public half)."""
         return self._keys["ES256" if alg == "ES256" else "RS256"]
 
     def public_pem(self, alg: str = "RS256") -> bytes:
@@ -159,12 +169,13 @@ class FakeIdp:
         alg: str = "RS256",
         kid: str | None = None,
         extra: Mapping[str, Any] | None = None,
+        headers: Mapping[str, Any] | None = None,
     ) -> str:
         """A signed token. `tenant=None` and `azp=None` leave those claims out. `extra` is merged
         over the claims last, and a value of None removes the claim, so any claim can be changed
-        or dropped. `kid=""` leaves the kid out of the header. `alg` may also be "none" (no
-        signature) or "HS256" (signed with the RSA public key as the HMAC secret, the key
-        confusion forgery)."""
+        or dropped. `kid=""` leaves the kid out of the header, and `headers` adds header fields.
+        `alg` may also be "none" (no signature) or "HS256" (signed with the RSA public key as the
+        HMAC secret, the key confusion forgery)."""
         now = int(time.time())
         claims: dict[str, Any] = {
             "iss": self.issuer,
@@ -189,19 +200,21 @@ class FakeIdp:
 
         key = self.key_for(alg)
         header_kid = key.kid if kid is None else kid
-        headers = {"kid": header_kid} if header_kid else {}
+        fields: dict[str, Any] = {"kid": header_kid} if header_kid else {}
+        fields |= headers or {}
+        header = {"alg": alg, "typ": "JWT", **fields}
+        signing_input = f"{_json_b64(header)}.{_json_b64(claims)}"
         if alg == "none":
-            header = {"alg": "none", "typ": "JWT", **headers}
-            return f"{_json_b64(header)}.{_json_b64(claims)}."
+            return f"{signing_input}."
         if alg.startswith("HS"):
-            header = {"alg": alg, "typ": "JWT", **headers}
-            signing_input = f"{_json_b64(header)}.{_json_b64(claims)}".encode("ascii")
             digest = {"HS256": hashlib.sha256, "HS384": hashlib.sha384, "HS512": hashlib.sha512}[
                 alg
             ]
-            mac = hmac.new(key.public_pem(), signing_input, digest).digest()
-            return f"{signing_input.decode('ascii')}.{_b64(mac)}"
-        return jwt.encode(claims, key.private, algorithm=alg, headers=headers)
+            mac = hmac.new(key.public_pem(), signing_input.encode("ascii"), digest).digest()
+            return f"{signing_input}.{_b64(mac)}"
+        if alg not in ("RS256", "ES256"):
+            raise ValueError(f"cannot sign with {alg}: use RS256, ES256, an HS* or none")
+        return f"{signing_input}.{_b64(key.sign(signing_input.encode('ascii')))}"
 
     def token_for(self, user: str, agent: str | None = None, **options: Any) -> str:
         """A token for one of the realm's users, as Keycloak would issue it. `agent` is the client
