@@ -38,8 +38,27 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
       KC_HEALTH_ENABLED: "true"
+      # Every token carries this address as its issuer (iss), whoever asks for it. Keystone reads
+      # the discovery document and the keys from http://keycloak:8080 instead; with dynamic
+      # backchannel URLs Keycloak answers that request with its own address in jwks_uri.
+      KC_HOSTNAME: "http://localhost:${KEYCLOAK_PORT:-8180}"
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      # DEVELOPMENT ONLY. The realm file (keycloak/realm-keystone.json) holds ${NAME} placeholders
+      # for these, and Keycloak fills them from its environment when it imports the realm. The
+      # defaults repeat .env.example; tests/unit/test_dev_secrets.py checks that they agree.
+      ALICE_PASSWORD: "${ALICE_PASSWORD:-alice-dev-password}"
+      OLIVIA_PASSWORD: "${OLIVIA_PASSWORD:-olivia-dev-password}"
+      LENA_PASSWORD: "${LENA_PASSWORD:-lena-dev-password}"
+      BOB_PASSWORD: "${BOB_PASSWORD:-bob-dev-password}"
+      ROOT_PASSWORD: "${ROOT_PASSWORD:-root-dev-password}"
+      SUPPORT_AGENT_SECRET: "${SUPPORT_AGENT_SECRET:-support-agent-dev-secret}"
+      OPS_AGENT_SECRET: "${OPS_AGENT_SECRET:-ops-agent-dev-secret}"
+      KEYSTONE_CLI_SECRET: "${KEYSTONE_CLI_SECRET:-keystone-cli-dev-secret}"
     ports:
       - "${KEYCLOAK_PORT:-8180}:8080"
+    # The realm is imported only when it does not exist yet, and the development database lives
+    # in the container, so `make reset` (or `make down`) followed by `make up` imports the file
+    # again. Do not give Keycloak a volume for its data.
     volumes:
       - ./keycloak:/opt/keycloak/data/import:ro
     healthcheck:
