@@ -10,7 +10,7 @@ endef
 # Compose reads .env from the compose file's directory by default. Point it at the repo root instead.
 COMPOSE := docker compose -f deploy/docker-compose.yml $(if $(wildcard .env),--env-file .env)
 
-.PHONY: help setup lint fmt type test-unit test-int test-e2e test check gate up up-core down reset demo
+.PHONY: help setup lint fmt type test-unit test-int test-e2e test check ci-local gate up up-core down reset demo github-setup
 
 help:
 	@grep -E '^[a-z0-9-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | column -t -s $$'\t'
@@ -43,6 +43,16 @@ test: test-unit test-int ## unit plus integration
 
 check: up-core lint type test-unit test-int ## lint, types, unit, integration
 
+ci-local: up-core ## the same steps as CI, run locally
+	uv sync --locked
+	$(MAKE) lint type test-unit test-int
+	gitleaks git --no-banner --redact .
+	@req=$$(mktemp) && uv export --no-emit-project -o $$req >/dev/null \
+		&& $(RUN) pip-audit -r $$req --no-deps --disable-pip; rc=$$?; rm -f $$req; exit $$rc
+	docker build -t keystone:ci .
+	docker run --rm keystone:ci --help >/dev/null
+	docker run --rm keystone:ci version
+
 gate: up ## everything a phase gate runs: make gate PHASE=N
 	@test -n "$(PHASE)" || { echo "usage: make gate PHASE=N" >&2; exit 2; }
 	$(MAKE) lint type
@@ -67,3 +77,8 @@ reset: ## stop the stack and remove its volumes
 
 demo: ## run the scripted agent demo
 	@echo "not available until KS-108"
+
+github-setup: ## protect main and dev (needs a signed-in gh)
+	@gh auth status >/dev/null 2>&1 || { \
+		echo "gh is not signed in. Run 'gh auth login', then 'make github-setup'." >&2; exit 1; }
+	bash scripts/protect_branches.sh

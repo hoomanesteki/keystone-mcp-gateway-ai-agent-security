@@ -1,0 +1,172 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [dev, main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # The default shell on runners is `bash -e`. This one adds pipefail, which the
+    # annotation pipes below rely on.
+    shell: bash
+
+env:
+  # Fail instead of rewriting uv.lock.
+  UV_LOCKED: "1"
+
+jobs:
+  lint-type:
+    name: lint-type
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.1
+        with:
+          enable-cache: true
+      - run: uv sync
+      - name: ruff check
+        run: uv run ruff check --output-format=github .
+      - name: ruff format
+        run: |
+          uv run ruff format --check . 2>&1 \
+            | sed -E 's/^Would reformat: (.+)$/::error file=\1::ruff format would change this file/'
+      - name: mypy
+        run: |
+          uv run mypy \
+            | sed -E 's/^(.+):([0-9]+): error: (.*)$/::error title=mypy,file=\1,line=\2::\3/'
+
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.1
+        with:
+          enable-cache: true
+      - run: uv sync
+      - name: pytest
+        run: uv run pytest tests/unit tests/invariants -m "not services and not docker and not e2e and not slow"
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      # Mapped to the compose host ports, so the default settings work unchanged.
+      postgres:
+        image: postgres:16.15
+        env:
+          POSTGRES_DB: keystone
+          POSTGRES_USER: keystone
+          POSTGRES_PASSWORD: keystone
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U keystone -d keystone"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7.4.11
+        ports:
+          - 56379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.1
+        with:
+          enable-cache: true
+      - run: uv sync
+      - name: pytest
+        run: uv run pytest tests/integration tests/invariants -m "not e2e and not slow"
+
+  security:
+    name: security
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v10.3.1
+        with:
+          enable-cache: true
+      - run: uv sync
+      - name: install gitleaks
+        run: |
+          curl -sSfL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+      - name: gitleaks over full history
+        run: |
+          if ! gitleaks git --no-banner --redact --report-format json --report-path gitleaks.json .; then
+            jq -r '.[] | "::error file=\(.File),line=\(.StartLine)::\(.RuleID) in commit \(.Commit[0:8])"' gitleaks.json
+            exit 1
+          fi
+      - name: pip-audit
+        run: |
+          uv export --no-emit-project -o requirements-audit.txt
+          uv run pip-audit -r requirements-audit.txt --no-deps --disable-pip
+
+  docker:
+    name: docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: build
+        run: docker build -t keystone:ci .
+      - name: smoke
+        run: |
+          docker run --rm keystone:ci --help
+          docker run --rm keystone:ci version
+
+  commits:
+    name: commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: check commit subjects since main
+        run: |
+          if [ ! -f scripts/check_commit_msg.py ]; then
+            echo "scripts/check_commit_msg.py arrives with KS-006, nothing to check yet"
+            exit 0
+          fi
+          status=0
+          while IFS= read -r subject; do
+            python3 scripts/check_commit_msg.py "$subject" || status=1
+          done < <(git log origin/main..HEAD --no-merges --format=%s)
+          exit "$status"
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: prose lint
+        run: |
+          if [ ! -f scripts/lint_prose.py ]; then
+            echo "scripts/lint_prose.py arrives with KS-006, nothing to check yet"
+            exit 0
+          fi
+          python3 scripts/lint_prose.py
