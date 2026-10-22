@@ -51,8 +51,8 @@ the "Found" list at the end.
 
 | ID | Title | Pts | Status | PR | Notes |
 |---|---|---|---|---|---|
-| KS-301 | Keycloak realm for local identity | 3 | todo | | |
-| KS-302 | Fake IdP for tests | 2 | todo | | |
+| KS-301 | Keycloak realm for local identity | 3 | done | | `feat/ks-301-identity-fixtures`. Users have fixed ids, so a token's `sub` is the user name (`alice`). A `support` group exists although the story's group list omits it, because alice is "acme, support". Placeholders in the realm file are filled from Keycloak's environment; the dev values are in `.env.example` and repeated in compose, and `tests/unit/test_dev_secrets.py` fails if they differ. Verified by hand: an edited realm file is imported after `make reset && make up` but not after a plain `make up`. The runbook has the table of what to run. |
+| KS-302 | Fake IdP for tests | 2 | done | | Same branch. Paths match Keycloak's (`/realms/keystone/...`). The first RSA and EC keys are made once per test process because RSA generation takes 0.1 s. `make_token` can also forge `alg=none` and the HS256 key-confusion token for KS-303. `token_for(user)` mirrors the realm's users, and `tests/unit/test_realm.py` checks that. |
 | KS-303 | JWT validation to principal | 5 | todo | | |
 | KS-304 | MCP auth wiring and session binding | 5 | todo | | |
 | KS-305 | Credential vault | 5 | todo | | |
@@ -147,6 +147,7 @@ written and their dry runs pass.
 | Branch protection on `main` and `dev` | `make github-setup` | deferred: needs gh auth |
 | Milestones, labels and one issue per story | `make github-setup` | deferred: needs gh auth (dry run lists 79 stories, 10 phases, 301 points) |
 | GitHub release for `v0.0.1` | `scripts/publish_releases.sh v0.0.1` | deferred: needs gh auth |
+| First run of `.github/workflows/nightly.yml` | Run workflow in the Actions tab, or `gh workflow run nightly.yml` | deferred: needs gh auth. The same two commands (`make up`, `make test-e2e`) pass locally. |
 
 ## Found
 
