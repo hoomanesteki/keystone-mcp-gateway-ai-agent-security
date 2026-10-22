@@ -15,6 +15,7 @@ the "Found" list at the end.
 | KS-005 | Database layer and migrations | 3 | done | | `feat/ks-005-db`. CI runs `alembic upgrade head` before the integration tests. |
 | KS-006 | Docs skeleton and contributor rules | 2 | done | | `docs/ks-006-docs-skeleton`. Also adds `scripts/lint_prose.py` (planned for KS-907) and turns on the commits and docs CI jobs. |
 | KS-007 | Backlog import and traceability scripts | 5 | done | | `chore/ks-007-backlog-scripts`. Deferred: needs gh auth (the real import; only dry runs and a fake-gh test were run). |
+| KS-091 | Let the admin merge without a pull request | 1 | done | | `fix/ks-091-protection-admin-bypass`. Found at gate 0: `enforce_admins: true` would block the local merge flow once protection is applied. |
 
 ## Phase 1: MCP proxy core
 

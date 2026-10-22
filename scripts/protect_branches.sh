@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Protect main and dev: required status checks, no force push, no deletion, and no direct push
-# (changes arrive through pull requests, which need no approvals because there is one maintainer).
+# Protect main and dev: required status checks, no force push, no deletion, and pull requests
+# for everyone except repo admins. The maintainer is the only admin and merges story branches
+# locally once CI is green on the branch, so admins are not held to the pull request rule.
 #
 #   scripts/protect_branches.sh [--dry-run]
 #
 # Needs a signed-in GitHub CLI with admin rights on the repo. --dry-run prints the requests only.
-# Once this is on, release merges (dev into main) go through a pull request as well.
 set -euo pipefail
 
 # Keep in step with the job names in .github/workflows/ci.yml (a unit test compares them).
@@ -27,7 +27,7 @@ contexts="[${contexts%,}]"
 body=$(cat <<JSON
 {
   "required_status_checks": { "strict": true, "contexts": ${contexts} },
-  "enforce_admins": true,
+  "enforce_admins": false,
   "required_pull_request_reviews": { "required_approving_review_count": 0 },
   "restrictions": null,
   "required_linear_history": false,
