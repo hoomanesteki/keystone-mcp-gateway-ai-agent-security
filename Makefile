@@ -7,7 +7,10 @@ define pytest
 $(RUN) pytest $(1); rc=$$?; if [ $$rc -ne 0 ] && [ $$rc -ne 5 ]; then exit $$rc; fi
 endef
 
-.PHONY: help setup lint fmt type test-unit test-int test-e2e test check gate up down reset demo
+# Compose reads .env from the compose file's directory by default. Point it at the repo root instead.
+COMPOSE := docker compose -f deploy/docker-compose.yml $(if $(wildcard .env),--env-file .env)
+
+.PHONY: help setup lint fmt type test-unit test-int test-e2e test check gate up up-core down reset demo
 
 help:
 	@grep -E '^[a-z0-9-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | column -t -s $$'\t'
@@ -34,11 +37,11 @@ test-int: ## integration tests (needs postgres and redis)
 	@$(call pytest,tests/integration tests/invariants -m "not e2e and not slow")
 
 test-e2e: ## end-to-end tests against the compose stack
-	@echo "not available until KS-002"
+	@$(call pytest,tests/e2e -m e2e)
 
 test: test-unit test-int ## unit plus integration
 
-check: lint type test-unit test-int ## lint, types, unit, integration
+check: up-core lint type test-unit test-int ## lint, types, unit, integration
 
 gate: up ## everything a phase gate runs: make gate PHASE=N
 	@test -n "$(PHASE)" || { echo "usage: make gate PHASE=N" >&2; exit 2; }
@@ -50,14 +53,17 @@ gate: up ## everything a phase gate runs: make gate PHASE=N
 		k=$$((k+1)); \
 	done
 
-up: ## start the local stack
-	@echo "not available until KS-002"
+up: ## start the local stack and wait until every service is healthy
+	$(COMPOSE) up -d --wait
+
+up-core: ## start only postgres and redis
+	$(COMPOSE) up -d --wait postgres redis
 
 down: ## stop the local stack
-	@echo "not available until KS-002"
+	$(COMPOSE) down
 
 reset: ## stop the stack and remove its volumes
-	@echo "not available until KS-002"
+	$(COMPOSE) down -v
 
 demo: ## run the scripted agent demo
 	@echo "not available until KS-108"
