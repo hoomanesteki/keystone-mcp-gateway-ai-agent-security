@@ -33,8 +33,8 @@ class StaticRegistry:
             if upstream.tenant is None or upstream.url is None:
                 raise ValueError(f"upstream {upstream.id!r} needs a tenant and a url")
             try:
-                client = await pool.get(upstream.id)
-                listed = await client.list_tools()
+                async with pool.lease(upstream.id) as client:
+                    listed = await client.list_tools()
             except Reject as reject:
                 log.warning("upstream_unavailable", upstream=upstream.id, code=reject.code.value)
                 continue

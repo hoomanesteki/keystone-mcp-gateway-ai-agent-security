@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import hashlib
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager
 from types import TracebackType
 from typing import Any, Literal, Protocol, Self
 
@@ -300,19 +300,35 @@ def headers_fingerprint(headers: Mapping[str, SecretStr]) -> str:
     return hashlib.sha256(canonical_json(pairs)).hexdigest()
 
 
+class _Entry:
+    """A pooled client and the number of calls running on it."""
+
+    __slots__ = ("client", "closed", "evicted", "in_flight")
+
+    def __init__(self, client: UpstreamClient) -> None:
+        self.client = client
+        self.in_flight = 0
+        self.evicted = False
+        self.closed = False
+
+
 class UpstreamPool:
     """Clients keyed by (upstream id, header fingerprint), least recently used out first.
 
     Use it as `async with UpstreamPool(factory) as pool` in the one task that lives as long as
     the app (the lifespan). Its task group owns the sessions' background tasks.
 
-    Evicting a client closes it. A call still running on it fails with UPSTREAM_ERROR.
+    A caller that makes a call takes the client with `lease`, which counts the call as in flight.
+    An evicted client leaves the pool at once, so no new call can get it, but it is closed only
+    after its last in-flight call has finished (KS-192). Closing the pool closes every client,
+    leased or not, because the app is going away.
     """
 
     def __init__(self, factory: ClientFactory, max_clients: int = MAX_POOL_CLIENTS) -> None:
         self._factory = factory
         self._max = max_clients
-        self._clients: OrderedDict[tuple[str, str], UpstreamClient] = OrderedDict()
+        self._clients: OrderedDict[tuple[str, str], _Entry] = OrderedDict()
+        self._draining: set[_Entry] = set()  # evicted, with calls still running
         self._stack: AsyncExitStack | None = None
         self._task_group: TaskGroup | None = None
 
@@ -328,10 +344,11 @@ class UpstreamPool:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        clients, self._clients = list(self._clients.values()), OrderedDict()
+        entries = [*self._clients.values(), *self._draining]
+        self._clients, self._draining = OrderedDict(), set()
         with anyio.CancelScope(shield=True):
-            for client in clients:
-                await self._close(client)
+            for entry in entries:
+                await self._close(entry)
         stack, self._stack, self._task_group = self._stack, None, None
         if stack is not None:
             await stack.__aexit__(exc_type, exc, tb)
@@ -339,27 +356,69 @@ class UpstreamPool:
     async def get(
         self, upstream_id: str, headers: Mapping[str, SecretStr] | None = None
     ) -> UpstreamClient:
+        """The client for one upstream and one set of headers. For a call, use `lease`: a client
+        taken with `get` can be closed by an eviction while it is in use."""
+        entry, evicted = self._checkout(upstream_id, headers)
+        await self._retire(evicted)
+        return entry.client
+
+    @asynccontextmanager
+    async def lease(
+        self, upstream_id: str, headers: Mapping[str, SecretStr] | None = None
+    ) -> AsyncIterator[UpstreamClient]:
+        entry, evicted = self._checkout(upstream_id, headers)
+        # No await between the checkout and the count, so an eviction cannot slip in between.
+        entry.in_flight += 1
+        try:
+            await self._retire(evicted)
+            yield entry.client
+        finally:
+            await self._release(entry)
+
+    def _checkout(
+        self, upstream_id: str, headers: Mapping[str, SecretStr] | None
+    ) -> tuple[_Entry, list[_Entry]]:
+        """Find or build the client and name the ones this pushes out. It never awaits, so the
+        pool's bookkeeping cannot interleave with another caller's."""
         if self._task_group is None:
             raise RuntimeError("the upstream pool is not running")
         secrets = headers or {}
         key = (upstream_id, headers_fingerprint(secrets))
-        client = self._clients.get(key)
-        if client is not None:
+        entry = self._clients.get(key)
+        if entry is not None:
             self._clients.move_to_end(key)
-            return client
+            return entry, []
         plain = {name: value.get_secret_value() for name, value in secrets.items()}
-        client = self._factory(upstream_id, plain, self._task_group)
-        self._clients[key] = client
+        entry = _Entry(self._factory(upstream_id, plain, self._task_group))
+        self._clients[key] = entry
         evicted = [
             self._clients.popitem(last=False)[1] for _ in range(len(self._clients) - self._max)
         ]
         for old in evicted:
-            await self._close(old)
-        return client
+            old.evicted = True
+        return entry, evicted
 
-    async def _close(self, client: UpstreamClient) -> None:
+    async def _retire(self, evicted: list[_Entry]) -> None:
+        for entry in evicted:
+            if entry.in_flight > 0:
+                self._draining.add(entry)
+            else:
+                await self._close(entry)
+
+    async def _release(self, entry: _Entry) -> None:
+        # Shielded: a cancelled call must still hand the client back.
+        with anyio.CancelScope(shield=True):
+            entry.in_flight -= 1
+            if entry.evicted and entry.in_flight == 0:
+                self._draining.discard(entry)
+                await self._close(entry)
+
+    async def _close(self, entry: _Entry) -> None:
+        if entry.closed:
+            return
+        entry.closed = True
         try:
-            await client.aclose()
+            await entry.client.aclose()
         except Exception as exc:
             log.warning("upstream_close_failed", error=type(exc).__name__)
 
