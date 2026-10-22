@@ -53,6 +53,12 @@ def _embedded_ipv4(ip: IPAddress) -> IPAddress | None:
 
 def blocked_reason(ip: IPAddress) -> str | None:
     """Why Keystone may not connect to this address, or None when it may."""
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        # The verdict of the IPv4 address inside is the whole answer. The ::ffff:0:0/96 block
+        # counts as reserved on some Python 3.12 patch releases and not on others, so the outer
+        # flags must not decide.
+        reason = blocked_reason(ip.ipv4_mapped)
+        return None if reason is None else f"{reason} (inside {ip})"
     inner = _embedded_ipv4(ip)
     if inner is not None:
         reason = blocked_reason(inner)
