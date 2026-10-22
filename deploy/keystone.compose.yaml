@@ -11,3 +11,9 @@ upstreams:
   - {id: files, tenant: acme, transport: http, url: "http://files-mcp:8102/mcp"}
   - {id: bank, tenant: acme, transport: http, url: "http://bank-mcp:8103/mcp"}
   - {id: echo, tenant: acme, transport: http, url: "http://echo-mcp:8104/mcp"}
+  # A demo MCP server that Keystone starts itself and talks to over stdin and stdout. The working
+  # directory of the container is /app, where the image keeps `examples`.
+  - id: echostd
+    tenant: acme
+    transport: stdio
+    command: [python, -m, examples.upstreams.echo_server, --transport, stdio]

@@ -191,6 +191,8 @@ services:
       KEYSTONE_ENV: dev
       # The demo upstreams are on the compose network, so the SSRF guard (KS-202) must allow them.
       KEYSTONE_ALLOW_PRIVATE_UPSTREAMS: "true"
+      # Seconds between upstream health probes. scripts/smoke/phase_2.sh sets a short one.
+      KEYSTONE_HEALTH__INTERVAL_S: "${KEYSTONE_HEALTH_INTERVAL_S:-30}"
       KEYSTONE_CONFIG: /etc/keystone/keystone.yaml
       KEYSTONE_DATABASE_URL: postgresql+asyncpg://keystone:keystone@postgres:5432/keystone
       KEYSTONE_REDIS_URL: redis://redis:6379/0
