@@ -88,6 +88,8 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync
+      - name: migrate
+        run: uv run alembic upgrade head
       - name: pytest
         run: uv run pytest tests/integration tests/invariants -m "not e2e and not slow"
 
