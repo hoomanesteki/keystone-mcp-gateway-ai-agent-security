@@ -202,8 +202,8 @@ must read keys by name and not compare the whole dict. See ADR-0007.
   (`Host` must be `127.0.0.1:*`, `localhost:*` or `[::1]:*`) only when it is built with a loopback
   `host`. A manager built by hand has no host check unless it is given
   `TransportSecuritySettings`. KS-106 passes explicit settings.
-- **Types.** The SDK ships `py.typed`. `ctx.request` is `Any`, so every use needs a `cast`. Handler
-  parameters take `ServerRequestContext` without type arguments.
+- **Types.** The SDK ships `py.typed`. `ctx.request` is `Any`, so every use needs a `cast`. Under
+  mypy strict, annotate handlers as `ServerRequestContext[Any, Any]` (the gateway does).
 - **Logging.** Constructing an `MCPServer` installs a Rich handler on the root logger at INFO
   (`configure_logging`, controlled by its `log_level` argument). That is a global side effect.
   The demo upstreams pass `log_level="WARNING"`. The low-level `Server` does not touch logging.
@@ -212,5 +212,7 @@ must read keys by name and not compare the whole dict. See ADR-0007.
 
 - Resumability with an event store, and SSE streaming of progress.
 - The stdio server transport of the low-level `Server` (the gateway only needs HTTP).
-- Behavior with a real MCP client other than this SDK's, for example MCP Inspector. That is on
-  the Phase 1 checkpoint list.
+- The MCP Inspector browser UI. I did run the Inspector 2.12.0 command line (a TypeScript client)
+  against Keystone on 2026-10-21: `tools/list` returned the 12 namespaced tools and
+  `tools/call echo__echo` succeeded, with one `ok` record in the audit log. So a client that is
+  not this SDK completes the handshake and reads the results.
