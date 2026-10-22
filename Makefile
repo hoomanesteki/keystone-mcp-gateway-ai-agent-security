@@ -75,8 +75,8 @@ gate: up ## everything a phase gate runs: make gate PHASE=N
 		k=$$((k+1)); \
 	done
 
-up: ## start the local stack and wait until every service is healthy
-	$(COMPOSE) up -d --wait
+up: ## build and start the local stack and wait until every service is healthy
+	$(COMPOSE) up -d --build --wait
 
 up-core: ## start only postgres and redis
 	$(COMPOSE) up -d --wait postgres redis
@@ -87,8 +87,8 @@ down: ## stop the local stack
 reset: ## stop the stack and remove its volumes
 	$(COMPOSE) down -v
 
-demo: ## run the scripted agent demo
-	@echo "not available until KS-108"
+demo: up ## start the stack, reset the upstreams and run the scripted agent
+	bash scripts/smoke/phase_1.sh
 
 github-setup: ## protect main and dev, then import the backlog (needs a signed-in gh)
 	@gh auth status >/dev/null 2>&1 || { \
