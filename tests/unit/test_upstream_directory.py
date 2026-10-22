@@ -139,7 +139,7 @@ async def test_a_list_that_never_ends_is_an_error_and_not_a_short_list() -> None
 async def test_a_reject_raised_inside_a_session_call_is_not_rewritten() -> None:
     client = HttpUpstreamClient("http://x/mcp", {}, None, upstream_id="mail")  # type: ignore[arg-type]
 
-    async def current() -> Any:
+    async def current(attempts: int | None = None) -> Any:
         return object()
 
     async def action(_: Any) -> None:

@@ -40,12 +40,12 @@ the "Found" list at the end.
 | KS-201 | Schema for upstreams, tools and sessions | 3 | done | | `feat/ks-201-registry-schema`. Migration 0002. `upstreams.id` is the primary key, so an upstream id is unique across tenants (with a unique `(tenant_id, id)` that the tools foreign key uses); KS-307 must pick a different slug for a second tenant's files server, or relax this. Adds `upstreams.source` (config or cli), `tools.last_seen_at`, and check constraints on every status. `cost_per_call_usd` is unconstrained NUMERIC so a float returns unchanged. `test_models_match_the_migrations` fails when a model changes without a migration. |
 | KS-202 | Upstream config, admin CLI and SSRF guard | 5 | done | | `feat/ks-202-upstream-config`. A config entry the registry cannot use (unknown tenant, URL refused by the guard) stops startup with every problem named and writes nothing. `keystone upstream remove` refuses a config upstream. Adds `keystone db upgrade` and `serve --migrate`, because the app now needs the registry tables at startup and compose never ran migrations. `upstream sync` arrives with KS-203. The guard checks at registration, so DNS rebinding is not covered (runbook says so). |
 | KS-203 | Tool discovery and sync | 5 | done | | `feat/ks-203-tool-sync`. `registry/sync.py` is the file to read first: a failed list changes no tool, the upstream's or anyone else's, and `sync_upstream` never raises. A changed definition is only reported until KS-205. `RegistryService` replaces `StaticRegistry` in the app; `static.py` stays for its Phase 1 unit tests. The service caches per tenant for `registry.cache_ttl_s` (2 s) so a CLI sync reaches a running gateway. `registry sync` and `upstream sync` exit 1 if any upstream failed. A tool list cut off at the page limit is now an error. |
-| KS-204 | Aggregated listing and routing | 3 | todo | | |
+| KS-204 | Aggregated listing and routing | 3 | done | | `feat/ks-204-aggregate`. The list and the routing were already complete after KS-203, so this story is tests plus `notifications/tools/list_changed`. SDK 2.3 supports it in the handshake era; details in `docs/spikes/mcp-proxy.md` section 6. |
 | KS-205 | Pinning and quarantine | 5 | todo | | |
 | KS-206 | Tool description screening | 3 | todo | | |
 | KS-207 | Session store in Redis | 3 | todo | | |
 | KS-208 | stdio upstreams | 3 | todo | | |
-| KS-209 | Upstream health | 2 | todo | | |
+| KS-209 | Upstream health | 2 | done | | Same branch as KS-204. Probe interval, timeout and thresholds are settings (`health.*`, env `KEYSTONE_HEALTH__...`). A probe now connects if no session exists, with one attempt and no backoff, so a restarted upstream is noticed. A refused call sets `dispatched` to false. `/readyz` gained `upstreams`, so the Phase 0 readiness test compares the other keys. |
 
 ## Phase 3: Identity and credentials
 

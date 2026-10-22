@@ -12,12 +12,13 @@ from keystone.audit.sink import InMemoryAuditSink
 from keystone.db.session import create_engine, make_sessionmaker
 from keystone.db.tenants import upsert_tenants
 from keystone.gateway.dispatch import UpstreamDispatcher
+from keystone.gateway.health import UpstreamHealth
 from keystone.gateway.pipeline import AuditSink, Dispatcher, Interceptor
 from keystone.gateway.server import Gateway, mount_mcp
 from keystone.gateway.sessions import InMemorySessionStore
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
 from keystone.gateway.wiring import PipelineDeps, build_pipeline
-from keystone.health import check_dependencies
+from keystone.health import check_dependencies, upstream_statuses
 from keystone.registry.config import apply_config_upstreams, tool_overrides
 from keystone.registry.repo import ToolRepo, UpstreamRepo
 from keystone.registry.service import RegistryService
@@ -41,7 +42,9 @@ def create_app(
     engine = create_engine(settings.database_url.get_secret_value())
     sessions = make_sessionmaker(engine)
     directory = UpstreamDirectory()
-    pool = UpstreamPool(directory_client_factory(directory))
+    pool = UpstreamPool(
+        directory_client_factory(directory, health_timeout_s=settings.health.timeout_s)
+    )
     syncer = RegistrySyncer(
         UpstreamRepo(sessions),
         ToolRepo(sessions),
@@ -51,12 +54,22 @@ def create_app(
         timeout_s=settings.registry.sync_timeout_s,
     )
     registry = RegistryService(syncer, cache_ttl_s=settings.registry.cache_ttl_s)
+    health = UpstreamHealth(
+        pool,
+        syncer.upstreams,
+        syncer.learn,
+        interval_s=settings.health.interval_s,
+        timeout_s=settings.health.timeout_s,
+        degraded_after=settings.health.degraded_after,
+        down_after=settings.health.down_after,
+    )
     audit = audit or InMemoryAuditSink()
-    dispatcher: Dispatcher = UpstreamDispatcher(pool)
+    dispatcher: Dispatcher = UpstreamDispatcher(pool, health)
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
     pipeline = build_pipeline(settings, PipelineDeps(dispatcher, audit), interceptors)
     gateway = Gateway(settings, registry, InMemorySessionStore(), pipeline)
+    registry.add_listener(gateway.notify_tools_changed)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -78,7 +91,7 @@ def create_app(
                 # and the periodic sync tries it again. It does not stop startup.
                 for report in await registry.sync_all():
                     log.info("startup_sync", **report.model_dump())
-                await stack.enter_async_context(background_sync(registry, settings))
+                await stack.enter_async_context(background_tasks(registry, health, settings))
                 await stack.enter_async_context(manager.run())
                 yield
         finally:
@@ -89,6 +102,7 @@ def create_app(
     app.state.engine = engine
     app.state.sessionmaker = sessions
     app.state.registry = registry
+    app.state.health = health
     app.state.gateway = gateway
     app.state.audit = audit
     manager = mount_mcp(app, gateway)
@@ -115,11 +129,24 @@ def create_app(
 
     @app.get("/readyz")
     async def readyz() -> JSONResponse:
-        results = await check_dependencies(settings)
+        results: dict[str, bool] = {}
+        statuses: dict[str, str] = {}
+
+        async def dependencies() -> None:
+            results.update(await check_dependencies(settings))
+
+        async def upstreams() -> None:
+            statuses.update(await upstream_statuses(syncer.upstreams))
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(dependencies)
+            group.start_soon(upstreams)
         ready = all(results.values())
         body = {
             "status": "ok" if ready else "unavailable",
             "dependencies": {name: "ok" if up else "unavailable" for name, up in results.items()},
+            # An upstream that is down does not make Keystone unready: the others still work.
+            "upstreams": dict(sorted(statuses.items())),
         }
         return JSONResponse(body, status_code=200 if ready else 503)
 
@@ -127,15 +154,18 @@ def create_app(
 
 
 @asynccontextmanager
-async def background_sync(registry: RegistryService, settings: Settings) -> AsyncIterator[None]:
-    """Run the periodic sync while the body of the `with` runs. Does nothing when the interval
-    is 0."""
-    interval = settings.registry.sync_interval_s
-    if interval <= 0:
-        yield
-        return
+async def background_tasks(
+    registry: RegistryService, health: UpstreamHealth, settings: Settings
+) -> AsyncIterator[None]:
+    """Run the periodic sync (unless its interval is 0), the watch for changes made by other
+    processes and the health probes (unless their interval is 0) while the body of the `with`
+    runs."""
     async with anyio.create_task_group() as group:
-        group.start_soon(registry.run_periodic, interval)
+        group.start_soon(registry.run_watch)
+        if settings.registry.sync_interval_s > 0:
+            group.start_soon(registry.run_periodic, settings.registry.sync_interval_s)
+        if settings.health.interval_s > 0:
+            group.start_soon(health.run)
         try:
             yield
         finally:
