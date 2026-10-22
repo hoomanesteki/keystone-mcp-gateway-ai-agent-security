@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1
+# One image for the four demo upstreams (mail, files, bank, echo). Compose picks the server
+# with `command`. Base images are pinned. See docs/adr/0002-dependency-pins.md.
+# Build from the repository root: docker build -f deploy/Dockerfile.upstreams .
+
+FROM python:3.12.15-slim-trixie AS build
+COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /usr/local/bin/uv
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+WORKDIR /app
+
+# The servers need the SDK and its dependencies, not the keystone package itself.
+COPY pyproject.toml uv.lock README.md LICENSE ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-install-project
+
+FROM python:3.12.15-slim-trixie AS runtime
+RUN useradd --system --uid 10001 --user-group --home-dir /nonexistent --no-create-home keystone
+COPY --from=build /app/.venv /app/.venv
+WORKDIR /app
+COPY examples ./examples
+ENV PATH="/app/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1
+USER keystone
+ENTRYPOINT ["python", "-m"]

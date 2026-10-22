@@ -64,7 +64,7 @@ check_untyped_defs = true
 warn_redundant_casts = true
 mypy_path = "src:scripts"
 explicit_package_bases = true
-files = ["src", "tests", "scripts"]
+files = ["src", "tests", "scripts", "examples"]
 
 # mypy cannot set `strict` per module, so these are the flags that `strict = true` turns on.
 [[tool.mypy.overrides]]

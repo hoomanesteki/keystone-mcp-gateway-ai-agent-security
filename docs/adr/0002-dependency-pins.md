@@ -29,8 +29,9 @@ file or listed with a different version.
 | jaegertracing/jaeger | 2.22.0 | `deploy/docker-compose.yml` (the v2 image; all-in-one is the retired v1 line) |
 | prom/prometheus | v3.15.1 | `deploy/docker-compose.yml` |
 | grafana/grafana | 13.2.4 | `deploy/docker-compose.yml` |
-| python | 3.12.15-slim-trixie | `Dockerfile` build and runtime stages |
-| ghcr.io/astral-sh/uv | 0.12.3 | `Dockerfile` (copies the uv binary) |
+| python | 3.12.15-slim-trixie | `Dockerfile` and `deploy/Dockerfile.upstreams`, build and runtime stages |
+| ghcr.io/astral-sh/uv | 0.12.3 | `Dockerfile` and `deploy/Dockerfile.upstreams` (copy the uv binary) |
+| keystone-upstreams | dev | built locally from `deploy/Dockerfile.upstreams`, never pulled; the tag is the compose service name for the build |
 
 ## CI actions and tools
 
