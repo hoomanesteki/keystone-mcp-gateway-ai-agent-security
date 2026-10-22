@@ -10,10 +10,18 @@ endef
 # Compose reads .env from the compose file's directory by default. Point it at the repo root instead.
 COMPOSE := docker compose -f deploy/docker-compose.yml $(if $(wildcard .env),--env-file .env)
 
-.PHONY: help setup lint fmt type test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo github-setup
+.PHONY: help prose commits setup lint fmt type test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo github-setup
 
 help:
 	@grep -E '^[a-z0-9-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | column -t -s $$'\t'
+
+prose: ## voice rules: banned words and em dashes
+	$(RUN) python scripts/lint_prose.py
+
+commits: ## check commit subjects since main
+	@status=0; while IFS= read -r subject; do \
+		python3 scripts/check_commit_msg.py "$$subject" || status=1; \
+	done < <(git log origin/main..HEAD --no-merges --format=%s); exit $$status
 
 setup: ## install dependencies and the pre-commit hook
 	uv sync
@@ -55,6 +63,7 @@ ci-local: up-core ## the same steps as CI, run locally
 	docker build -t keystone:ci .
 	docker run --rm keystone:ci --help >/dev/null
 	docker run --rm keystone:ci version
+	$(MAKE) commits prose
 
 gate: up ## everything a phase gate runs: make gate PHASE=N
 	@test -n "$(PHASE)" || { echo "usage: make gate PHASE=N" >&2; exit 2; }

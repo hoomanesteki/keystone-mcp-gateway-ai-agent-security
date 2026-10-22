@@ -59,9 +59,9 @@ select = ["E", "F", "I", "B", "UP", "ASYNC", "S", "SIM", "RUF"]
 python_version = "3.12"
 check_untyped_defs = true
 warn_redundant_casts = true
-mypy_path = "src"
+mypy_path = "src:scripts"
 explicit_package_bases = true
-files = ["src", "tests"]
+files = ["src", "tests", "scripts"]
 
 # mypy cannot set `strict` per module, so these are the flags that `strict = true` turns on.
 [[tool.mypy.overrides]]
@@ -92,6 +92,8 @@ extra_checks = true
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+# Scripts import each other by plain name, because they run as `python scripts/x.py`.
+pythonpath = ["scripts"]
 addopts = "--strict-markers"
 
 # Third-party packages that ship no type information.

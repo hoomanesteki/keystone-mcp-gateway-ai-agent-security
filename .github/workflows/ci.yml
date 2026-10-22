@@ -149,10 +149,6 @@ jobs:
           fetch-depth: 0
       - name: check commit subjects since main
         run: |
-          if [ ! -f scripts/check_commit_msg.py ]; then
-            echo "scripts/check_commit_msg.py arrives with KS-006, nothing to check yet"
-            exit 0
-          fi
           status=0
           while IFS= read -r subject; do
             python3 scripts/check_commit_msg.py "$subject" || status=1
@@ -166,9 +162,4 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: prose lint
-        run: |
-          if [ ! -f scripts/lint_prose.py ]; then
-            echo "scripts/lint_prose.py arrives with KS-006, nothing to check yet"
-            exit 0
-          fi
-          python3 scripts/lint_prose.py
+        run: python3 scripts/lint_prose.py
