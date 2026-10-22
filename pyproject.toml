@@ -1,0 +1,102 @@
+[project]
+name = "keystone"
+version = "0.0.1"
+description = "Self-hosted security gateway for AI agents: one MCP endpoint with identity, policy, approvals and audit."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Hooman Esteki", email = "esteki.net@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.20.0",
+    "anyio>=4.15.1",
+    "asyncpg>=0.32.0",
+    "fastapi>=0.159.1",
+    "pydantic-settings>=2.16.1",
+    "pyyaml>=6.0.3",
+    "redis>=8.1.0",
+    "sqlalchemy[asyncio]>=2.1.6",
+    "structlog>=26.1.0",
+    "typer>=0.27.3",
+    "uvicorn>=0.54.0",
+]
+
+[project.scripts]
+keystone = "keystone.admin.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "mypy>=2.4.0",
+    "pip-audit>=2.10.1",
+    "pre-commit>=4.7.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-github-actions-annotate-failures>=0.4.2",
+    "ruff>=0.17.1",
+    "types-pyyaml>=6.0.12.20260906",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "S", "SIM", "RUF"]
+
+# Tests and dev scripts call docker, git and gh with fixed arguments, so S603 and S607 are noise there.
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S603", "S607"]
+"scripts/**" = ["S603", "S607"]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+warn_redundant_casts = true
+mypy_path = "src:scripts"
+explicit_package_bases = true
+files = ["src", "tests", "scripts"]
+
+# mypy cannot set `strict` per module, so these are the flags that `strict = true` turns on.
+[[tool.mypy.overrides]]
+module = [
+    "keystone.core",
+    "keystone.core.*",
+    "keystone.gateway",
+    "keystone.gateway.*",
+    "keystone.policy",
+    "keystone.policy.*",
+    "keystone.audit",
+    "keystone.audit.*",
+]
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_unused_ignores = true
+warn_return_any = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+# Scripts import each other by plain name, because they run as `python scripts/x.py`.
+pythonpath = ["scripts"]
+addopts = "--strict-markers"
+
+# Third-party packages that ship no type information.
+[[tool.mypy.overrides]]
+module = ["asyncpg", "asyncpg.*"]
+ignore_missing_imports = true
