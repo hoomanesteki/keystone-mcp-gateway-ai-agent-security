@@ -1,0 +1,13 @@
+# Gitleaks reads this file from the repository root. It keeps the default rules and allows one
+# thing: a false positive in the JWT module, where the generic key rule read the EC curve check
+# `ec_key.curve, ec.SECP256R1` as a key followed by a secret. The rule, the file and the value
+# must all match, so a real secret anywhere else, or another finding in this file, is still caught.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "EC curve check in identity/jwt.py, not a key"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^src/keystone/identity/jwt\.py$''']
+regexes = ['''^ec\.SECP256R1$''']
