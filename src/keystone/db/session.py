@@ -1,6 +1,8 @@
 from collections.abc import AsyncIterator
+from typing import Any, cast
 
 from fastapi import Request
+from sqlalchemy import CursorResult, Result
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -24,3 +26,9 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     """FastAPI dependency. The sessionmaker is built at startup in the app lifespan."""
     async with request.app.state.sessionmaker() as session:
         yield session
+
+
+def affected(result: Result[Any]) -> int:
+    """How many rows an INSERT, UPDATE or DELETE touched. SQLAlchemy types `execute` as a plain
+    Result, which has no rowcount."""
+    return cast("CursorResult[Any]", result).rowcount

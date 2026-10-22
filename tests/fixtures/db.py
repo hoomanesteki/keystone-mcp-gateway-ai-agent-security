@@ -15,7 +15,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from keystone.settings import Settings
@@ -103,3 +103,13 @@ async def clean_db(test_database_url: str) -> AsyncIterator[None]:
     await truncate()
     yield
     await truncate()
+
+
+@pytest.fixture
+async def sessionmaker(
+    test_database_url: str, clean_db: None
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """A sessionmaker on its own engine, for repositories. Tables are truncated around the test."""
+    engine = create_async_engine(test_database_url, poolclass=NullPool)
+    yield async_sessionmaker(engine, expire_on_commit=False)
+    await engine.dispose()

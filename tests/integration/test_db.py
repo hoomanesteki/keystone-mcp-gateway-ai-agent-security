@@ -34,15 +34,46 @@ def test_migrations_up_down(clean_env: None) -> None:
         config = alembic_config(url)
 
         command.upgrade(config, "head")
-        assert asyncio.run(table_names(url)) == {"alembic_version", "tenants"}
+        assert asyncio.run(table_names(url)) == {
+            "alembic_version",
+            "tenants",
+            "upstreams",
+            "tools",
+            "sessions",
+        }
 
         command.downgrade(config, "base")
         assert asyncio.run(table_names(url)) == {"alembic_version"}
 
         command.upgrade(config, "head")
         assert "tenants" in asyncio.run(table_names(url))
+        command.downgrade(config, "0001")
+        assert asyncio.run(table_names(url)) == {"alembic_version", "tenants"}
     finally:
         drop_database(admin_url, "keystone_migrations_test")
+
+
+def test_models_match_the_migrations(test_database_url: str) -> None:
+    """The migrations are written by hand, so a model change without one shows up here."""
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    from keystone.db.models import Base
+
+    async def differences() -> list[object]:
+        engine = create_async_engine(test_database_url, poolclass=NullPool)
+        try:
+            async with engine.connect() as connection:
+
+                def compare(sync_connection: object) -> list[object]:
+                    context = MigrationContext.configure(sync_connection)  # type: ignore[arg-type]
+                    return list(compare_metadata(context, Base.metadata))
+
+                return await connection.run_sync(compare)
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(differences()) == []
 
 
 async def table_names(url: str) -> set[str]:

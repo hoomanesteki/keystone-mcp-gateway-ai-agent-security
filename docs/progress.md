@@ -37,7 +37,7 @@ the "Found" list at the end.
 | KS-191 | Pipeline refuses to dispatch without an allow decision | 1 | done | | `fix/ks-191-pipeline-hardening`. Dispatch only when `decision.effect` is `allow`, or `require_approval` with `approval_id` set; otherwise `KS_DENIED` with reason `no-decision`. The Phase 6 approval interceptor must set `approval_id` only after a successful `consume`. |
 | KS-192 | Pool eviction waits for in-flight calls | 2 | done | | Same branch. `UpstreamPool.lease()` counts calls in flight; an evicted client leaves the pool at once and closes after its last call. |
 | KS-193 | Rejection meta on the MCP result | 1 | done | | Same branch. `to_tool_result` returns `RejectionResult` (a `ToolResult` subclass, contract unchanged); only that type puts its `keystone/*` keys on the result-level `_meta`. The block copy stays. |
-| KS-201 | Schema for upstreams, tools and sessions | 3 | todo | | |
+| KS-201 | Schema for upstreams, tools and sessions | 3 | done | | `feat/ks-201-registry-schema`. Migration 0002. `upstreams.id` is the primary key, so an upstream id is unique across tenants (with a unique `(tenant_id, id)` that the tools foreign key uses); KS-307 must pick a different slug for a second tenant's files server, or relax this. Adds `upstreams.source` (config or cli), `tools.last_seen_at`, and check constraints on every status. `cost_per_call_usd` is unconstrained NUMERIC so a float returns unchanged. `test_models_match_the_migrations` fails when a model changes without a migration. |
 | KS-202 | Upstream config, admin CLI and SSRF guard | 5 | todo | | |
 | KS-203 | Tool discovery and sync | 5 | todo | | |
 | KS-204 | Aggregated listing and routing | 3 | todo | | |
