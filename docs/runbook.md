@@ -84,6 +84,10 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_REGISTRY__SYNC_INTERVAL_S` | `300` | Seconds between syncs of every upstream. `0` turns the timer off (the startup sync and the CLI still run). Also `registry.sync_interval_s` in the YAML. |
 | `KEYSTONE_REGISTRY__SYNC_TIMEOUT_S` | `20` | The longest one upstream's sync may take, connecting included. |
 | `KEYSTONE_REGISTRY__CACHE_TTL_S` | `2` | How long the gateway keeps its in-memory copy of a tenant's tools. A sync run by the CLI reaches a running gateway after this long at most. |
+| `KEYSTONE_HEALTH__INTERVAL_S` | `30` | Seconds between health probes of every upstream. `0` turns them off, and no upstream is then marked down. Also `health.interval_s` in the YAML. |
+| `KEYSTONE_HEALTH__TIMEOUT_S` | `3` | A probe slower than this has failed. |
+| `KEYSTONE_HEALTH__DEGRADED_AFTER` | `1` | Consecutive failed probes before an upstream is `degraded`. |
+| `KEYSTONE_HEALTH__DOWN_AFTER` | `3` | Consecutive failed probes before it is `down`. Not less than `DEGRADED_AFTER`. |
 | `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is, until real authentication arrives in Phase 3. Refused when `KEYSTONE_ENV=prod`. |
 
 Two sections come from the YAML file only: `tenants` and `upstreams` (see `keystone.example.yaml`).
@@ -145,6 +149,30 @@ the upstream's `last_error` and changes no tool. Only a complete list can show t
 gone. A failure on one upstream does not touch any other upstream, and startup carries on: the
 upstream's tools stay as they were and the timer tries it again at the next round. `keystone
 upstream list` shows the error under the row.
+
+### Health
+
+Every `health.interval_s` Keystone asks each live upstream for its first page of tools, with a
+`health.timeout_s` limit. A failed probe makes the upstream `degraded`, and `health.down_after`
+failed probes in a row make it `down`. One good probe makes it `up` again. The probes go on while
+an upstream is down, which is how it comes back. With the defaults an upstream that stops
+answering is `down` after about 90 seconds.
+
+A call to a `down` upstream is refused at once with `KS_UPSTREAM_ERROR` ("upstream bank is down")
+and is not sent. Its audit record shows `dispatched: false`. The tools of a `down` upstream stay
+in the list, because the upstream may be back before the next `tools/list`.
+
+`GET /readyz` has an `upstreams` object next to `dependencies`:
+`{"upstreams": {"bank": "down", "mail": "up"}}`. An upstream that is down does not change the HTTP
+status. Only Postgres and Redis do.
+
+### Telling clients about changes
+
+When a sync changes which tools a tenant can see (a tool appears, disappears or changes
+definition), Keystone sends `notifications/tools/list_changed` to that tenant's open sessions. A
+change made by the CLI in another process is noticed within `registry.cache_ttl_s`. Only a client
+that keeps the standalone GET stream open receives it; others see the change at their next
+`tools/list`.
 
 Without `--tenant`, `add` uses the config's only tenant, and fails when the config names none or
 several.

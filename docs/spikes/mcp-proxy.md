@@ -208,6 +208,27 @@ must read keys by name and not compare the whole dict. See ADR-0007.
   (`configure_logging`, controlled by its `log_level` argument). That is a global side effect.
   The demo upstreams pass `log_level="WARNING"`. The low-level `Server` does not touch logging.
 
+## 6. Telling clients the tool list changed (KS-204)
+
+KS-204 asked whether the SDK can send `notifications/tools/list_changed` from the server on
+streamable HTTP. It can, in the handshake era, with two conditions.
+
+- The capability must be advertised. `Server.create_initialization_options()` takes a
+  `NotificationOptions(tools_changed=True)`, and the session manager calls it with no arguments,
+  so the gateway subclasses `Server` and overrides the method to pass the option
+  (`KeystoneServer`). A client then sees `capabilities.tools.listChanged == true`.
+- The notification goes out on the connection's standalone channel. `ctx.session` in a handler
+  is a new `ServerSession` for every request, but it wraps the long-lived connection, so a
+  session kept from an earlier request can still call `send_tool_list_changed()` later. The
+  gateway keeps the last one per `Mcp-Session-Id`, bounded and dropped when a send fails.
+  Over HTTP the notification reaches only a client that holds the standalone GET stream open. The
+  SDK's own client does. One that does not hears nothing and learns of the change at its next
+  `tools/list`.
+
+In the modern era change notifications travel only on a `subscriptions/listen` stream, which the
+gateway does not serve (it refuses that era, ADR-0003). The test is
+`tests/integration/test_aggregate.py::test_open_sessions_hear_that_the_tool_list_changed`.
+
 ## What I did not test
 
 - Resumability with an event store, and SSE streaming of progress.

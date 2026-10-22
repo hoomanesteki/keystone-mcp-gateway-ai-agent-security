@@ -28,3 +28,11 @@ registry:
   sync_interval_s: 300   # 0 turns the timer off
   sync_timeout_s: 20
   cache_ttl_s: 2
+
+# Probes of the upstreams. An upstream that fails `down_after` probes in a row is refused calls
+# until a probe succeeds. All four can be set with KEYSTONE_HEALTH__<NAME>.
+health:
+  interval_s: 30   # 0 turns the probes off
+  timeout_s: 3
+  degraded_after: 1
+  down_after: 3
