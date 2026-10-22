@@ -31,6 +31,7 @@ file or listed with a different version.
 | grafana/grafana | 13.2.4 | `deploy/docker-compose.yml` |
 | python | 3.12.15-slim-trixie | `Dockerfile` and `deploy/Dockerfile.upstreams`, build and runtime stages |
 | ghcr.io/astral-sh/uv | 0.12.3 | `Dockerfile` and `deploy/Dockerfile.upstreams` (copy the uv binary) |
+| keystone | dev | built locally from `Dockerfile`, never pulled; compose names the built image |
 | keystone-upstreams | dev | built locally from `deploy/Dockerfile.upstreams`, never pulled; the tag is the compose service name for the build |
 
 ## CI actions and tools

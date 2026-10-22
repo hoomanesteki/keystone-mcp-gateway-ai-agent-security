@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -62,6 +63,22 @@ def create_app(
     app.state.gateway = gateway
     app.state.audit = audit
     manager = mount_mcp(app, gateway)
+
+    if settings.env != "prod" and isinstance(audit, InMemoryAuditSink):
+        sink = audit
+
+        @app.get("/_dev/audit")
+        async def dev_audit() -> dict[str, Any]:
+            """How many calls the in-memory audit sink holds, for the Phase 1 demo. The admin API
+            replaces it in Phase 5. It is not mounted in prod."""
+            recent = sink.records[-50:]
+            return {
+                "count": len(sink.records),
+                "recent": [
+                    {"call_id": r["call_id"], "tool": r["tool"], "outcome": r["outcome"]}
+                    for r in recent
+                ],
+            }
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

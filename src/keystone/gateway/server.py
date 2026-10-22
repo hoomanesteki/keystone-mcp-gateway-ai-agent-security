@@ -36,6 +36,7 @@ from keystone.settings import Settings
 log = structlog.get_logger()
 
 SESSION_HEADER = "mcp-session-id"
+CALL_ID_KEY = "keystone/call_id"
 MAX_NAME_IN_MESSAGE = 100
 MAX_NAME_IN_AUDIT = 200
 
@@ -124,12 +125,16 @@ def unknown_tool(name: str, principal: Principal) -> ToolRef:
 
 
 def to_call_tool_result(result: ToolResult, call_id: str) -> types.CallToolResult:
+    """The wire form. The result-level _meta is Keystone's own, never the upstream's, and it
+    names the call so an agent can quote it to whoever reads the audit log."""
+    meta = {CALL_ID_KEY: call_id}
     try:
         return types.CallToolResult.model_validate(
             {
                 "content": result.content,
                 "structuredContent": result.structured_content,
                 "isError": result.is_error,
+                "_meta": meta,
             }
         )
     except ValidationError:

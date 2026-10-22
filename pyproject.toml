@@ -54,8 +54,9 @@ target-version = "py312"
 select = ["E", "F", "I", "B", "UP", "ASYNC", "S", "SIM", "RUF"]
 
 # Tests and dev scripts call docker, git and gh with fixed arguments, so S603 and S607 are noise there.
+# Tests also pass made-up tokens and keys, so S105 and S106 are noise too.
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S603", "S607"]
+"tests/**" = ["S101", "S105", "S106", "S603", "S607"]
 "scripts/**" = ["S603", "S607"]
 
 [tool.mypy]

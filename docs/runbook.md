@@ -4,16 +4,19 @@ How to run the local stack and what each part listens on. This file grows with t
 
 ## Local stack
 
-`make up` starts Postgres, Redis, Keycloak, Jaeger, Prometheus and Grafana and waits until every
-container reports healthy. Cold start takes about 30 seconds on a laptop with warm images.
+`make up` builds and starts Postgres, Redis, Keycloak, Jaeger, Prometheus, Grafana, the four demo
+upstreams and Keystone, and waits until every container reports healthy. Cold start takes about
+30 seconds on a laptop with warm images. The first build of the two local images takes longer.
 
 | Command | What it does |
 |---|---|
 | `make up` | Start the full stack and wait for health |
 | `make up-core` | Start Postgres and Redis only (what `make check` needs) |
+| `make demo` | `make up`, reset the upstreams, run the scripted agent through Keystone and print its transcript |
 | `make down` | Stop the stack and keep its data |
 | `make reset` | Stop the stack and delete its volumes |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
+| `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit count is off |
 
 ## Host ports
 
@@ -22,7 +25,7 @@ Tests never use these ports. They start their own services on free ports.
 
 | Service | Host port | Notes |
 |---|---|---|
-| Keystone | 8080 | `keystone serve` (not in compose yet). MCP endpoint: `http://localhost:8080/mcp` |
+| Keystone | 8080 | compose service `keystone` (or `keystone serve`). MCP endpoint: `http://localhost:8080/mcp` |
 | Postgres | 55432 | database, user and password are all `keystone` |
 | Redis | 56379 | tests use db 15 |
 | Keycloak | 8180 | admin console login `admin` / `admin`, realm `keystone` |
@@ -95,7 +98,12 @@ Phase 1 has no authentication: whoever can reach the port acts as the dev princi
 keep it on localhost. With `KEYSTONE_ENV=prod` there is no dev principal and the endpoint answers
 every request with HTTP 401 until Phase 3.
 
-A call that Keystone refuses (unknown tool, invalid arguments) comes back as a normal result with
+`GET /_dev/audit` returns how many calls the in-memory audit log holds and the last 50. It exists
+for the Phase 1 demo, is not mounted when `KEYSTONE_ENV=prod`, and goes away when the admin API
+arrives in Phase 5.
+
+Every result carries `keystone/call_id` in its `_meta`. A call that Keystone refuses (unknown
+tool, invalid arguments) comes back as a normal result with
 `isError` set. Its text starts with `[keystone:<CODE>] call <id>`, and the machine-readable copy is
 in the `_meta` of the first content block (ADR-0007).
 
@@ -106,6 +114,9 @@ a 1 second limit each and returns 503 if either is down.
 
 | Symptom | Check |
 |---|---|
+| `make demo` says it cannot reset an upstream | The stack is down. Run `make up`. |
+| An agent gets `Unsupported protocol version` | It pinned the `2026-07-28` version. Use the default mode or `mode="legacy"`. |
+| `421 Invalid Host header` from `/mcp` | The `Host` is not in `KEYSTONE_ALLOWED_HOSTS`. Add it, for example `keystone:*`. |
 | `make up` times out on Keycloak | `docker compose -f deploy/docker-compose.yml logs keycloak`. First start imports the realm and can take 60 seconds on a slow disk. |
 | Port already in use | Another process holds the port. Set a different one in `.env`. |
 | `make check` cannot reach Postgres | Run `make up-core`, then `docker compose -f deploy/docker-compose.yml ps`. |

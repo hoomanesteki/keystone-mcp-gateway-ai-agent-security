@@ -27,8 +27,8 @@ the "Found" list at the end.
 | KS-104 | Demo upstreams: mail, files, bank, echo | 5 | done | | `feat/ks-104-demo-upstreams`. Servers use `MCPServer` (FastMCP is gone in mcp 2.x). Every `/_state` also lists the tools called, which the Phase 2 routing test needs. Compose services are `mail-mcp`, `files-mcp`, `bank-mcp`, `echo-mcp`; the built image is tagged `keystone-upstreams:dev` because the pin test requires a tag on every service. |
 | KS-105 | Upstream client and session pool | 5 | done | | `feat/ks-105-upstream-client`. Each client keeps its session in one background task, owned by the pool's task group. A call is resent only after `Session not found` (refused before it ran), never after a dropped connection. `health()` lists tools, because `ping` is gone in the newer protocol era. |
 | KS-106 | Gateway MCP server | 5 | done | | `feat/ks-106-gateway-server`. Serves the handshake era only (ADR-0003). `ToolResult` has no result-level meta, so a rejection's `_meta` is on its text block (ADR-0007 notes it). Settings gain `upstreams`, `dev_principal` (refused in prod, where `/mcp` answers 401) and `allowed_hosts`. `Pipeline.reject` audits a call to an unknown tool. An `upstreams` entry may omit tenant and url at load time, so the Phase 0 settings test keeps its input; the registry refuses it at startup. |
-| KS-107 | Scripted agent, equivalence and first invariants | 3 | todo | | |
-| KS-108 | `make demo` for Phase 1 | 2 | todo | | |
+| KS-107 | Scripted agent, equivalence and first invariants | 3 | done | | `feat/ks-107-scripted-agent`. Every result now carries `keystone/call_id` in its `_meta` so a transcript can quote it. The equivalence test normalizes nothing: no result holds a timestamp or a random id. |
+| KS-108 | `make demo` for Phase 1 | 2 | done | | Same branch as KS-107. The demo prints an audit count, so `GET /_dev/audit` exposes the in-memory sink in dev and test (removed with the admin API in Phase 5). Compose gains the `keystone` service; `make up` now passes `--build`. |
 
 ## Phase 2: Registry, multi-upstream and pinning
 
