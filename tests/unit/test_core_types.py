@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from keystone.core.errors import Code, Reject, to_tool_result
+from keystone.core.errors import Code, Reject, RejectionResult, to_tool_result
 from keystone.core.ids import new_id
 from keystone.core.types import (
     RISK_LEVEL,
@@ -120,3 +120,14 @@ def test_new_id_is_a_sortable_ulid() -> None:
     assert len(set(ids)) == len(ids)
     assert ids == sorted(ids)
     assert set("".join(ids)) <= set("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+
+
+@pytest.mark.phase(2)
+def test_a_rejection_result_keeps_the_meta_the_block_carries() -> None:
+    reject = Reject(Code.QUARANTINED, "changed", {"keystone/reason": "pinned", "note": "x"})
+
+    result = to_tool_result(reject, "01JX")
+
+    assert isinstance(result, RejectionResult)
+    assert result.meta == result.content[0]["_meta"]
+    assert result.meta["keystone/code"] == "KS_QUARANTINED"

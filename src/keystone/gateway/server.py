@@ -25,7 +25,13 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
-from keystone.core.errors import Code, Reject, to_tool_result
+from keystone.core.errors import (
+    KEYSTONE_META_PREFIX,
+    Code,
+    Reject,
+    RejectionResult,
+    to_tool_result,
+)
 from keystone.core.ids import new_id
 from keystone.core.types import CallContext, Principal, SessionState, ToolRef, ToolResult
 from keystone.gateway.pipeline import Pipeline
@@ -124,10 +130,21 @@ def unknown_tool(name: str, principal: Principal) -> ToolRef:
     )
 
 
+def result_meta(result: ToolResult, call_id: str) -> dict[str, Any]:
+    meta: dict[str, Any] = {CALL_ID_KEY: call_id}
+    # Only a result Keystone wrote itself counts. A text block from an upstream can carry any
+    # _meta, including keys that look like a rejection.
+    if isinstance(result, RejectionResult):
+        meta |= {k: v for k, v in result.meta.items() if k.startswith(KEYSTONE_META_PREFIX)}
+        meta[CALL_ID_KEY] = call_id
+    return meta
+
+
 def to_call_tool_result(result: ToolResult, call_id: str) -> types.CallToolResult:
     """The wire form. The result-level _meta is Keystone's own, never the upstream's, and it
-    names the call so an agent can quote it to whoever reads the audit log."""
-    meta = {CALL_ID_KEY: call_id}
+    names the call so an agent can quote it to whoever reads the audit log. A rejection adds its
+    `keystone/*` keys (the code, and any reason) so a client need not dig into the text block."""
+    meta = result_meta(result, call_id)
     try:
         return types.CallToolResult.model_validate(
             {
@@ -147,7 +164,13 @@ def to_call_tool_result(result: ToolResult, call_id: str) -> types.CallToolResul
             ),
             call_id,
         )
-        return types.CallToolResult.model_validate({"content": refusal.content, "isError": True})
+        return types.CallToolResult.model_validate(
+            {
+                "content": refusal.content,
+                "isError": True,
+                "_meta": result_meta(refusal, call_id),
+            }
+        )
 
 
 async def handshake_era_only(ctx: Context, call_next: CallNext) -> HandlerResult:
