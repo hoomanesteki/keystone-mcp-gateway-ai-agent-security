@@ -31,7 +31,7 @@ test-unit: ## unit tests and invariants that need no services
 	@$(call pytest,tests/unit tests/invariants -m "$(UNIT_MARKS)")
 
 test-int: ## integration tests (needs postgres and redis)
-	@echo "not available until KS-004"
+	@$(call pytest,tests/integration tests/invariants -m "not e2e and not slow")
 
 test-e2e: ## end-to-end tests against the compose stack
 	@echo "not available until KS-002"
