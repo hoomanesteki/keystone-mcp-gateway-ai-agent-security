@@ -19,7 +19,7 @@ from pydantic import SecretStr
 from keystone.app import create_app
 from keystone.audit.sink import InMemoryAuditSink
 from keystone.registry.config import UpstreamConfig
-from keystone.settings import Settings, TenantConfig
+from keystone.settings import RegistrySettings, Settings, TenantConfig
 from tests.fixtures.servers import ServerThread
 
 # Re-exported so tests/conftest.py can name one module: tests/unit/test_phase_plugin.py copies the
@@ -65,9 +65,10 @@ def keystone_app_factory(
     marker, and `clean_db` empties the tables the app wrote."""
     started: list[KeystoneApp] = []
 
-    def start(**app_options: Any) -> KeystoneApp:
+    def start(*, registry: RegistrySettings | None = None, **app_options: Any) -> KeystoneApp:
         settings = Settings(
             env="test",
+            registry=registry or RegistrySettings(),
             database_url=SecretStr(test_database_url),
             tenants=[TenantConfig(id="acme", name="Acme Corp")],
             allow_private_upstreams=True,

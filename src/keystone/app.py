@@ -57,6 +57,7 @@ def create_app(
         dispatcher = wrap_dispatcher(dispatcher)
     pipeline = build_pipeline(settings, PipelineDeps(dispatcher, audit), interceptors)
     gateway = Gateway(settings, registry, InMemorySessionStore(), pipeline)
+    registry.add_listener(gateway.notify_tools_changed)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -78,7 +79,7 @@ def create_app(
                 # and the periodic sync tries it again. It does not stop startup.
                 for report in await registry.sync_all():
                     log.info("startup_sync", **report.model_dump())
-                await stack.enter_async_context(background_sync(registry, settings))
+                await stack.enter_async_context(background_registry_tasks(registry, settings))
                 await stack.enter_async_context(manager.run())
                 yield
         finally:
@@ -127,15 +128,16 @@ def create_app(
 
 
 @asynccontextmanager
-async def background_sync(registry: RegistryService, settings: Settings) -> AsyncIterator[None]:
-    """Run the periodic sync while the body of the `with` runs. Does nothing when the interval
-    is 0."""
+async def background_registry_tasks(
+    registry: RegistryService, settings: Settings
+) -> AsyncIterator[None]:
+    """Run the periodic sync (unless its interval is 0) and the watch for changes made by other
+    processes while the body of the `with` runs."""
     interval = settings.registry.sync_interval_s
-    if interval <= 0:
-        yield
-        return
     async with anyio.create_task_group() as group:
-        group.start_soon(registry.run_periodic, interval)
+        group.start_soon(registry.run_watch)
+        if interval > 0:
+            group.start_soon(registry.run_periodic, interval)
         try:
             yield
         finally:
