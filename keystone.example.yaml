@@ -1,0 +1,7 @@
+# Copy to keystone.yaml and point KEYSTONE_CONFIG at it. Secrets never go in this file.
+# Environment variables override anything set here.
+log_level: info
+
+tenants:
+  - id: acme
+    name: Acme Corp

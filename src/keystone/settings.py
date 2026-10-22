@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -16,6 +16,11 @@ CONFIG_ENV_VAR = "KEYSTONE_CONFIG"
 # against `make up-core` without any environment.
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://keystone:keystone@localhost:55432/keystone"
 DEFAULT_REDIS_URL = "redis://localhost:56379/0"
+
+
+class TenantConfig(BaseModel):
+    id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")
+    name: str = Field(min_length=1)
 
 
 class Settings(BaseSettings):
@@ -33,6 +38,7 @@ class Settings(BaseSettings):
     redis_url: SecretStr = SecretStr(DEFAULT_REDIS_URL)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     config_path: Path | None = Field(default=None, validation_alias=CONFIG_ENV_VAR)
+    tenants: list[TenantConfig] = Field(default_factory=list)
 
     @field_validator("log_level", mode="before")
     @classmethod
