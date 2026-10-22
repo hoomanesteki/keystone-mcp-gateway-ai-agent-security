@@ -198,14 +198,20 @@ class HttpUpstreamClient:
             ]
             cursor = page.next_cursor
             if cursor is None:
-                break
-        return tools
+                return tools
+        # A partial list would look like a list in which the rest of the tools had vanished, and
+        # the registry would disable them.
+        raise Reject(
+            Code.UPSTREAM_ERROR, "the upstream server lists more tools than Keystone reads"
+        )
 
     async def _with_session[T](self, action: Callable[[Client], Awaitable[T]]) -> T:
         for attempt in range(2):
             client = await self._client()
             try:
                 return await action(client)
+            except Reject:
+                raise
             except MCPError as exc:
                 if _session_lost(exc) and attempt == 0:
                     # The server refused the request before running anything, so sending it
@@ -398,6 +404,15 @@ class UpstreamPool:
             old.evicted = True
         return entry, evicted
 
+    async def forget(self, upstream_id: str) -> None:
+        """Drop every client of one upstream, for example after its URL changed. Calls already
+        running finish on the old client, which closes after the last of them."""
+        keys = [key for key in self._clients if key[0] == upstream_id]
+        entries = [self._clients.pop(key) for key in keys]
+        for entry in entries:
+            entry.evicted = True
+        await self._retire(entries)
+
     async def _retire(self, evicted: list[_Entry]) -> None:
         for entry in evicted:
             if entry.in_flight > 0:
@@ -440,5 +455,54 @@ def http_client_factory(
             protocol=protocol,
             backoff_s=backoff_s,
         )
+
+    return make
+
+
+class UpstreamTarget(BaseModel, frozen=True):
+    """Where and how to reach one upstream."""
+
+    transport: str
+    url: str | None = None
+    command: tuple[str, ...] | None = None
+
+
+class UpstreamDirectory:
+    """Where each upstream lives. The registry keeps it current from the database, so an
+    upstream added with the CLI can be reached without a restart."""
+
+    def __init__(self) -> None:
+        self._targets: dict[str, UpstreamTarget] = {}
+
+    def get(self, upstream_id: str) -> UpstreamTarget | None:
+        return self._targets.get(upstream_id)
+
+    def update(self, targets: Mapping[str, UpstreamTarget]) -> list[str]:
+        """Record the targets. Returns the ids whose target is new or different."""
+        changed = [i for i, t in targets.items() if self._targets.get(i) != t]
+        self._targets.update(targets)
+        return changed
+
+
+def directory_client_factory(
+    directory: UpstreamDirectory,
+    *,
+    protocol: Protocol_ = "auto",
+    backoff_s: Sequence[float] = RECONNECT_BACKOFF_S,
+) -> ClientFactory:
+    def make(upstream_id: str, headers: dict[str, str], task_group: TaskGroup) -> UpstreamClient:
+        target = directory.get(upstream_id)
+        if target is None:
+            raise ValueError(f"unknown upstream {upstream_id!r}")
+        if target.transport == "http" and target.url:
+            return HttpUpstreamClient(
+                target.url,
+                headers,
+                task_group,
+                upstream_id=upstream_id,
+                protocol=protocol,
+                backoff_s=backoff_s,
+            )
+        raise ValueError(f"upstream {upstream_id!r}: transport {target.transport!r} is not served")
 
     return make

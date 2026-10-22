@@ -85,6 +85,17 @@ class UpstreamRepo:
         async with self._sessionmaker() as session, session.begin():
             return bool(affected(await session.execute(statement)))
 
+    async def set_status_unless_disabled(self, upstream_id: str, status: UpstreamStatus) -> bool:
+        """Move a live upstream to `status`. A disabled upstream stays disabled: only an operator
+        or the config file turns one back on."""
+        statement = (
+            update(Upstream)
+            .where(Upstream.id == upstream_id, Upstream.status != "disabled")
+            .values(status=status)
+        )
+        async with self._sessionmaker() as session, session.begin():
+            return bool(affected(await session.execute(statement)))
+
     async def record_sync(self, upstream_id: str, *, error: str | None = None) -> bool:
         """Note the result of a sync. A success stamps `last_sync_at` and clears `last_error`.
         A failure sets `last_error` and leaves the time of the last good sync alone."""
@@ -201,6 +212,25 @@ class ToolRepo:
             update(Tool)
             .where(Tool.tenant_id == tenant_id, Tool.name == name)
             .values(status=status.value, quarantine_reason=reason)
+        )
+        async with self._sessionmaker() as session, session.begin():
+            return bool(affected(await session.execute(statement)))
+
+    async def refresh(self, tool: ToolRef) -> bool:
+        """Apply what the config says about a tool (risk, tags, cost, timeout, extractors) and
+        stamp `last_seen_at`. The definition, its hashes and the status are left alone, so this is
+        safe to run while a person approves or disables the tool."""
+        statement = (
+            update(Tool)
+            .where(Tool.tenant_id == tool.tenant_id, Tool.name == tool.name)
+            .values(
+                risk=tool.risk.value,
+                tags=sorted(t.value for t in tool.tags),
+                cost_per_call_usd=Decimal(repr(tool.cost_per_call_usd)),
+                timeout_s=tool.timeout_s,
+                extractors=tool.extractors,
+                last_seen_at=func.now(),
+            )
         )
         async with self._sessionmaker() as session, session.begin():
             return bool(affected(await session.execute(statement)))
