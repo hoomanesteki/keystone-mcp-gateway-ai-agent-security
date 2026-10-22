@@ -10,7 +10,7 @@ the "Found" list at the end.
 |---|---|---|---|---|---|
 | KS-001 | Repo scaffold and toolchain | 3 | done | | `chore/ks-001-scaffold`. No CI yet at merge time. |
 | KS-002 | Compose base stack | 3 | done | | `chore/ks-002-compose`. No CI yet at merge time. |
-| KS-003 | CI pipeline and branch protection | 3 | todo | | |
+| KS-003 | CI pipeline and branch protection | 3 | doing | | `ci/ks-003-pipeline`. Branch protection: deferred, needs gh auth. |
 | KS-004 | Settings, logging and health endpoints | 2 | done | | `feat/ks-004-settings-health`. No CI yet at merge time. |
 | KS-005 | Database layer and migrations | 3 | todo | | |
 | KS-006 | Docs skeleton and contributor rules | 2 | todo | | |
