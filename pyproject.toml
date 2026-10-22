@@ -9,7 +9,20 @@ authors = [
     { name = "Hooman Esteki", email = "esteki.net@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "anyio>=4.15.1",
+    "asyncpg>=0.32.0",
+    "fastapi>=0.159.1",
+    "pydantic-settings>=2.16.1",
+    "pyyaml>=6.0.3",
+    "redis>=8.1.0",
+    "structlog>=26.1.0",
+    "typer>=0.27.3",
+    "uvicorn>=0.54.0",
+]
+
+[project.scripts]
+keystone = "keystone.admin.cli:app"
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
@@ -17,11 +30,13 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "mypy>=2.4.0",
     "pre-commit>=4.7.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.17.1",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [tool.ruff]
@@ -73,3 +88,8 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 addopts = "--strict-markers"
+
+# Third-party packages that ship no type information.
+[[tool.mypy.overrides]]
+module = ["asyncpg", "asyncpg.*"]
+ignore_missing_imports = true
