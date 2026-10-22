@@ -11,7 +11,7 @@ import anyio
 import structlog
 
 from keystone.core.types import ToolRef, ToolStatus
-from keystone.registry.repo import to_tool_ref
+from keystone.registry.repo import ToolState, to_tool_ref
 from keystone.registry.sync import RegistrySyncer, SyncReport
 
 log = structlog.get_logger()
@@ -83,6 +83,11 @@ class RegistryService:
         """Be told when the tools a tenant can see change (after a sync here, or when another
         process changed the database and the cache time ran out)."""
         self._listeners.append(listener)
+
+    async def tool_state(self, tenant_id: str, name: str) -> ToolState | None:
+        """The tool's status straight from the database, never from the cache. The pinning slot
+        uses it, so a quarantine takes effect on the next call."""
+        return await self.syncer.tools.current_state(tenant_id, name)
 
     async def sync_upstream(self, upstream_id: str) -> SyncReport:
         try:

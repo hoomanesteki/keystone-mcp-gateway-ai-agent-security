@@ -9,6 +9,7 @@ them and a deleted row would leave the history pointing at nothing.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal
@@ -18,9 +19,11 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from keystone.core.canonical import canonical_json, sha256_hex
 from keystone.core.types import Risk, ToolRef, ToolStatus, ToolTag
 from keystone.db.models import Tool, Upstream
 from keystone.db.session import affected
+from keystone.registry.pinning import pending_fingerprint
 
 Sessionmaker = async_sessionmaker[AsyncSession]
 
@@ -206,12 +209,14 @@ class ToolRepo:
     async def set_status(
         self, tenant_id: str, name: str, status: ToolStatus, *, reason: str | None = None
     ) -> bool:
-        """Set the status and the reason together, so a reason never outlives its status.
-        Returns False when there is no such tool."""
+        """Set the status and the reason together, so a reason never outlives its status. An
+        active tool holds no pending definition, so making one active drops it. Returns False
+        when there is no such tool."""
+        values: dict[str, Any] = {"status": status.value, "quarantine_reason": reason}
+        if status is ToolStatus.ACTIVE:
+            values |= {"pending_description": None, "pending_schema": None}
         statement = (
-            update(Tool)
-            .where(Tool.tenant_id == tenant_id, Tool.name == name)
-            .values(status=status.value, quarantine_reason=reason)
+            update(Tool).where(Tool.tenant_id == tenant_id, Tool.name == name).values(**values)
         )
         async with self._sessionmaker() as session, session.begin():
             return bool(affected(await session.execute(statement)))
@@ -258,6 +263,92 @@ class ToolRepo:
         )
         async with self._sessionmaker() as session, session.begin():
             return bool(affected(await session.execute(statement)))
+
+    async def current_state(self, tenant_id: str, name: str) -> ToolState | None:
+        """The status the database holds for one tool, read fresh and in one query, with the
+        status of its upstream folded in. None when there is no such tool."""
+        statement = (
+            select(Tool.status, Tool.quarantine_reason, Upstream.status)
+            .join(Upstream, Upstream.id == Tool.upstream_id)
+            .where(Tool.tenant_id == tenant_id, Tool.name == name)
+        )
+        async with self._sessionmaker() as session:
+            found = (await session.execute(statement)).one_or_none()
+        if found is None:
+            return None
+        tool_status, reason, upstream_status = found
+        if upstream_status == "disabled":
+            return ToolState(ToolStatus.DISABLED, "upstream_disabled")
+        return ToolState(ToolStatus(tool_status), reason)
+
+    async def clear_pending(self, tenant_id: str, name: str) -> bool:
+        """Release a tool whose upstream went back to the definition we hold: drop the pending
+        definition and make it active. Only a tool that is quarantined with a pending definition
+        is touched. Returns whether it was."""
+        statement = (
+            update(Tool)
+            .where(
+                Tool.tenant_id == tenant_id,
+                Tool.name == name,
+                Tool.status == ToolStatus.QUARANTINED.value,
+                Tool.pending_description.is_not(None),
+            )
+            .values(
+                status=ToolStatus.ACTIVE.value,
+                pending_description=None,
+                pending_schema=None,
+                quarantine_reason=None,
+            )
+        )
+        async with self._sessionmaker() as session, session.begin():
+            return bool(affected(await session.execute(statement)))
+
+    async def approve_change(
+        self, tenant_id: str, name: str, *, expect_hash: str | None = None
+    ) -> Tool:
+        """Accept the pending definition of a quarantined tool: it becomes the live one, its
+        hashes are recomputed, and the tool is active. A tool quarantined without a pending
+        definition (a new tool that screening held back) is released as it is.
+
+        `expect_hash` is the fingerprint that `keystone tool show` printed for the pending
+        definition (a prefix is enough). The approval then applies only if the pending definition
+        still has it, so a definition that changed again after the person looked is not approved
+        by accident."""
+        async with self._sessionmaker() as session, session.begin():
+            row = await session.get(Tool, (tenant_id, name), with_for_update=True)
+            if row is None:
+                raise PinningError(f"there is no tool {name!r}")
+            if row.status != ToolStatus.QUARANTINED.value:
+                raise PinningError(f"tool {name!r} is {row.status}, not quarantined")
+            if row.pending_description is not None and row.pending_schema is not None:
+                fingerprint = pending_fingerprint(row.pending_description, row.pending_schema)
+                if expect_hash is not None and not fingerprint.startswith(expect_hash.lower()):
+                    raise PinningError(
+                        f"the pending definition of {name!r} changed after it was shown "
+                        f"(fingerprint now {fingerprint[:12]}); look at it again"
+                    )
+                row.description = row.pending_description
+                row.input_schema = row.pending_schema
+                row.description_hash = sha256_hex(canonical_json(row.pending_description))
+                row.schema_hash = sha256_hex(canonical_json(row.pending_schema))
+            row.pending_description = None
+            row.pending_schema = None
+            row.quarantine_reason = None
+            row.status = ToolStatus.ACTIVE.value
+            return row
+
+
+@dataclass(frozen=True)
+class ToolState:
+    """What the database says about a tool right now: its status, and the reason it is not
+    active. The status of a tool of a disabled upstream is `disabled`."""
+
+    status: ToolStatus
+    reason: str | None
+
+
+class PinningError(ValueError):
+    """An approval that cannot be applied. The message says why, for the person who ran it."""
 
 
 def utc_now() -> datetime:

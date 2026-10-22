@@ -4,18 +4,16 @@ import json
 from collections.abc import Callable, Iterator
 from typing import Any
 
-import anyio
 import pytest
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from typer.testing import CliRunner
 
-from keystone.admin.cli import app as cli
 from keystone.app import create_app
 from keystone.db.tenants import upsert_tenants
 from keystone.registry.config import ConfigError, UpstreamConfig, apply_config_upstreams
 from keystone.registry.repo import UpstreamRepo, UpstreamSpec
 from keystone.settings import Settings, TenantConfig
+from tests.fixtures.cli import invoke
 from tests.fixtures.servers import ServerThread
 from tests.fixtures.upstreams import NAMES, DemoUpstreams
 
@@ -195,16 +193,6 @@ async def test_builtin_upstreams_are_not_stored(sessionmaker: Sessions) -> None:
     report = await apply_config_upstreams(repo, [sandbox], ["acme"])
 
     assert (report.skipped, await repo.list()) == (["sandbox"], [])
-
-
-def run_cli(url: str, args: list[str], **env: str) -> Any:
-    environment = {"KEYSTONE_DATABASE_URL": url, "KEYSTONE_ALLOW_PRIVATE_UPSTREAMS": "true", **env}
-    return CliRunner().invoke(cli, args, env=environment)
-
-
-async def invoke(url: str, args: list[str], **env: str) -> Any:
-    # The CLI starts its own event loop, so it cannot run on the test's loop.
-    return await anyio.to_thread.run_sync(lambda: run_cli(url, args, **env))
 
 
 async def test_cli_add_list_remove(

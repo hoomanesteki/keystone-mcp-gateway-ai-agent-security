@@ -248,9 +248,11 @@ async def test_a_sync_error_on_one_upstream_changes_no_tool_anywhere(
     for name in ("bank__balance", "bank__transfer"):
         assert after[name].status == "active"
         assert after[name].description_hash == before[name].description_hash
-    # And the others are exactly as healthy syncs left them.
+    # And the others are exactly as their own healthy syncs left them. Echo changed a
+    # definition, which KS-205 holds for review; that comes from echo's sync, not from bank's.
     assert after["mail__read"].status == after["mail__send"].status == "active"
-    assert after["echo__echo"].status == "active"
+    assert after["echo__echo"].status == "quarantined"
+    assert after["echo__echo"].description == before["echo__echo"].description
 
 
 async def test_a_failed_sync_records_the_error_and_keeps_the_last_good_time(

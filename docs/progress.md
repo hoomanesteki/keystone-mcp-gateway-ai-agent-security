@@ -41,7 +41,7 @@ the "Found" list at the end.
 | KS-202 | Upstream config, admin CLI and SSRF guard | 5 | done | | `feat/ks-202-upstream-config`. A config entry the registry cannot use (unknown tenant, URL refused by the guard) stops startup with every problem named and writes nothing. `keystone upstream remove` refuses a config upstream. Adds `keystone db upgrade` and `serve --migrate`, because the app now needs the registry tables at startup and compose never ran migrations. `upstream sync` arrives with KS-203. The guard checks at registration, so DNS rebinding is not covered (runbook says so). |
 | KS-203 | Tool discovery and sync | 5 | done | | `feat/ks-203-tool-sync`. `registry/sync.py` is the file to read first: a failed list changes no tool, the upstream's or anyone else's, and `sync_upstream` never raises. A changed definition is only reported until KS-205. `RegistryService` replaces `StaticRegistry` in the app; `static.py` stays for its Phase 1 unit tests. The service caches per tenant for `registry.cache_ttl_s` (2 s) so a CLI sync reaches a running gateway. `registry sync` and `upstream sync` exit 1 if any upstream failed. A tool list cut off at the page limit is now an error. |
 | KS-204 | Aggregated listing and routing | 3 | done | | `feat/ks-204-aggregate`. The list and the routing were already complete after KS-203, so this story is tests plus `notifications/tools/list_changed`. SDK 2.3 supports it in the handshake era; details in `docs/spikes/mcp-proxy.md` section 6. |
-| KS-205 | Pinning and quarantine | 5 | todo | | |
+| KS-205 | Pinning and quarantine | 5 | doing | | `feat/ks-205-pinning`. |
 | KS-206 | Tool description screening | 3 | todo | | |
 | KS-207 | Session store in Redis | 3 | todo | | |
 | KS-208 | stdio upstreams | 3 | todo | | |

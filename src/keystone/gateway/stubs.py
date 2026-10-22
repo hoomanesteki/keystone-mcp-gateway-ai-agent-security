@@ -24,10 +24,6 @@ class RateLimitInterceptor(_Passthrough):
     name = "rate_limit"
 
 
-class PinningInterceptor(_Passthrough):
-    name = "pinning"
-
-
 class BudgetInterceptor(_Passthrough):
     name = "budget"
 

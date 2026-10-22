@@ -67,7 +67,9 @@ def create_app(
     dispatcher: Dispatcher = UpstreamDispatcher(pool, health)
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
-    pipeline = build_pipeline(settings, PipelineDeps(dispatcher, audit), interceptors)
+    pipeline = build_pipeline(
+        settings, PipelineDeps(dispatcher, audit, tool_states=registry), interceptors
+    )
     gateway = Gateway(settings, registry, InMemorySessionStore(), pipeline)
     registry.add_listener(gateway.notify_tools_changed)
 
