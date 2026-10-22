@@ -90,7 +90,8 @@ reset: ## stop the stack and remove its volumes
 demo: ## run the scripted agent demo
 	@echo "not available until KS-108"
 
-github-setup: ## protect main and dev (needs a signed-in gh)
+github-setup: ## protect main and dev, then import the backlog (needs a signed-in gh)
 	@gh auth status >/dev/null 2>&1 || { \
 		echo "gh is not signed in. Run 'gh auth login', then 'make github-setup'." >&2; exit 1; }
 	bash scripts/protect_branches.sh
+	$(RUN) python scripts/import_backlog.py
