@@ -7,13 +7,17 @@ from typing import Any, Literal
 from keystone.core.errors import Reject
 from keystone.core.types import CallContext
 
+MAX_RECORDS = 100_000
+
 
 class InMemoryAuditSink:
     """One dict per call. It holds identifiers and outcomes, never arguments or results,
-    because an audit record must not become a second copy of the data (CONTRIBUTING rule 6)."""
+    because an audit record must not become a second copy of the data (CONTRIBUTING rule 6).
+    It keeps the newest `max_records`, so a long-running dev server does not fill memory."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_records: int = MAX_RECORDS) -> None:
         self.records: list[dict[str, Any]] = []
+        self._max = max_records
 
     async def record(
         self,
@@ -39,3 +43,5 @@ class InMemoryAuditSink:
                 "timings_ms": dict(ctx.timings_ms),
             }
         )
+        if len(self.records) > self._max:
+            del self.records[: len(self.records) - self._max]
