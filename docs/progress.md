@@ -21,7 +21,7 @@ the "Found" list at the end.
 
 | ID | Title | Pts | Status | PR | Notes |
 |---|---|---|---|---|---|
-| KS-101 | Spike: MCP SDK proxy pattern | 2 | todo | | |
+| KS-101 | Spike: MCP SDK proxy pattern | 2 | done | | `spike/ks-101-mcp-proxy`. The SDK is `mcp` 2.3.0, a new major version; findings in `docs/spikes/mcp-proxy.md`. ADR-0003, 0005 and 0007 written. |
 | KS-102 | Core types, errors and naming | 3 | todo | | |
 | KS-103 | Interceptor pipeline with stubs | 5 | todo | | |
 | KS-104 | Demo upstreams: mail, files, bank, echo | 5 | todo | | |
