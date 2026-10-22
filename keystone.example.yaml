@@ -5,3 +5,12 @@ log_level: info
 tenants:
   - id: acme
     name: Acme Corp
+
+# The MCP servers Keystone proxies. Each tool is exposed as <id>__<tool>, for example mail__read_email.
+# These URLs reach the demo upstreams that `make up` publishes on the host. Inside compose they are
+# http://mail-mcp:8101/mcp and so on.
+upstreams:
+  - {id: mail, tenant: acme, transport: http, url: "http://localhost:8101/mcp"}
+  - {id: files, tenant: acme, transport: http, url: "http://localhost:8102/mcp"}
+  - {id: bank, tenant: acme, transport: http, url: "http://localhost:8103/mcp"}
+  - {id: echo, tenant: acme, transport: http, url: "http://localhost:8104/mcp"}

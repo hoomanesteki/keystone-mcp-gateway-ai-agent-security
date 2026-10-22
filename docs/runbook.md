@@ -22,7 +22,7 @@ Tests never use these ports. They start their own services on free ports.
 
 | Service | Host port | Notes |
 |---|---|---|
-| Keystone | 8080 | `keystone serve` (not in compose yet) |
+| Keystone | 8080 | `keystone serve` (not in compose yet). MCP endpoint: `http://localhost:8080/mcp` |
 | Postgres | 55432 | database, user and password are all `keystone` |
 | Redis | 56379 | tests use db 15 |
 | Keycloak | 8180 | admin console login `admin` / `admin`, realm `keystone` |
@@ -76,6 +76,28 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_REDIS_URL` | `redis://localhost:56379/0` | Redis URL |
 | `KEYSTONE_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` |
 | `KEYSTONE_CONFIG` | unset | Path to a YAML file with the same keys |
+| `KEYSTONE_ALLOWED_HOSTS` | `["127.0.0.1:*","localhost:*","[::1]:*"]` | JSON list of `Host` header values the MCP endpoint accepts (DNS rebinding guard). `:*` matches any port. Add the service name, for example `keystone:*`, to reach it from another container. |
+| `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is, until real authentication arrives in Phase 3. Refused when `KEYSTONE_ENV=prod`. |
+
+Two sections come from the YAML file only: `tenants` and `upstreams` (see `keystone.example.yaml`).
+Each upstream has an `id` (lowercase letters, digits and single underscores, not ending in an
+underscore), a `tenant` and, for `transport: http`, a `url`. Keystone reads each upstream's tool
+list once when it starts. An upstream that is down then is skipped and logged, and its tools stay
+missing until Keystone restarts. Phase 2 adds syncing.
+
+## The MCP endpoint
+
+`POST /mcp` on port 8080 speaks MCP over streamable HTTP. Keystone serves the handshake protocol
+era only (ADR-0003). A client in its default `auto` mode falls back to it by itself. A client
+pinned to the `2026-07-28` version is refused.
+
+Phase 1 has no authentication: whoever can reach the port acts as the dev principal above, so
+keep it on localhost. With `KEYSTONE_ENV=prod` there is no dev principal and the endpoint answers
+every request with HTTP 401 until Phase 3.
+
+A call that Keystone refuses (unknown tool, invalid arguments) comes back as a normal result with
+`isError` set. Its text starts with `[keystone:<CODE>] call <id>`, and the machine-readable copy is
+in the `_meta` of the first content block (ADR-0007).
 
 Health endpoints: `GET /healthz` always returns 200. `GET /readyz` probes Postgres and Redis with
 a 1 second limit each and returns 503 if either is down.

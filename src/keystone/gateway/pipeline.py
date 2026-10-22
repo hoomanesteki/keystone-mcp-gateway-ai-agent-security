@@ -119,6 +119,16 @@ class Pipeline:
             finally:
                 await self._audit(ctx, outcome, reject)
 
+    async def reject(self, ctx: CallContext, reject: Reject) -> ToolResult:
+        """Refuse a call that cannot enter the pipeline (a tool that does not exist). The
+        refusal is still audited, so every call leaves one record (invariant I2)."""
+        with self.tracer.span("pipeline.reject", call_id=ctx.call_id, code=reject.code.value):
+            try:
+                ctx.result = to_tool_result(reject, ctx.call_id)
+                return ctx.result
+            finally:
+                await self._audit(ctx, "rejected", reject)
+
     async def _hook(
         self,
         interceptor: Interceptor,
