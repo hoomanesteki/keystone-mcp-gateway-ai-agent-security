@@ -81,6 +81,9 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_CONFIG` | unset | Path to a YAML file with the same keys |
 | `KEYSTONE_ALLOWED_HOSTS` | `["127.0.0.1:*","localhost:*","[::1]:*"]` | JSON list of `Host` header values the MCP endpoint accepts (DNS rebinding guard). `:*` matches any port. Add the service name, for example `keystone:*`, to reach it from another container. |
 | `KEYSTONE_ALLOW_PRIVATE_UPSTREAMS` | `false` | When `false`, an upstream URL whose host resolves to a loopback, private (RFC 1918), link-local (including 169.254.169.254), CGNAT (100.64.0.0/10) or IPv6 unique-local address is refused. Local compose sets it to `true`, because the demo upstreams are on a private network. |
+| `KEYSTONE_REGISTRY__SYNC_INTERVAL_S` | `300` | Seconds between syncs of every upstream. `0` turns the timer off (the startup sync and the CLI still run). Also `registry.sync_interval_s` in the YAML. |
+| `KEYSTONE_REGISTRY__SYNC_TIMEOUT_S` | `20` | The longest one upstream's sync may take, connecting included. |
+| `KEYSTONE_REGISTRY__CACHE_TTL_S` | `2` | How long the gateway keeps its in-memory copy of a tenant's tools. A sync run by the CLI reaches a running gateway after this long at most. |
 | `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is, until real authentication arrives in Phase 3. Refused when `KEYSTONE_ENV=prod`. |
 
 Two sections come from the YAML file only: `tenants` and `upstreams` (see `keystone.example.yaml`).
@@ -96,8 +99,7 @@ Keystone applies the `upstreams` section every time it starts. It adds or update
 `source=config`, and a config upstream that is no longer in the file is set to `disabled`. Rows are
 never deleted, because audit records name upstreams. If any entry cannot be used (an unknown
 tenant, a missing url, a URL the SSRF guard refuses), Keystone stops at startup, names every
-problem, and writes nothing. Until syncing arrives, Keystone reads each http upstream's tool list
-once at startup; an upstream that is down then is skipped and logged.
+problem, and writes nothing.
 
 The URL check resolves the host and refuses it unless every address is public. It runs when an
 upstream is registered, so it does not stop a name that points somewhere public today and
@@ -115,6 +117,34 @@ server, so run it where `KEYSTONE_DATABASE_URL` points at the right database (in
 | `keystone upstream add ID --transport stdio -- CMD ARGS...` | Register a stdio upstream. |
 | `keystone upstream remove ID` | Disable a CLI upstream. A config upstream is removed by editing the file. |
 | `keystone db upgrade` | Apply database migrations. `keystone serve --migrate` does it before starting; the compose stack uses that. |
+
+### Tool lists and syncing
+
+Keystone reads each upstream's tool list when it starts, every `registry.sync_interval_s`, and
+when you run `keystone registry sync`. Each tool is stored with the SHA-256 of its description and
+of its input schema. The `tools` block of an upstream in the YAML sets risk, tags, cost, timeout
+and extractors by the upstream's own tool name (for example `send_email`, not `mail__send_email`).
+A tool without an entry has risk `medium`, no tags and no cost.
+
+| Command | What it does |
+|---|---|
+| `keystone registry sync [--upstream ID] [--json]` | Sync now and print, per upstream, how many tools were created, unchanged, changed and removed, plus the names and any errors. Exits 1 if an upstream could not be synced. |
+| `keystone upstream sync ID` | The same for one upstream. |
+
+What a sync does to a tool:
+
+| Upstream lists the tool | Result |
+|---|---|
+| for the first time | created, status `active` |
+| with the definition we hold | unchanged; the config's overrides are applied again |
+| with a different description or schema | reported as `changed`; pinning (KS-205) decides what happens |
+| no longer, in a complete list | `disabled`, reason `removed_from_upstream`. It returns to `active` if the upstream lists it again with the same definition. |
+
+A sync that fails, because the upstream is down, slow or sent a broken answer, writes the error to
+the upstream's `last_error` and changes no tool. Only a complete list can show that a tool is
+gone. A failure on one upstream does not touch any other upstream, and startup carries on: the
+upstream's tools stay as they were and the timer tries it again at the next round. `keystone
+upstream list` shows the error under the row.
 
 Without `--tenant`, `add` uses the config's only tenant, and fails when the config names none or
 several.

@@ -134,3 +134,73 @@ def test_allowed_hosts_and_dev_principal_come_from_json_env_vars(
     assert settings.allowed_hosts == ["keystone:*", "localhost:*"]
     assert settings.dev_principal is not None
     assert (settings.dev_principal.tenant_id, settings.dev_principal.user_id) == ("globex", "quinn")
+
+
+@pytest.mark.phase(2)
+def test_private_upstreams_are_refused_unless_the_switch_is_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert Settings().allow_private_upstreams is False
+
+    monkeypatch.setenv("KEYSTONE_ALLOW_PRIVATE_UPSTREAMS", "true")
+
+    assert Settings().allow_private_upstreams is True
+
+
+@pytest.mark.phase(2)
+def test_registry_timings_have_defaults_and_come_from_env_or_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    defaults = Settings().registry
+    assert (defaults.sync_interval_s, defaults.sync_timeout_s, defaults.cache_ttl_s) == (
+        300.0,
+        20.0,
+        2.0,
+    )
+
+    config = tmp_path / "keystone.yaml"
+    config.write_text("registry:\n  sync_interval_s: 60\n  cache_ttl_s: 1\n")
+    monkeypatch.setenv("KEYSTONE_CONFIG", str(config))
+    monkeypatch.setenv("KEYSTONE_REGISTRY__SYNC_INTERVAL_S", "5")
+
+    registry = Settings().registry
+
+    assert (registry.sync_interval_s, registry.cache_ttl_s, registry.sync_timeout_s) == (
+        5.0,
+        1.0,
+        20.0,
+    )
+
+
+@pytest.mark.phase(2)
+def test_a_misspelled_registry_key_is_an_error() -> None:
+    with pytest.raises(ValueError, match="sync_inteval_s"):
+        Settings(registry={"sync_inteval_s": 5})  # type: ignore[arg-type]
+
+
+@pytest.mark.phase(2)
+def test_tool_overrides_load_from_yaml_and_typos_fail(tmp_path: Path) -> None:
+    config = tmp_path / "keystone.yaml"
+    config.write_text(
+        "upstreams:\n"
+        "  - id: mail\n"
+        "    tenant: acme\n"
+        "    url: http://mail-mcp:8101/mcp\n"
+        "    tools:\n"
+        "      send_email: {risk: high, tags: [external_effect], extract: {to: '$.to'}}\n"
+    )
+
+    [mail] = Settings(config_path=config).upstreams
+
+    override = mail.tools["send_email"]
+    assert (override.risk, override.tags, override.extract) == (
+        "high",
+        ["external_effect"],
+        {"to": "$.to"},
+    )
+    with pytest.raises(ValueError, match="risk"):
+        Settings(
+            upstreams=[{"id": "mail", "tools": {"x": {"risk": "severe"}}}]  # type: ignore[list-item]
+        )
+    with pytest.raises(ValueError, match="tool"):
+        Settings(upstreams=[{"id": "mail", "tool": {}}])  # type: ignore[list-item]

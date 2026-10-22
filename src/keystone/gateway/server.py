@@ -36,7 +36,7 @@ from keystone.core.ids import new_id
 from keystone.core.types import CallContext, Principal, SessionState, ToolRef, ToolResult
 from keystone.gateway.pipeline import Pipeline
 from keystone.gateway.sessions import InMemorySessionStore
-from keystone.registry.static import StaticRegistry
+from keystone.registry.service import ToolLookup
 from keystone.settings import Settings
 
 log = structlog.get_logger()
@@ -53,7 +53,7 @@ class Gateway:
     def __init__(
         self,
         settings: Settings,
-        registry: StaticRegistry,
+        registry: ToolLookup,
         sessions: InMemorySessionStore,
         pipeline: Pipeline,
     ) -> None:

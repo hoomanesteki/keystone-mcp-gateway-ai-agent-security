@@ -15,10 +15,13 @@ from keystone import __version__
 from keystone.app import create_app
 from keystone.db.models import Upstream
 from keystone.db.session import create_engine, make_sessionmaker
+from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
 from keystone.logging import configure_logging
+from keystone.registry.config import tool_overrides
 from keystone.registry.naming import check_upstream_id
-from keystone.registry.repo import Sessionmaker, UpstreamRepo, UpstreamSpec
+from keystone.registry.repo import Sessionmaker, ToolRepo, UpstreamRepo, UpstreamSpec
 from keystone.registry.ssrf import UnsafeUpstreamUrl, check_upstream_url
+from keystone.registry.sync import RegistrySyncer, SyncReport
 from keystone.settings import Settings
 
 app = typer.Typer(help="Keystone admin CLI.", no_args_is_help=True, add_completion=False)
@@ -26,6 +29,10 @@ upstream_app = typer.Typer(
     help="Register and inspect upstream MCP servers.", no_args_is_help=True, add_completion=False
 )
 app.add_typer(upstream_app, name="upstream")
+registry_app = typer.Typer(
+    help="Inspect and sync the tool registry.", no_args_is_help=True, add_completion=False
+)
+app.add_typer(registry_app, name="registry")
 
 
 class CliError(Exception):
@@ -248,3 +255,81 @@ def _only_tenant(settings: Settings) -> str:
     if len(settings.tenants) == 1:
         return settings.tenants[0].id
     raise CliError("pass --tenant: the config does not name exactly one tenant")
+
+
+async def run_sync(
+    settings: Settings, sessions: Sessionmaker, upstream_id: str | None
+) -> list[SyncReport]:
+    """Sync from this process with a pool of its own. A running gateway sees the result within its
+    registry cache time (registry.cache_ttl_s)."""
+    directory = UpstreamDirectory()
+    async with UpstreamPool(directory_client_factory(directory)) as pool:
+        syncer = RegistrySyncer(
+            UpstreamRepo(sessions),
+            ToolRepo(sessions),
+            pool,
+            directory,
+            overrides=tool_overrides(settings.upstreams),
+            timeout_s=settings.registry.sync_timeout_s,
+        )
+        if upstream_id is not None:
+            return [await syncer.sync_upstream(upstream_id)]
+        return await syncer.sync_all()
+
+
+def render_reports(reports: list[SyncReport]) -> str:
+    header = ("UPSTREAM", "CREATED", "UNCHANGED", "CHANGED", "REMOVED", "RESULT")
+    table = [header]
+    notes: dict[int, list[str]] = {}
+    for index, r in enumerate(reports, start=1):
+        counts = (
+            str(len(r.created)),
+            str(len(r.unchanged)),
+            str(len(r.changed)),
+            str(len(r.removed)),
+        )
+        table.append((r.upstream_id, *counts, "ok" if r.ok else "failed"))
+        notes[index] = [f"changed: {n}" for n in r.changed] + [f"removed: {n}" for n in r.removed]
+        notes[index] += [f"error: {e}" for e in r.errors]
+    widths = [max(len(line[i]) for line in table) for i in range(len(header))]
+    lines: list[str] = []
+    for index, line in enumerate(table):
+        lines.append(
+            "  ".join(cell.ljust(w) for cell, w in zip(line, widths, strict=True)).rstrip()
+        )
+        lines += [f"  {note}" for note in notes.get(index, [])]
+    return "\n".join(lines)
+
+
+def sync_command(upstream_id: str | None, as_json: bool) -> None:
+    reports = run_with_database(
+        lambda settings, sessions: run_sync(settings, sessions, upstream_id)
+    )
+    if as_json:
+        typer.echo(json.dumps([r.model_dump() for r in reports], indent=2))
+    elif reports:
+        typer.echo(render_reports(reports))
+    else:
+        typer.echo("no upstreams to sync")
+    if any(not r.ok for r in reports):
+        raise typer.Exit(1)
+
+
+@registry_app.command("sync")
+def registry_sync(
+    upstream: Annotated[
+        str | None, typer.Option("--upstream", help="Only this upstream. Default: all.")
+    ] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Print JSON instead of a table.")] = False,
+) -> None:
+    """Read every upstream's tools now. Exits 1 if any upstream could not be synced."""
+    sync_command(upstream, as_json)
+
+
+@upstream_app.command("sync")
+def upstream_sync(
+    upstream_id: Annotated[str, typer.Argument(metavar="ID")],
+    as_json: Annotated[bool, typer.Option("--json", help="Print JSON instead of a table.")] = False,
+) -> None:
+    """Read one upstream's tools now (the same as `registry sync --upstream ID`)."""
+    sync_command(upstream_id, as_json)

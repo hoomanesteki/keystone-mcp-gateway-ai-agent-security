@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -26,6 +26,20 @@ class TenantConfig(BaseModel):
     name: str = Field(min_length=1)
 
 
+class RegistrySettings(BaseModel):
+    """How the registry keeps its tool list current (KS-203)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # How often every upstream is synced. 0 turns the periodic sync off.
+    sync_interval_s: float = Field(default=300.0, ge=0)
+    # The longest one upstream's sync may take, connecting included.
+    sync_timeout_s: float = Field(default=20.0, gt=0)
+    # How long the gateway keeps its in-memory copy of a tenant's tools. A sync run by the CLI
+    # reaches a running gateway after this long at most.
+    cache_ttl_s: float = Field(default=2.0, ge=0)
+
+
 # Host header values the MCP endpoint accepts. A browser on another site can be tricked into
 # calling localhost, and its Host header then names that site (DNS rebinding).
 DEFAULT_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
@@ -41,6 +55,8 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="KEYSTONE_",
+        # KEYSTONE_REGISTRY__SYNC_INTERVAL_S=5 sets registry.sync_interval_s.
+        env_nested_delimiter="__",
         extra="ignore",
         validate_by_name=True,
         validate_by_alias=True,
@@ -56,6 +72,7 @@ class Settings(BaseSettings):
     # Off by default: an upstream URL that resolves to a loopback, private or link-local address
     # is refused (KS-202). Local compose and the tests turn it on: their upstreams are local.
     allow_private_upstreams: bool = False
+    registry: RegistrySettings = Field(default_factory=RegistrySettings)
     # Who every caller is until real authentication arrives (KS-304). Never allowed in prod.
     dev_principal: Principal | None = None
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))

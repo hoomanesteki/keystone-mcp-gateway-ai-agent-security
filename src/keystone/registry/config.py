@@ -64,6 +64,11 @@ class UpstreamConfig(BaseModel):
         return value
 
 
+def tool_overrides(upstreams: Sequence[UpstreamConfig]) -> dict[str, dict[str, ToolOverride]]:
+    """Per-tool settings by upstream id, then by the upstream's own tool name."""
+    return {u.id: dict(u.tools) for u in upstreams if u.tools}
+
+
 @dataclass
 class ConfigReport:
     """What applying the config did, by upstream id."""
