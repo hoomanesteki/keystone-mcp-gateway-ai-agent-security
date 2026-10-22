@@ -6,6 +6,7 @@ import anyio
 import structlog
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from redis.asyncio import Redis
 
 from keystone import __version__
 from keystone.audit.sink import InMemoryAuditSink
@@ -15,7 +16,8 @@ from keystone.gateway.dispatch import UpstreamDispatcher
 from keystone.gateway.health import UpstreamHealth
 from keystone.gateway.pipeline import AuditSink, Dispatcher, Interceptor
 from keystone.gateway.server import Gateway, mount_mcp
-from keystone.gateway.sessions import InMemorySessionStore
+from keystone.gateway.session_repo import SessionRepo
+from keystone.gateway.sessions import InMemorySessionStore, RedisSessionStore, SessionStore
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
 from keystone.gateway.wiring import PipelineDeps, build_pipeline
 from keystone.health import check_dependencies, upstream_statuses
@@ -70,7 +72,16 @@ def create_app(
     pipeline = build_pipeline(
         settings, PipelineDeps(dispatcher, audit, tool_states=registry), interceptors
     )
-    gateway = Gateway(settings, registry, InMemorySessionStore(), pipeline)
+    # An empty KEYSTONE_REDIS_URL keeps session state in this process, for a single-process setup.
+    redis = (
+        Redis.from_url(settings.redis_url.get_secret_value(), decode_responses=True)
+        if settings.redis_url.get_secret_value()
+        else None
+    )
+    session_store: SessionStore = (
+        RedisSessionStore(redis, SessionRepo(sessions)) if redis else InMemorySessionStore()
+    )
+    gateway = Gateway(settings, registry, session_store, pipeline)
     registry.add_listener(gateway.notify_tools_changed)
 
     @asynccontextmanager
@@ -97,6 +108,8 @@ def create_app(
                 await stack.enter_async_context(manager.run())
                 yield
         finally:
+            if redis is not None:
+                await redis.aclose()
             await engine.dispose()
 
     app = FastAPI(title="Keystone", version=__version__, lifespan=lifespan)

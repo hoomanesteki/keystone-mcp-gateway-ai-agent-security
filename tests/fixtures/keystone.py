@@ -15,15 +15,17 @@ from fastapi import FastAPI
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from pydantic import SecretStr
+from redis.asyncio import Redis
 
 from keystone.app import create_app
 from keystone.audit.sink import InMemoryAuditSink
 from keystone.registry.config import UpstreamConfig
 from keystone.settings import HealthSettings, RegistrySettings, Settings, TenantConfig
-from tests.fixtures.servers import ServerThread
 
 # Re-exported so tests/conftest.py can name one module: tests/unit/test_phase_plugin.py copies the
 # conftest and strips its single `pytest_plugins` line, so that line must stay on one line.
+from tests.fixtures.redis import redis, test_redis_url  # noqa: F401
+from tests.fixtures.servers import ServerThread
 from tests.fixtures.upstreams import (  # noqa: F401
     NAMES,
     DemoUpstreams,
@@ -59,10 +61,12 @@ def keystone_app_factory(
     clean_env: None,
     test_database_url: str,
     clean_db: None,
+    test_redis_url: str,  # noqa: F811 - the re-exported fixtures above
+    redis: Redis,  # noqa: F811
 ) -> Iterator[Callable[..., KeystoneApp]]:
-    """Start Keystone against the test database. Keyword arguments go to create_app (a spy
-    dispatcher, an interceptor). Tests that use it need Postgres, so they carry the `services`
-    marker, and `clean_db` empties the tables the app wrote."""
+    """Start Keystone against the test database and Redis database 15. Keyword arguments go to
+    create_app (a spy dispatcher, an interceptor). Tests that use it need Postgres and Redis, so
+    they carry the `services` marker, and `clean_db` and `redis` empty what the app wrote."""
     started: list[KeystoneApp] = []
 
     def start(*, registry: RegistrySettings | None = None, **app_options: Any) -> KeystoneApp:
@@ -70,6 +74,7 @@ def keystone_app_factory(
             env="test",
             registry=registry or RegistrySettings(),
             database_url=SecretStr(test_database_url),
+            redis_url=SecretStr(test_redis_url),
             tenants=[TenantConfig(id="acme", name="Acme Corp")],
             allow_private_upstreams=True,
             upstreams=[
@@ -94,7 +99,11 @@ def keystone_app(keystone_app_factory: Callable[..., KeystoneApp]) -> KeystoneAp
 
 @pytest.fixture
 def start_keystone(
-    clean_env: None, test_database_url: str, clean_db: None
+    clean_env: None,
+    test_database_url: str,
+    clean_db: None,
+    test_redis_url: str,  # noqa: F811
+    redis: Redis,  # noqa: F811
 ) -> Iterator[Callable[..., KeystoneApp]]:
     """Start Keystone with upstreams the test chooses, for tests about upstreams that go down or
     arrive late. The timers (periodic sync, health probes) are off unless the test sets them."""
@@ -110,6 +119,7 @@ def start_keystone(
         settings = Settings(
             env="test",
             database_url=SecretStr(test_database_url),
+            redis_url=SecretStr(test_redis_url),
             tenants=[TenantConfig(id="acme", name="Acme Corp")],
             allow_private_upstreams=True,
             upstreams=upstreams,

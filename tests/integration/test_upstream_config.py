@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from pydantic import SecretStr
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from keystone.app import create_app
@@ -32,7 +33,11 @@ def entry(
 
 @pytest.fixture
 def start_keystone(
-    clean_env: None, test_database_url: str, sessionmaker: Sessions
+    clean_env: None,
+    test_database_url: str,
+    sessionmaker: Sessions,
+    test_redis_url: str,
+    redis: Redis,
 ) -> Iterator[Callable[[list[UpstreamConfig]], ServerThread]]:
     """Start the whole app on the test database with the given upstreams."""
     started: list[ServerThread] = []
@@ -41,6 +46,7 @@ def start_keystone(
         settings = Settings(
             env="test",
             database_url=SecretStr(test_database_url),
+            redis_url=SecretStr(test_redis_url),
             tenants=[ACME],
             upstreams=upstreams,
             allow_private_upstreams=True,
