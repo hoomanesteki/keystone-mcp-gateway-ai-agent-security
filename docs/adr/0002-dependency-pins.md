@@ -49,6 +49,7 @@ file or listed with a different version.
 | anyio | 4.15.1 | timeouts and task groups (fail_after, create_task_group) |
 | asyncpg | 0.32.0 | Postgres driver, also used directly by the readiness probe |
 | fastapi | 0.159.1 | HTTP app and dependency injection |
+| jsonschema | 4.26.0 | Draft 2020-12 validation of tool arguments in the pipeline |
 | mcp | 2.3.0 | MCP server and client SDK (ADR-0003); a new major version, see `docs/spikes/mcp-proxy.md` |
 | pydantic-settings | 2.16.1 | typed settings from env and YAML |
 | pyyaml | 6.0.3 | YAML config files |
@@ -70,6 +71,7 @@ file or listed with a different version.
 | pytest-asyncio | 1.4.0 | async tests |
 | pytest-github-actions-annotate-failures | 0.4.2 | failure annotations in CI |
 | ruff | 0.17.1 | lint and format |
+| types-jsonschema | 4.26.0.20261006 | type stubs for jsonschema |
 | types-pyyaml | 6.0.12.20260906 | type stubs for PyYAML |
 
 ## Python packages: transitive (from `uv.lock`)
@@ -102,7 +104,6 @@ file or listed with a different version.
 | identify | 2.6.20 |
 | idna | 3.20 |
 | iniconfig | 2.3.1 |
-| jsonschema | 4.26.0 |
 | jsonschema-specifications | 2025.9.1 |
 | librt | 0.16.0 |
 | license-expression | 30.4.4 |
