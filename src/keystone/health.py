@@ -7,6 +7,7 @@ import asyncpg
 import redis.asyncio
 import structlog
 
+from keystone.registry.repo import UpstreamRepo
 from keystone.settings import Settings
 
 PROBE_TIMEOUT_S = 1.0
@@ -63,3 +64,14 @@ async def check_dependencies(settings: Settings) -> dict[str, bool]:
         tg.start_soon(run, "database", check_database, settings.database_url.get_secret_value())
         tg.start_soon(run, "redis", check_redis, settings.redis_url.get_secret_value())
     return dict(sorted(results.items()))
+
+
+async def upstream_statuses(upstreams: UpstreamRepo) -> dict[str, str]:
+    """Status of every live upstream by id, for /readyz. Empty when the database cannot answer
+    in time: /readyz already reports that through its `database` entry."""
+    try:
+        with anyio.fail_after(PROBE_TIMEOUT_S):
+            return {row.id: row.status for row in await upstreams.list(include_disabled=False)}
+    except Exception as exc:
+        log.warning("readyz_probe_failed", dependency="upstreams", error=type(exc).__name__)
+        return {}

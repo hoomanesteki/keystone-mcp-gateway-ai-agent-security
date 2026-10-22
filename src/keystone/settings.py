@@ -40,6 +40,26 @@ class RegistrySettings(BaseModel):
     cache_ttl_s: float = Field(default=2.0, ge=0)
 
 
+class HealthSettings(BaseModel):
+    """How the gateway watches its upstreams (KS-209)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Seconds between probes. 0 turns the probes off, and no upstream is ever marked down.
+    interval_s: float = Field(default=30.0, ge=0)
+    # A probe that takes longer than this has failed.
+    timeout_s: float = Field(default=3.0, gt=0)
+    # Consecutive failed probes before an upstream is `degraded`, and before it is `down`.
+    degraded_after: int = Field(default=1, ge=1)
+    down_after: int = Field(default=3, ge=1)
+
+    @model_validator(mode="after")
+    def _down_comes_last(self) -> "HealthSettings":
+        if self.down_after < self.degraded_after:
+            raise ValueError("down_after must be at least degraded_after")
+        return self
+
+
 # Host header values the MCP endpoint accepts. A browser on another site can be tricked into
 # calling localhost, and its Host header then names that site (DNS rebinding).
 DEFAULT_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
@@ -73,6 +93,7 @@ class Settings(BaseSettings):
     # is refused (KS-202). Local compose and the tests turn it on: their upstreams are local.
     allow_private_upstreams: bool = False
     registry: RegistrySettings = Field(default_factory=RegistrySettings)
+    health: HealthSettings = Field(default_factory=HealthSettings)
     # Who every caller is until real authentication arrives (KS-304). Never allowed in prod.
     dev_principal: Principal | None = None
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))

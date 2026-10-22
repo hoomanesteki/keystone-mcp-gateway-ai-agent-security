@@ -38,7 +38,7 @@ log = structlog.get_logger()
 RECONNECT_BACKOFF_S = (0.2, 0.8, 3.2)
 CONNECT_TIMEOUT_S = 10.0
 LIST_TIMEOUT_S = 10.0
-HEALTH_TIMEOUT_S = 2.0
+HEALTH_TIMEOUT_S = 3.0
 CLOSE_TIMEOUT_S = 5.0
 MAX_LIST_PAGES = 100
 MAX_POOL_CLIENTS = 100
@@ -134,6 +134,7 @@ class HttpUpstreamClient:
         upstream_id: str = "upstream",
         protocol: Protocol_ = "auto",
         backoff_s: Sequence[float] = RECONNECT_BACKOFF_S,
+        health_timeout_s: float = HEALTH_TIMEOUT_S,
     ) -> None:
         self.url = url
         self.upstream_id = upstream_id
@@ -142,6 +143,7 @@ class HttpUpstreamClient:
         self._task_group = task_group
         self._protocol = protocol
         self._backoff_s = tuple(backoff_s)
+        self._health_timeout_s = health_timeout_s
         self._connection: _Connection | None = None
         self._lock = anyio.Lock()
         self._closed = False
@@ -168,13 +170,15 @@ class HttpUpstreamClient:
             ) from None
 
     async def health(self) -> bool:
-        connection = self._connection
-        if self._closed or connection is None or connection.client is None:
+        """Can the upstream answer a request now? Asks for the first page of tools, because `ping`
+        is gone in the newer protocol era. It connects if there is no session yet (a probe must
+        notice an upstream that has come back), but makes one attempt and does not wait through
+        the reconnect backoff."""
+        if self._closed:
             return False
         try:
-            with anyio.fail_after(HEALTH_TIMEOUT_S):
-                # ping is gone in the newer protocol era, so ask for the first page of tools.
-                await connection.client.list_tools(cache_mode="refresh")
+            with anyio.fail_after(self._health_timeout_s):
+                await self._with_session(self._first_page, attempts=1)
         except Exception:
             return False
         return True
@@ -184,6 +188,10 @@ class HttpUpstreamClient:
         connection, self._connection = self._connection, None
         if connection is not None:
             await connection.close()
+
+    @staticmethod
+    async def _first_page(client: Client) -> None:
+        await client.list_tools(cache_mode="refresh")
 
     async def _list_all(self, client: Client) -> list[UpstreamTool]:
         tools: list[UpstreamTool] = []
@@ -205,9 +213,11 @@ class HttpUpstreamClient:
             Code.UPSTREAM_ERROR, "the upstream server lists more tools than Keystone reads"
         )
 
-    async def _with_session[T](self, action: Callable[[Client], Awaitable[T]]) -> T:
+    async def _with_session[T](
+        self, action: Callable[[Client], Awaitable[T]], *, attempts: int | None = None
+    ) -> T:
         for attempt in range(2):
-            client = await self._client()
+            client = await self._client(attempts)
             try:
                 return await action(client)
             except Reject:
@@ -234,7 +244,9 @@ class HttpUpstreamClient:
                 ) from None
         raise Reject(Code.UPSTREAM_ERROR, "the upstream server lost the session twice")
 
-    async def _client(self) -> Client:
+    async def _client(self, attempts: int | None = None) -> Client:
+        """The open client, connecting first if needed. `attempts` caps the connection attempts
+        (default: all of the backoff schedule)."""
         async with self._lock:
             if self._closed:
                 raise Reject(Code.UPSTREAM_ERROR, "the connection to the upstream server is closed")
@@ -244,7 +256,7 @@ class HttpUpstreamClient:
             if connection is not None:
                 self._connection = None
                 await connection.close()
-            for attempt in range(len(self._backoff_s) + 1):
+            for attempt in range(len(self._backoff_s) + 1 if attempts is None else attempts):
                 if attempt:
                     await anyio.sleep(self._backoff_s[attempt - 1])
                 opened = await self._open()
@@ -489,6 +501,7 @@ def directory_client_factory(
     *,
     protocol: Protocol_ = "auto",
     backoff_s: Sequence[float] = RECONNECT_BACKOFF_S,
+    health_timeout_s: float = HEALTH_TIMEOUT_S,
 ) -> ClientFactory:
     def make(upstream_id: str, headers: dict[str, str], task_group: TaskGroup) -> UpstreamClient:
         target = directory.get(upstream_id)
@@ -502,6 +515,7 @@ def directory_client_factory(
                 upstream_id=upstream_id,
                 protocol=protocol,
                 backoff_s=backoff_s,
+                health_timeout_s=health_timeout_s,
             )
         raise ValueError(f"upstream {upstream_id!r}: transport {target.transport!r} is not served")
 

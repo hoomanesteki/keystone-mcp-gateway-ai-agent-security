@@ -7,7 +7,7 @@ gets a new one, because a session manager runs once per instance (engineering no
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import httpx2
 import pytest
@@ -19,7 +19,7 @@ from pydantic import SecretStr
 from keystone.app import create_app
 from keystone.audit.sink import InMemoryAuditSink
 from keystone.registry.config import UpstreamConfig
-from keystone.settings import RegistrySettings, Settings, TenantConfig
+from keystone.settings import HealthSettings, RegistrySettings, Settings, TenantConfig
 from tests.fixtures.servers import ServerThread
 
 # Re-exported so tests/conftest.py can name one module: tests/unit/test_phase_plugin.py copies the
@@ -92,6 +92,45 @@ def keystone_app(keystone_app_factory: Callable[..., KeystoneApp]) -> KeystoneAp
     return keystone_app_factory()
 
 
+@pytest.fixture
+def start_keystone(
+    clean_env: None, test_database_url: str, clean_db: None
+) -> Iterator[Callable[..., KeystoneApp]]:
+    """Start Keystone with upstreams the test chooses, for tests about upstreams that go down or
+    arrive late. The timers (periodic sync, health probes) are off unless the test sets them."""
+    started: list[KeystoneApp] = []
+
+    def start(
+        upstreams: list[UpstreamConfig],
+        *,
+        registry: RegistrySettings | None = None,
+        health: HealthSettings | None = None,
+        **app_options: Any,
+    ) -> KeystoneApp:
+        settings = Settings(
+            env="test",
+            database_url=SecretStr(test_database_url),
+            tenants=[TenantConfig(id="acme", name="Acme Corp")],
+            allow_private_upstreams=True,
+            upstreams=upstreams,
+            registry=registry or RegistrySettings(sync_interval_s=0),
+            health=health or HealthSettings(interval_s=0),
+        )
+        app = create_app(settings, **app_options)
+        running = KeystoneApp(app, ServerThread(app).start())
+        started.append(running)
+        return running
+
+    yield start
+    for running in reversed(started):
+        running.thread.stop()
+
+
+class Endpoint(Protocol):
+    @property
+    def url(self) -> str: ...
+
+
 McpConnect = Callable[..., AbstractAsyncContextManager[Client]]
 
 
@@ -101,7 +140,7 @@ def mcp_client() -> McpConnect:
 
     @asynccontextmanager
     async def connect(
-        app: KeystoneApp, *, token: str | None = None, **client_options: Any
+        app: Endpoint, *, token: str | None = None, **client_options: Any
     ) -> AsyncIterator[Client]:
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         async with httpx2.AsyncClient(headers=headers, timeout=httpx2.Timeout(15)) as http:
