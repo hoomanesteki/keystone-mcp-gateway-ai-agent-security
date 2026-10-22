@@ -150,6 +150,42 @@ gone. A failure on one upstream does not touch any other upstream, and startup c
 upstream's tools stay as they were and the timer tries it again at the next round. `keystone
 upstream list` shows the error under the row.
 
+### Pinning and quarantine
+
+A tool's description is text the model reads, so a server that changes it after you approved it
+can give the agent new instructions. Keystone stores the description and the schema it first saw
+(the pinned definition) with their hashes, and shows agents only that.
+
+When a sync finds a different description or schema, the tool is `quarantined`, with the reason
+`description_changed`, `schema_changed` or both, and the new definition waits next to the pinned
+one. A quarantined tool is left out of `tools/list`, and a call to it returns `KS_QUARANTINED`
+without reaching the upstream. The check reads the tool's status from Postgres on every call, so a
+quarantine made by the CLI in another process stops the very next call. If an upstream takes the
+change back, the tool is released by the next sync. A newer offer replaces an older pending one.
+
+| Command | What it does |
+|---|---|
+| `keystone tool list [--status S] [--json]` | Every tool with its status and reason. |
+| `keystone tool show NAME` | The pinned definition, the pending one, a diff, and a fingerprint of the pending definition. |
+| `keystone tool approve-change NAME [--expect FP] [--note TEXT]` | Make the pending definition the pinned one, recompute the hashes and set the tool `active`. With `--expect`, refuses if the pending definition is no longer the one with that fingerprint. The note goes in the log. |
+| `keystone tool disable NAME` / `enable NAME` | Take a tool out of service by hand. Sync never re-enables a tool you disabled. `enable` refuses a quarantined tool (approve it instead) and one the upstream stopped listing. |
+
+A tool seen for the first time is screened too (`keystone.defense.description_check`). Five
+rules look for characters a reader cannot see (tag characters, zero-width and bidirectional
+controls), phrases such as "ignore all previous instructions" or "do not tell the user", the pseudo
+tags `<important>` and `<system>`, "before using this tool" together with read, send or call, and a
+description longer than 2,000 characters. A tool that trips any of them is created `quarantined`
+with the reason `suspicious_description:<rule ids>`, and has no pending definition. The agent is
+told the category only, not which rule fired. `approve-change` releases it as it is after you have
+read it. This is a short list of crude patterns and a determined author will get past it. It is
+meant to stop the careless cases and to make a person look; Phase 7 replaces it with a scanner.
+Try it: `ECHO_POISONED=1` makes the demo echo server list a tool that is held at first sight.
+
+Review with `tool show`, then approve with the fingerprint it printed:
+`keystone tool approve-change echo__echo --expect 1a2b3c4d5e6f`. Without `--expect`, a server
+that changes the definition again between your review and your approval gets the second version
+approved. The approval is logged now; the audit log records it from Phase 5.
+
 ### Health
 
 Every `health.interval_s` Keystone asks each live upstream for its first page of tools, with a

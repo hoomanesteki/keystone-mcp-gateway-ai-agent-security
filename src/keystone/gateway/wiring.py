@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from keystone.gateway.interceptors.pinning import PinningInterceptor, ToolStateLookup
 from keystone.gateway.pipeline import AuditSink, Dispatcher, Interceptor, Pipeline
 from keystone.gateway.stubs import (
     ApprovalInterceptor,
@@ -11,7 +12,6 @@ from keystone.gateway.stubs import (
     CredentialInterceptor,
     MeteringInterceptor,
     OutputScanInterceptor,
-    PinningInterceptor,
     PolicyInterceptor,
     RateLimitInterceptor,
     SessionFlagsInterceptor,
@@ -38,6 +38,9 @@ class PipelineDeps:
     dispatcher: Dispatcher
     audit: AuditSink
     tracer: Tracer = field(default_factory=NoopTracer)
+    # Where the pinning slot reads a tool's current status. Without one it trusts the tool it was
+    # handed, which is what the unit tests want.
+    tool_states: ToolStateLookup | None = None
 
 
 def build_pipeline(
@@ -53,7 +56,7 @@ def build_pipeline(
         raise ValueError(f"unknown interceptor slot: {', '.join(unknown)}")
     stubs: dict[str, Interceptor] = {
         "rate_limit": RateLimitInterceptor(),
-        "pinning": PinningInterceptor(),
+        "pinning": PinningInterceptor(deps.tool_states),
         "budget": BudgetInterceptor(),
         "policy": PolicyInterceptor(),
         "approval": ApprovalInterceptor(),

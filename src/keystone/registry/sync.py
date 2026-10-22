@@ -20,7 +20,8 @@ from pydantic import BaseModel, Field
 from keystone.core.canonical import canonical_json, sha256_hex
 from keystone.core.errors import Reject
 from keystone.core.types import Risk, ToolRef, ToolStatus, ToolTag
-from keystone.db.models import Upstream
+from keystone.db.models import Tool, Upstream
+from keystone.defense.description_check import check_description
 from keystone.gateway.upstreams import (
     UpstreamDirectory,
     UpstreamPool,
@@ -29,15 +30,12 @@ from keystone.gateway.upstreams import (
 )
 from keystone.registry.config import ToolOverride
 from keystone.registry.naming import make_tool_name
+from keystone.registry.pinning import CHANGE_REASONS, REMOVED, SUSPICIOUS, change_reason
 from keystone.registry.repo import ToolRepo, UpstreamRepo
 
 log = structlog.get_logger()
 
 DEFAULT_TIMEOUT_S = 20.0
-# Why sync disabled a tool, kept in `quarantine_reason`. A tool disabled for this reason comes
-# back by itself when its upstream lists it again with the definition we hold. A tool an operator
-# disabled does not.
-REMOVED = "removed_from_upstream"
 
 
 class SyncReport(BaseModel):
@@ -46,7 +44,10 @@ class SyncReport(BaseModel):
     upstream_id: str
     created: list[str] = Field(default_factory=list)
     unchanged: list[str] = Field(default_factory=list)
+    # Listed with a description or schema other than the one we hold. Each is held for review.
     changed: list[str] = Field(default_factory=list)
+    # The part of `changed` that this sync newly quarantined.
+    quarantined: list[str] = Field(default_factory=list)
     removed: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
 
@@ -204,16 +205,12 @@ class RegistrySyncer:
             ref = build_tool_ref(row, name, tool, overrides.get(tool.name))
             old = stored.get(name)
             if old is None:
-                await self.tools.upsert(ref)
-                report.created.append(name)
+                await self._create(ref, report)
             elif (old.description_hash, old.schema_hash) != (ref.description_hash, ref.schema_hash):
-                # A definition the operator has not seen. Pinning decides what to do with it.
-                await self.tools.refresh(ref)
-                report.changed.append(name)
+                await self._hold_change(row, old, ref, report)
             else:
                 await self.tools.refresh(ref)
-                if old.status == ToolStatus.DISABLED and old.quarantine_reason == REMOVED:
-                    await self.tools.set_status(row.tenant_id, name, ToolStatus.ACTIVE)
+                await self._settle(row, old)
                 report.unchanged.append(name)
 
         for name, old in stored.items():
@@ -222,5 +219,69 @@ class RegistrySyncer:
                     row.tenant_id, name, ToolStatus.DISABLED, reason=REMOVED
                 )
                 report.removed.append(name)
-        for names in (report.created, report.unchanged, report.changed, report.removed):
+        for names in (
+            report.created,
+            report.unchanged,
+            report.changed,
+            report.quarantined,
+            report.removed,
+        ):
             names.sort()
+
+    async def _create(self, ref: ToolRef, report: SyncReport) -> None:
+        """Store a tool seen for the first time. One whose description trips the screening is
+        stored quarantined, so it never reaches a model before a person has read it."""
+        hits = check_description(ref.description)
+        if not hits:
+            await self.tools.upsert(ref)
+        else:
+            reason = f"{SUSPICIOUS}:{','.join(hits)}"
+            held = ref.model_copy(update={"status": ToolStatus.QUARANTINED})
+            await self.tools.upsert(held, quarantine_reason=reason)
+            report.quarantined.append(ref.name)
+            log.warning("tool_quarantined", upstream=ref.upstream_id, tool=ref.name, reason=reason)
+        report.created.append(ref.name)
+
+    async def _settle(self, row: Upstream, old: Tool) -> None:
+        """The upstream lists the definition we hold. A tool that sync disabled because it was
+        gone is active again. A tool quarantined for a change the upstream has since taken back
+        is released: nothing but the definition a person accepted is on offer any more."""
+        if old.status == ToolStatus.DISABLED and old.quarantine_reason == REMOVED:
+            await self.tools.set_status(row.tenant_id, old.name, ToolStatus.ACTIVE)
+        elif (
+            old.status == ToolStatus.QUARANTINED
+            and old.pending_description is not None
+            and old.quarantine_reason in CHANGE_REASONS
+        ):
+            await self.tools.clear_pending(row.tenant_id, old.name)
+            log.info("tool_released", upstream=row.id, tool=old.name, why="change taken back")
+
+    async def _hold_change(
+        self, row: Upstream, old: Tool, ref: ToolRef, report: SyncReport
+    ) -> None:
+        """The upstream lists a different definition. Keep the one we hold, store the new one as
+        pending and quarantine the tool. A tool an operator disabled stays disabled."""
+        report.changed.append(ref.name)
+        await self.tools.refresh(ref)
+        if old.status == ToolStatus.DISABLED and old.quarantine_reason != REMOVED:
+            return
+        reason = change_reason(
+            (old.description_hash, old.schema_hash), (ref.description_hash, ref.schema_hash)
+        )
+        if (
+            old.status == ToolStatus.QUARANTINED
+            and old.pending_description == ref.description
+            and old.pending_schema == ref.input_schema
+        ):
+            return  # the same pending definition as last time: already held, nothing new to say
+        await self.tools.set_pending(
+            row.tenant_id,
+            ref.name,
+            description=ref.description,
+            input_schema=ref.input_schema,
+            reason=reason or CHANGE_REASONS[0],
+        )
+        report.quarantined.append(ref.name)
+        log.warning(
+            "tool_quarantined", upstream=row.id, tool=ref.name, reason=reason, before=old.status
+        )

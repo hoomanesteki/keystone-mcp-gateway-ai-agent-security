@@ -3,28 +3,21 @@
 import json
 from typing import Any
 
-import anyio
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from typer.testing import CliRunner
 
-from keystone.admin.cli import app as cli
 from keystone.core.types import Risk
 from keystone.db.tenants import upsert_tenants
 from keystone.registry.config import UpstreamConfig, apply_config_upstreams
 from keystone.registry.repo import ToolRepo, UpstreamRepo
 from keystone.settings import TenantConfig
+from tests.fixtures.cli import invoke
 from tests.fixtures.upstreams import DemoUpstreams
 
 pytestmark = [pytest.mark.phase(2), pytest.mark.services]
 
 Sessions = async_sessionmaker[AsyncSession]
 DEAD = "http://127.0.0.1:1/mcp"
-
-
-async def invoke(url: str, args: list[str], **env: str) -> Any:
-    environment = {"KEYSTONE_DATABASE_URL": url, "KEYSTONE_ALLOW_PRIVATE_UPSTREAMS": "true", **env}
-    return await anyio.to_thread.run_sync(lambda: CliRunner().invoke(cli, args, env=environment))
 
 
 async def seed(sessions: Sessions, demo: DemoUpstreams, **urls: str) -> None:

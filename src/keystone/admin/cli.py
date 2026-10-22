@@ -5,21 +5,38 @@ from datetime import UTC
 from enum import StrEnum
 from typing import Annotated, Any
 
+import structlog
 import typer
 import uvicorn
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from keystone import __version__
 from keystone.app import create_app
-from keystone.db.models import Upstream
+from keystone.core.types import ToolStatus
+from keystone.db.models import Tool, Upstream
 from keystone.db.session import create_engine, make_sessionmaker
+from keystone.defense.description_check import check_description
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
 from keystone.logging import configure_logging
 from keystone.registry.config import tool_overrides
 from keystone.registry.naming import check_upstream_id
-from keystone.registry.repo import Sessionmaker, ToolRepo, UpstreamRepo, UpstreamSpec
+from keystone.registry.pinning import (
+    OPERATOR_DISABLED,
+    REMOVED,
+    pending_fingerprint,
+    schema_text,
+    unified_diff,
+)
+from keystone.registry.repo import (
+    PinningError,
+    Sessionmaker,
+    ToolRepo,
+    UpstreamRepo,
+    UpstreamSpec,
+)
 from keystone.registry.ssrf import UnsafeUpstreamUrl, check_upstream_url
 from keystone.registry.sync import RegistrySyncer, SyncReport
 from keystone.settings import Settings
@@ -33,6 +50,11 @@ registry_app = typer.Typer(
     help="Inspect and sync the tool registry.", no_args_is_help=True, add_completion=False
 )
 app.add_typer(registry_app, name="registry")
+tool_app = typer.Typer(
+    help="Review, approve and disable tools.", no_args_is_help=True, add_completion=False
+)
+app.add_typer(tool_app, name="tool")
+log = structlog.get_logger()
 
 
 class CliError(Exception):
@@ -289,7 +311,11 @@ def render_reports(reports: list[SyncReport]) -> str:
             str(len(r.removed)),
         )
         table.append((r.upstream_id, *counts, "ok" if r.ok else "failed"))
-        notes[index] = [f"changed: {n}" for n in r.changed] + [f"removed: {n}" for n in r.removed]
+        held = set(r.quarantined)
+        notes[index] = [
+            f"changed: {n}" + (" (quarantined)" if n in held else "") for n in r.changed
+        ]
+        notes[index] += [f"removed: {n}" for n in r.removed]
         notes[index] += [f"error: {e}" for e in r.errors]
     widths = [max(len(line[i]) for line in table) for i in range(len(header))]
     lines: list[str] = []
@@ -333,3 +359,205 @@ def upstream_sync(
 ) -> None:
     """Read one upstream's tools now (the same as `registry sync --upstream ID`)."""
     sync_command(upstream_id, as_json)
+
+
+async def find_tool(
+    settings: Settings, sessions: Sessionmaker, name: str, tenant: str | None
+) -> Tool:
+    """The tool called `name`. The tenant is `--tenant`, else the config's only tenant, else the
+    only tenant that has a tool of that name."""
+    repo = ToolRepo(sessions)
+    if tenant is None and len(settings.tenants) == 1:
+        tenant = settings.tenants[0].id
+    if tenant is not None:
+        found = await repo.get(tenant, name)
+        if found is None:
+            raise CliError(f"there is no tool {name!r} in tenant {tenant!r}")
+        return found
+    async with sessions() as session:
+        rows = (await session.scalars(select(Tool).where(Tool.name == name))).all()
+    if not rows:
+        raise CliError(f"there is no tool {name!r}")
+    if len(rows) > 1:
+        raise CliError(f"tool {name!r} exists in several tenants: pass --tenant")
+    return rows[0]
+
+
+def render_tool(tool: Tool) -> str:
+    lines = [
+        f"{tool.name}  (upstream {tool.upstream_id}, tenant {tool.tenant_id})",
+        f"status:   {tool.status}"
+        + (f" ({tool.quarantine_reason})" if tool.quarantine_reason else ""),
+        f"risk:     {tool.risk}   tags: {', '.join(tool.tags) or '-'}",
+        "pinned:   description sha256 "
+        f"{tool.description_hash[:12]}, schema sha256 {tool.schema_hash[:12]}",
+    ]
+    if tool.pending_description is not None and tool.pending_schema is not None:
+        fingerprint = pending_fingerprint(tool.pending_description, tool.pending_schema)
+        lines.append(f"pending:  fingerprint {fingerprint[:12]}")
+        command = f"keystone tool approve-change {tool.name} --expect {fingerprint[:12]}"
+        lines.append(f"          to accept it: {command}")
+    lines += ["", "description (current):", indent(tool.description)]
+    if hits := check_description(tool.description):
+        lines.append(f"  screening: {', '.join(hits)}")
+    if tool.pending_description is not None and tool.pending_schema is not None:
+        lines += ["", "description (pending):", indent(tool.pending_description)]
+        if hits := check_description(tool.pending_description):
+            lines.append(f"  screening: {', '.join(hits)}")
+        description_diff = unified_diff(tool.description, tool.pending_description, "description")
+        schema_diff = unified_diff(
+            schema_text(tool.input_schema), schema_text(tool.pending_schema), "schema"
+        )
+        lines += ["", "diff:", indent(description_diff or "(the description is the same)")]
+        if schema_diff:
+            lines += ["", indent(schema_diff)]
+        else:
+            lines += ["", indent("(the schema is the same)")]
+    return "\n".join(lines)
+
+
+def indent(text: str) -> str:
+    return "\n".join(f"  {line}" for line in text.splitlines() or [""])
+
+
+@tool_app.command("list")
+def tool_list(
+    status: Annotated[
+        str | None,
+        typer.Option(help="Only tools with this status (active, quarantined, disabled)."),
+    ] = None,
+    tenant: Annotated[str | None, typer.Option(help="Tenant id. Default: the only tenant.")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Print JSON instead of a table.")] = False,
+) -> None:
+    """List tools with their status."""
+
+    async def action(settings: Settings, sessions: Sessionmaker) -> list[Tool]:
+        tenant_id = tenant or (settings.tenants[0].id if len(settings.tenants) == 1 else None)
+        wanted = None
+        if status is not None:
+            try:
+                wanted = ToolStatus(status)
+            except ValueError:
+                raise CliError("status must be active, quarantined or disabled") from None
+        statement = select(Tool).order_by(Tool.tenant_id, Tool.name)
+        if tenant_id is not None:
+            statement = statement.where(Tool.tenant_id == tenant_id)
+        if wanted is not None:
+            statement = statement.where(Tool.status == wanted.value)
+        async with sessions() as session:
+            return list((await session.scalars(statement)).all())
+
+    rows = run_with_database(action)
+    if as_json:
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "name": t.name,
+                        "tenant": t.tenant_id,
+                        "status": t.status,
+                        "reason": t.quarantine_reason,
+                        "risk": t.risk,
+                    }
+                    for t in rows
+                ],
+                indent=2,
+            )
+        )
+        return
+    if not rows:
+        typer.echo("no tools")
+        return
+    table = [("NAME", "TENANT", "STATUS", "RISK", "REASON")] + [
+        (t.name, t.tenant_id, t.status, t.risk, t.quarantine_reason or "-") for t in rows
+    ]
+    widths = [max(len(line[i]) for line in table) for i in range(5)]
+    for line in table:
+        typer.echo("  ".join(cell.ljust(w) for cell, w in zip(line, widths, strict=True)).rstrip())
+
+
+@tool_app.command("show")
+def tool_show(
+    name: Annotated[str, typer.Argument(metavar="NAME", help="Exposed name, e.g. echo__echo.")],
+    tenant: Annotated[str | None, typer.Option(help="Tenant id.")] = None,
+) -> None:
+    """Print a tool's current definition and, if it is held, the pending one with a diff."""
+
+    async def action(settings: Settings, sessions: Sessionmaker) -> str:
+        return render_tool(await find_tool(settings, sessions, name, tenant))
+
+    typer.echo(run_with_database(action))
+
+
+@tool_app.command("approve-change")
+def tool_approve_change(
+    name: Annotated[str, typer.Argument(metavar="NAME")],
+    note: Annotated[str | None, typer.Option(help="Why you accept it. Goes in the log.")] = None,
+    expect: Annotated[
+        str | None,
+        typer.Option(help="The fingerprint `tool show` printed. Refuses if the pending changed."),
+    ] = None,
+    tenant: Annotated[str | None, typer.Option(help="Tenant id.")] = None,
+) -> None:
+    """Accept the pending definition of a quarantined tool and make the tool active again."""
+
+    async def action(settings: Settings, sessions: Sessionmaker) -> str:
+        found = await find_tool(settings, sessions, name, tenant)
+        try:
+            row = await ToolRepo(sessions).approve_change(found.tenant_id, name, expect_hash=expect)
+        except PinningError as exc:
+            raise CliError(str(exc)) from exc
+        log.warning(
+            "tool_change_approved",
+            tool=name,
+            tenant=found.tenant_id,
+            was=found.quarantine_reason,
+            description_hash=row.description_hash,
+            note=note,
+        )
+        return f"approved {name}: active with description sha256 {row.description_hash[:12]}"
+
+    typer.echo(run_with_database(action))
+
+
+@tool_app.command("disable")
+def tool_disable(
+    name: Annotated[str, typer.Argument(metavar="NAME")],
+    tenant: Annotated[str | None, typer.Option(help="Tenant id.")] = None,
+) -> None:
+    """Take a tool out of the list and refuse calls to it. Sync will not turn it back on."""
+
+    async def action(settings: Settings, sessions: Sessionmaker) -> str:
+        found = await find_tool(settings, sessions, name, tenant)
+        await ToolRepo(sessions).set_status(
+            found.tenant_id, name, ToolStatus.DISABLED, reason=OPERATOR_DISABLED
+        )
+        return f"disabled {name}"
+
+    typer.echo(run_with_database(action))
+
+
+@tool_app.command("enable")
+def tool_enable(
+    name: Annotated[str, typer.Argument(metavar="NAME")],
+    tenant: Annotated[str | None, typer.Option(help="Tenant id.")] = None,
+) -> None:
+    """Turn a tool you disabled back on."""
+
+    async def action(settings: Settings, sessions: Sessionmaker) -> str:
+        found = await find_tool(settings, sessions, name, tenant)
+        if found.status == ToolStatus.ACTIVE.value:
+            return f"{name} is already active"
+        if found.status == ToolStatus.QUARANTINED.value:
+            raise CliError(f"{name} is quarantined: review it, then use approve-change")
+        if found.quarantine_reason != OPERATOR_DISABLED:
+            why = (
+                "its upstream no longer lists it"
+                if found.quarantine_reason == REMOVED
+                else "it was not disabled by an operator"
+            )
+            raise CliError(f"{name} cannot be enabled by hand: {why}")
+        await ToolRepo(sessions).set_status(found.tenant_id, name, ToolStatus.ACTIVE)
+        return f"enabled {name}"
+
+    typer.echo(run_with_database(action))
