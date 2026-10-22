@@ -10,7 +10,7 @@ endef
 # Compose reads .env from the compose file's directory by default. Point it at the repo root instead.
 COMPOSE := docker compose -f deploy/docker-compose.yml $(if $(wildcard .env),--env-file .env)
 
-.PHONY: help setup lint fmt type test-unit test-int test-e2e test check ci-local gate up up-core down reset demo github-setup
+.PHONY: help setup lint fmt type test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo github-setup
 
 help:
 	@grep -E '^[a-z0-9-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | column -t -s $$'\t'
@@ -42,6 +42,9 @@ test-e2e: ## end-to-end tests against the compose stack
 test: test-unit test-int ## unit plus integration
 
 check: up-core lint type test-unit test-int ## lint, types, unit, integration
+
+migrate: ## apply database migrations to KEYSTONE_DATABASE_URL
+	$(RUN) alembic upgrade head
 
 ci-local: up-core ## the same steps as CI, run locally
 	uv sync --locked

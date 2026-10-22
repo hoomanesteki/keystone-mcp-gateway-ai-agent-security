@@ -5,7 +5,7 @@ import pytest
 
 from keystone.settings import Settings
 
-pytest_plugins = ["pytester"]
+pytest_plugins = ["pytester", "tests.fixtures.db"]
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

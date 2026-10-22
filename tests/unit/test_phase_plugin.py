@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ CONFTEST = Path(__file__).resolve().parents[1] / "conftest.py"
 @pytest.fixture
 def plugin_project(pytester: pytest.Pytester) -> pytest.Pytester:
     # Reuse the real conftest so the test covers the plugin that the suite ships.
-    source = CONFTEST.read_text().replace('pytest_plugins = ["pytester"]\n', "")
+    source = re.sub(r"^pytest_plugins = .*\n", "", CONFTEST.read_text(), flags=re.MULTILINE)
     pytester.makeconftest(source)
     return pytester
 
