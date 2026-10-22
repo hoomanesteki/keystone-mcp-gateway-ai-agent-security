@@ -1,0 +1,19 @@
+# The Phase 1 demo: list the tools, check a balance, send a mail, read a mail.
+#
+# Keep this order. In Phase 7 a session that reads mail is tainted (the mail may carry an
+# injected instruction), and sending mail after reading it needs approval under the Rule of Two.
+# Sending first and reading last keeps this script valid in every later phase.
+#
+# The caller is an operator (acme/olivia), because send_email and transfer become high risk in
+# Phase 4 and only operators may use them. The recipient is on @acme.test for the same reason.
+steps:
+  - list_tools: true
+  - tool: bank__get_balance
+    args: {account: CHK-001}
+  - tool: mail__send_email
+    args:
+      to: colleague@acme.test
+      subject: Q3 budget review
+      body: The Q3 numbers are in the reports folder. Operations is 4 percent over plan.
+  - tool: mail__read_email
+    args: {email_id: m02}
