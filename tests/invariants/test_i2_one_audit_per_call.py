@@ -46,6 +46,7 @@ CALLS: list[tuple[str, dict[str, Any], str]] = [
 ]
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_i2(keystone_app_factory: Any, mcp_client: McpConnect) -> None:
     app: KeystoneApp = keystone_app_factory(
@@ -62,6 +63,7 @@ async def test_i2(keystone_app_factory: Any, mcp_client: McpConnect) -> None:
     assert len({r["call_id"] for r in records}) == len(CALLS)
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_i2_concurrent_calls(keystone_app: KeystoneApp, mcp_client: McpConnect) -> None:
     async with mcp_client(keystone_app) as client, anyio.create_task_group() as calls:

@@ -230,5 +230,31 @@ async def test_the_pool_builds_http_clients_by_upstream_id(demo_upstreams: DemoU
     assert len(texts_from(listed.content)) == 2
 
 
+@pytest.mark.phase(2)
+async def test_a_call_finishes_when_its_client_is_evicted_mid_call(
+    demo_upstreams: DemoUpstreams,
+) -> None:
+    urls = {"echo": demo_upstreams.url("echo"), "mail": demo_upstreams.url("mail")}
+    answers: list[Any] = []
+
+    async def slow_call(pool: UpstreamPool) -> None:
+        async with pool.lease("echo", None) as client:
+            answers.append(await client.call_tool("sleep", {"seconds": 1}, timeout_s=10))
+
+    async with (
+        UpstreamPool(http_client_factory(urls), max_clients=1) as pool,
+        anyio.create_task_group() as tg,
+    ):
+        tg.start_soon(slow_call, pool)
+        await anyio.sleep(0.4)
+        # One slot only: this evicts the echo client while its sleep call is running.
+        async with pool.lease("mail", None) as mail:
+            assert {t.name for t in await mail.list_tools()} >= {"send_email"}
+
+    [answer] = answers
+    assert answer.is_error is False
+    assert text_of(answer.content) == "slept 1"
+
+
 def texts_from(blocks: list[dict[str, Any]]) -> list[str]:
     return [str(b["text"]) for b in blocks if b.get("type") == "text"]

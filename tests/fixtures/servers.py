@@ -5,8 +5,10 @@ The thread has its own event loop, so a test server never shares a loop with pyt
 server reports it has started, so two test runs never collide.
 """
 
+import socket
 import threading
 import time
+from collections.abc import Callable
 from typing import Self
 
 import uvicorn
@@ -25,6 +27,7 @@ class ServerThread:
         self.server = uvicorn.Server(config)
         self.host = host
         self._thread = threading.Thread(target=self.server.run, name="test-server", daemon=True)
+        self._stopped = False
 
     def start(self) -> Self:
         self._thread.start()
@@ -38,6 +41,9 @@ class ServerThread:
         return self
 
     def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
         self.server.should_exit = True
         self._thread.join(STOP_TIMEOUT_S)
         if self._thread.is_alive():
@@ -51,3 +57,41 @@ class ServerThread:
     @property
     def url(self) -> str:
         return f"http://{self.host}:{self.port}"
+
+
+def free_port() -> int:
+    """A port nothing listens on now. Another process could take it before the caller does, which
+    is acceptable in a test."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port: int = probe.getsockname()[1]
+    return port
+
+
+class RestartableServer:
+    """A server on a fixed port that a test can stop and start again, to play an upstream that
+    goes down and comes back. `make_app` builds a new app on every start (engineering note 2)."""
+
+    def __init__(self, make_app: Callable[[], ASGIApp], *, port: int | None = None) -> None:
+        self._make_app = make_app
+        self.port = port or free_port()
+        self._thread: ServerThread | None = None
+
+    @property
+    def url(self) -> str:
+        """The MCP endpoint."""
+        return f"http://127.0.0.1:{self.port}/mcp"
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None
+
+    def start(self) -> Self:
+        if self._thread is None:
+            self._thread = ServerThread(self._make_app(), port=self.port).start()
+        return self
+
+    def stop(self) -> None:
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.stop()

@@ -173,7 +173,11 @@ async def test_an_after_hook_can_replace_the_result() -> None:
 
     events: list[str] = []
     sink = InMemoryAuditSink()
-    pipeline = Pipeline([Redactor()], SpyDispatcher(events), sink, NoopTracer())
+    # The pipeline itself refuses a call nobody has decided on (KS-191), so the test supplies a
+    # policy slot next to the redactor.
+    pipeline = Pipeline(
+        [Recorder("policy", events), Redactor()], SpyDispatcher(events), sink, NoopTracer()
+    )
 
     result = await pipeline.run(make_ctx())
 
@@ -312,3 +316,92 @@ async def test_a_cancelled_call_is_still_audited() -> None:
 
     assert [r["outcome"] for r in sink.records] == ["error"]
     assert sink.records[0]["dispatched"] is True
+
+
+class LeavesDecisionEmpty:
+    """A policy slot that does nothing, like a pass-through stub with a bug."""
+
+    name = "policy"
+
+    async def before_call(self, ctx: CallContext) -> None:
+        return None
+
+    async def after_call(self, ctx: CallContext) -> None:
+        return None
+
+
+class Decides:
+    """A policy slot that records one decision and never raises."""
+
+    name = "policy"
+
+    def __init__(self, effect: Effect, approval_id: str | None = None) -> None:
+        self.effect = effect
+        self.approval_id = approval_id
+
+    async def before_call(self, ctx: CallContext) -> None:
+        ctx.decision = Decision(effect=self.effect, source="policy")
+        ctx.approval_id = self.approval_id
+
+    async def after_call(self, ctx: CallContext) -> None:
+        return None
+
+
+def pipeline_with(policy: Any) -> tuple[Pipeline, SpyDispatcher, InMemoryAuditSink]:
+    dispatcher = SpyDispatcher([])
+    sink = InMemoryAuditSink()
+    return Pipeline([policy], dispatcher, sink, NoopTracer()), dispatcher, sink
+
+
+@pytest.mark.phase(2)
+async def test_no_decision_means_no_dispatch() -> None:
+    pipeline, dispatcher, sink = pipeline_with(LeavesDecisionEmpty())
+    ctx = make_ctx()
+
+    result = await pipeline.run(ctx)
+
+    assert result.is_error
+    assert result.content[0]["_meta"]["keystone/code"] == "KS_DENIED"
+    assert result.content[0]["_meta"]["keystone/reason"] == "no-decision"
+    assert "no-decision" in text_of(result)
+    assert dispatcher.events == []
+    assert ctx.dispatched is False
+    assert [(r["outcome"], r["reject_code"], r["dispatched"]) for r in sink.records] == [
+        ("rejected", "KS_DENIED", False)
+    ]
+
+
+@pytest.mark.phase(2)
+@pytest.mark.parametrize(
+    "policy",
+    [
+        Decides(Effect.DENY),
+        Decides(Effect.REQUIRE_APPROVAL),
+        Decides(Effect.DENY, approval_id="01JAPPROVAL"),
+    ],
+    ids=["deny", "approval-id-unset", "deny-with-approval-id"],
+)
+async def test_only_allow_or_a_granted_approval_reaches_dispatch(policy: Decides) -> None:
+    pipeline, dispatcher, sink = pipeline_with(policy)
+
+    result = await pipeline.run(make_ctx())
+
+    assert result.content[0]["_meta"]["keystone/code"] == "KS_DENIED"
+    assert dispatcher.events == []
+    assert [r["dispatched"] for r in sink.records] == [False]
+
+
+@pytest.mark.phase(2)
+@pytest.mark.parametrize(
+    "policy",
+    [Decides(Effect.ALLOW), Decides(Effect.REQUIRE_APPROVAL, approval_id="01JAPPROVAL")],
+    ids=["allow", "approved"],
+)
+async def test_an_allow_or_an_approved_decision_dispatches(policy: Decides) -> None:
+    pipeline, dispatcher, sink = pipeline_with(policy)
+
+    result = await pipeline.run(make_ctx())
+
+    assert not result.is_error
+    assert dispatcher.events == ["dispatch"]
+    assert [r["outcome"] for r in sink.records] == ["ok"]

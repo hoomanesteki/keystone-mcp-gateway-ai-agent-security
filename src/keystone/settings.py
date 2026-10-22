@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -11,7 +11,7 @@ from pydantic_settings import (
 )
 
 from keystone.core.types import Principal
-from keystone.registry.naming import check_upstream_id
+from keystone.registry.config import UpstreamConfig
 
 CONFIG_ENV_VAR = "KEYSTONE_CONFIG"
 
@@ -26,20 +26,38 @@ class TenantConfig(BaseModel):
     name: str = Field(min_length=1)
 
 
-class UpstreamConfig(BaseModel):
-    """One upstream MCP server. The gateway checks that an http upstream has a tenant and a url
-    when it starts, so a half-written entry loads here and fails there with a clear message."""
+class RegistrySettings(BaseModel):
+    """How the registry keeps its tool list current (KS-203)."""
 
-    id: str
-    tenant: str | None = None
-    transport: Literal["http", "builtin"] = "http"
-    url: str | None = None
+    model_config = ConfigDict(extra="forbid")
 
-    @field_validator("id")
-    @classmethod
-    def _valid_id(cls, value: str) -> str:
-        check_upstream_id(value)
-        return value
+    # How often every upstream is synced. 0 turns the periodic sync off.
+    sync_interval_s: float = Field(default=300.0, ge=0)
+    # The longest one upstream's sync may take, connecting included.
+    sync_timeout_s: float = Field(default=20.0, gt=0)
+    # How long the gateway keeps its in-memory copy of a tenant's tools. A sync run by the CLI
+    # reaches a running gateway after this long at most.
+    cache_ttl_s: float = Field(default=2.0, ge=0)
+
+
+class HealthSettings(BaseModel):
+    """How the gateway watches its upstreams (KS-209)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Seconds between probes. 0 turns the probes off, and no upstream is ever marked down.
+    interval_s: float = Field(default=30.0, ge=0)
+    # A probe that takes longer than this has failed.
+    timeout_s: float = Field(default=3.0, gt=0)
+    # Consecutive failed probes before an upstream is `degraded`, and before it is `down`.
+    degraded_after: int = Field(default=1, ge=1)
+    down_after: int = Field(default=3, ge=1)
+
+    @model_validator(mode="after")
+    def _down_comes_last(self) -> "HealthSettings":
+        if self.down_after < self.degraded_after:
+            raise ValueError("down_after must be at least degraded_after")
+        return self
 
 
 # Host header values the MCP endpoint accepts. A browser on another site can be tricked into
@@ -57,6 +75,8 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="KEYSTONE_",
+        # KEYSTONE_REGISTRY__SYNC_INTERVAL_S=5 sets registry.sync_interval_s.
+        env_nested_delimiter="__",
         extra="ignore",
         validate_by_name=True,
         validate_by_alias=True,
@@ -69,6 +89,11 @@ class Settings(BaseSettings):
     config_path: Path | None = Field(default=None, validation_alias=CONFIG_ENV_VAR)
     tenants: list[TenantConfig] = Field(default_factory=list)
     upstreams: list[UpstreamConfig] = Field(default_factory=list)
+    # Off by default: an upstream URL that resolves to a loopback, private or link-local address
+    # is refused (KS-202). Local compose and the tests turn it on: their upstreams are local.
+    allow_private_upstreams: bool = False
+    registry: RegistrySettings = Field(default_factory=RegistrySettings)
+    health: HealthSettings = Field(default_factory=HealthSettings)
     # Who every caller is until real authentication arrives (KS-304). Never allowed in prod.
     dev_principal: Principal | None = None
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))

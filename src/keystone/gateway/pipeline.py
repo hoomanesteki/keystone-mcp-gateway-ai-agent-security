@@ -7,6 +7,8 @@ Rules the code below keeps:
   wrote for the agent. Any other exception becomes a generic message and goes to the log.
 - A hook that crashes fails closed: before the dispatch the call is denied, after it the
   output is blocked. The audit outcome for a crash is "error", not "rejected".
+- The pipeline dispatches only when a decision allows it (`require_dispatch_decision`), so
+  invariant I1 does not rest on the policy slot alone.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from jsonschema.exceptions import best_match
 
 from keystone.core.canonical import canonical_json
 from keystone.core.errors import Code, Reject, to_tool_result
-from keystone.core.types import CallContext, ToolResult
+from keystone.core.types import CallContext, Effect, ToolResult
 from keystone.telemetry.tracing import Tracer
 
 log = structlog.get_logger()
@@ -31,6 +33,7 @@ MAX_ARGUMENT_BYTES = 1024 * 1024
 MAX_VALIDATION_MESSAGE = 300
 
 CRASH_MESSAGE = "the gateway could not finish checking this call"
+NO_DECISION = "no-decision"
 
 Outcome = Literal["ok", "rejected", "error"]
 
@@ -77,6 +80,32 @@ def validate_arguments(ctx: CallContext) -> None:
         raise Reject(Code.INVALID_ARGUMENTS, f"{message} (at {error.json_path})")
 
 
+def require_dispatch_decision(ctx: CallContext) -> None:
+    """Raise Reject(DENIED) unless ctx holds a decision that lets the call reach the upstream:
+    `allow`, or `require_approval` with an approval id (structural invariant I1, KS-191).
+
+    The approval interceptor (Phase 6) must set `ctx.approval_id` only after `consume` succeeded
+    on an approved request. Setting it on any other path turns a pending approval into an allow.
+    """
+    decision = ctx.decision
+    if decision is not None and (
+        decision.effect is Effect.ALLOW
+        or (decision.effect is Effect.REQUIRE_APPROVAL and ctx.approval_id)
+    ):
+        return
+    log.error(
+        "dispatch_without_decision",
+        call_id=ctx.call_id,
+        tool=ctx.tool.name,
+        effect=decision.effect.value if decision else None,
+    )
+    raise Reject(
+        Code.DENIED,
+        "no decision allows this call to run (no-decision)",
+        {"keystone/reason": NO_DECISION},
+    )
+
+
 class Pipeline:
     def __init__(
         self,
@@ -102,6 +131,7 @@ class Pipeline:
                     validate_arguments(ctx)
                     for interceptor in self.interceptors:
                         await self._hook(interceptor, interceptor.before_call, ctx, Code.DENIED)
+                    require_dispatch_decision(ctx)
                     ctx.dispatched = True
                     ctx.result = await self._dispatch(ctx)
                     for interceptor in self.interceptors:

@@ -46,16 +46,32 @@ _VERB: dict[Code, str] = {
 }
 
 
-def to_tool_result(r: Reject, call_id: str) -> ToolResult:
+KEYSTONE_META_PREFIX = "keystone/"
+
+
+class RejectionResult(ToolResult):
+    """A ToolResult that Keystone itself wrote to refuse a call. `meta` is the machine-readable
+    copy that also sits on the text block. The ToolResult contract (plan section 3.6) has no
+    result-level meta field and stays as it is, so the gateway reads `meta` from this subclass
+    when it builds the MCP result. An upstream's result is never an instance of it, which is how
+    the gateway tells a rejection from an upstream result that imitates one."""
+
+    meta: dict[str, Any]
+
+
+def to_tool_result(r: Reject, call_id: str) -> RejectionResult:
     """Rejections go back to the agent as a tool result with is_error=True,
     so the model can read the reason and adapt (ADR-0007). Text format:
     [keystone:KS_DENIED] call 01J... denied: <message>
     Machine-readable copy goes in _meta: {"keystone/code", "keystone/call_id", ...data}.
 
     ToolResult has no result-level meta field, and its contract does not change here, so the
-    _meta rides on the text content block, which MCP allows.
+    _meta rides on the text content block, which MCP allows. RejectionResult carries a second
+    copy for the gateway to put on the MCP result itself (KS-193).
     """
     text = f"[keystone:{r.code.value}] call {call_id} {_VERB[r.code]}: {r.message}"
     # The code and call id are written last, so Reject.data cannot overwrite them.
     meta = {**r.data, "keystone/code": r.code.value, "keystone/call_id": call_id}
-    return ToolResult(content=[{"type": "text", "text": text, "_meta": meta}], is_error=True)
+    return RejectionResult(
+        content=[{"type": "text", "text": text, "_meta": meta}], is_error=True, meta=meta
+    )

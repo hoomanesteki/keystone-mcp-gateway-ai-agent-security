@@ -7,14 +7,18 @@ served, because session state is keyed by Mcp-Session-Id and the newer era has n
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import anyio
 import mcp_types as types
 import structlog
 from fastapi import FastAPI
-from mcp.server import Server, ServerRequestContext
+from mcp.server import NotificationOptions, Server, ServerRequestContext
 from mcp.server.context import CallNext, HandlerResult
+from mcp.server.models import InitializationOptions
+from mcp.server.session import ServerSession
 from mcp.server.streamable_http_manager import StreamableHTTPASGIApp, StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import MCPError
@@ -25,18 +29,27 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
-from keystone.core.errors import Code, Reject, to_tool_result
+from keystone.core.errors import (
+    KEYSTONE_META_PREFIX,
+    Code,
+    Reject,
+    RejectionResult,
+    to_tool_result,
+)
 from keystone.core.ids import new_id
 from keystone.core.types import CallContext, Principal, SessionState, ToolRef, ToolResult
 from keystone.gateway.pipeline import Pipeline
-from keystone.gateway.sessions import InMemorySessionStore
-from keystone.registry.static import StaticRegistry
+from keystone.gateway.sessions import SessionStore
+from keystone.registry.service import ToolLookup
 from keystone.settings import Settings
 
 log = structlog.get_logger()
 
 SESSION_HEADER = "mcp-session-id"
+UNBOUND_PREFIX = "unbound-"
 CALL_ID_KEY = "keystone/call_id"
+MAX_OPEN_SESSIONS = 10_000
+NOTIFY_TIMEOUT_S = 2.0
 MAX_NAME_IN_MESSAGE = 100
 MAX_NAME_IN_AUDIT = 200
 
@@ -47,14 +60,18 @@ class Gateway:
     def __init__(
         self,
         settings: Settings,
-        registry: StaticRegistry,
-        sessions: InMemorySessionStore,
+        registry: ToolLookup,
+        sessions: SessionStore,
         pipeline: Pipeline,
     ) -> None:
         self.settings = settings
         self.registry = registry
         self.sessions = sessions
         self.pipeline = pipeline
+        # The sessions to tell when the tool list changes: session id -> (tenant, session). A
+        # session is kept as it was last seen, in least recently used order, and dropped when a
+        # notification to it fails. The SDK ends idle sessions without telling us.
+        self._open: OrderedDict[str, tuple[str, ServerSession]] = OrderedDict()
 
     def principal(self) -> Principal:
         # KS-304 replaces this with the principal from the validated token.
@@ -66,7 +83,9 @@ class Gateway:
     async def list_tools(
         self, ctx: Context, params: types.PaginatedRequestParams | None
     ) -> types.ListToolsResult:
-        tools = await self.registry.list_for_tenant(self.principal().tenant_id)
+        tenant_id = self.principal().tenant_id
+        self._remember(ctx, tenant_id)
+        tools = await self.registry.list_for_tenant(tenant_id)
         return types.ListToolsResult(
             tools=[
                 types.Tool(name=t.name, description=t.description, input_schema=t.input_schema)
@@ -78,13 +97,20 @@ class Gateway:
         self, ctx: Context, params: types.CallToolRequestParams
     ) -> types.CallToolResult:
         principal = self.principal()
-        session = await self._session(ctx, principal)
+        self._remember(ctx, principal.tenant_id)
+        session: SessionState | None = None
+        try:
+            session = await self._session(ctx, principal)
+        except Exception as exc:
+            # Flags and taint live in the session. A call that cannot read them does not run, and
+            # is still refused through the pipeline so that it leaves its audit record.
+            log.error("session_store_failed", error=type(exc).__name__)
         tool = await self.registry.get(principal.tenant_id, params.name)
         call = CallContext(
             call_id=new_id(),
             received_at=datetime.now(UTC),
             principal=principal,
-            session=session,
+            session=session or unbound_session(principal),
             tool=tool or unknown_tool(params.name, principal),
             arguments=params.arguments or {},
         )
@@ -93,21 +119,68 @@ class Gateway:
             result = await self.pipeline.reject(
                 call, Reject(Code.TOOL_NOT_FOUND, f"there is no tool named {shown!r}")
             )
+        elif session is None:
+            result = await self.pipeline.reject(
+                call, Reject(Code.DENIED, "session state is unavailable")
+            )
         else:
             result = await self.pipeline.run(call)
+            await self._save(session)
         return to_call_tool_result(result, call.call_id)
+
+    def _remember(self, ctx: Context, tenant_id: str) -> None:
+        request = cast("Request | None", ctx.request)
+        session_id = request.headers.get(SESSION_HEADER) if request is not None else None
+        if not session_id:
+            return
+        self._open[session_id] = (tenant_id, ctx.session)
+        self._open.move_to_end(session_id)
+        while len(self._open) > MAX_OPEN_SESSIONS:
+            self._open.popitem(last=False)
+
+    async def notify_tools_changed(self, tenant_id: str) -> None:
+        """Send `notifications/tools/list_changed` to every open session of the tenant. It reaches
+        a client that holds the standalone GET stream open; one that does not hears nothing and
+        finds out at its next `tools/list`."""
+        targets = [(sid, s) for sid, (tenant, s) in self._open.items() if tenant == tenant_id]
+
+        async def tell(session_id: str, session: ServerSession) -> None:
+            try:
+                with anyio.fail_after(NOTIFY_TIMEOUT_S):
+                    await session.send_tool_list_changed()
+            except Exception as exc:
+                self._open.pop(session_id, None)
+                log.debug("list_changed_not_sent", error=type(exc).__name__)
+
+        async with anyio.create_task_group() as group:
+            for session_id, session in targets:
+                group.start_soon(tell, session_id, session)
+
+    async def _save(self, session: SessionState) -> None:
+        """Write the session back after a call. A failure is logged and does not undo the call."""
+        if session.session_id.startswith(UNBOUND_PREFIX):
+            return
+        try:
+            await self.sessions.save(session)
+        except Exception as exc:
+            log.error("session_not_saved", error=type(exc).__name__)
 
     async def _session(self, ctx: Context, principal: Principal) -> SessionState:
         # ctx.request is typed Any in the SDK. On HTTP it is the Starlette request.
         request = cast("Request | None", ctx.request)
         session_id = request.headers.get(SESSION_HEADER) if request is not None else None
         if not session_id:
-            return SessionState(
-                session_id=f"unbound-{new_id()}", principal=principal, created_at=datetime.now(UTC)
-            )
+            return unbound_session(principal)
         return await self.sessions.get(session_id) or await self.sessions.create(
             session_id, principal
         )
+
+
+def unbound_session(principal: Principal) -> SessionState:
+    """State for a request that names no session. It is never stored."""
+    return SessionState(
+        session_id=f"{UNBOUND_PREFIX}{new_id()}", principal=principal, created_at=datetime.now(UTC)
+    )
 
 
 def unknown_tool(name: str, principal: Principal) -> ToolRef:
@@ -124,10 +197,21 @@ def unknown_tool(name: str, principal: Principal) -> ToolRef:
     )
 
 
+def result_meta(result: ToolResult, call_id: str) -> dict[str, Any]:
+    meta: dict[str, Any] = {CALL_ID_KEY: call_id}
+    # Only a result Keystone wrote itself counts. A text block from an upstream can carry any
+    # _meta, including keys that look like a rejection.
+    if isinstance(result, RejectionResult):
+        meta |= {k: v for k, v in result.meta.items() if k.startswith(KEYSTONE_META_PREFIX)}
+        meta[CALL_ID_KEY] = call_id
+    return meta
+
+
 def to_call_tool_result(result: ToolResult, call_id: str) -> types.CallToolResult:
     """The wire form. The result-level _meta is Keystone's own, never the upstream's, and it
-    names the call so an agent can quote it to whoever reads the audit log."""
-    meta = {CALL_ID_KEY: call_id}
+    names the call so an agent can quote it to whoever reads the audit log. A rejection adds its
+    `keystone/*` keys (the code, and any reason) so a client need not dig into the text block."""
+    meta = result_meta(result, call_id)
     try:
         return types.CallToolResult.model_validate(
             {
@@ -147,7 +231,13 @@ def to_call_tool_result(result: ToolResult, call_id: str) -> types.CallToolResul
             ),
             call_id,
         )
-        return types.CallToolResult.model_validate({"content": refusal.content, "isError": True})
+        return types.CallToolResult.model_validate(
+            {
+                "content": refusal.content,
+                "isError": True,
+                "_meta": result_meta(refusal, call_id),
+            }
+        )
 
 
 async def handshake_era_only(ctx: Context, call_next: CallNext) -> HandlerResult:
@@ -167,8 +257,27 @@ async def handshake_era_only(ctx: Context, call_next: CallNext) -> HandlerResult
     return await call_next(ctx)
 
 
+class KeystoneServer(Server[Any]):
+    """The low-level server, with `tools.listChanged` advertised: the gateway sends
+    `notifications/tools/list_changed` when a sync changes what a tenant can see. The session
+    manager builds the `initialize` result by calling this method, so the override is the only
+    place to turn the capability on."""
+
+    def create_initialization_options(
+        self,
+        notification_options: NotificationOptions | None = None,
+        experimental_capabilities: dict[str, dict[str, Any]] | None = None,
+        extensions: dict[str, dict[str, Any]] | None = None,
+    ) -> InitializationOptions:
+        return super().create_initialization_options(
+            notification_options or NotificationOptions(tools_changed=True),
+            experimental_capabilities,
+            extensions,
+        )
+
+
 def build_server(gateway: Gateway) -> Server[Any]:
-    server: Server[Any] = Server(
+    server: Server[Any] = KeystoneServer(
         "keystone", on_list_tools=gateway.list_tools, on_call_tool=gateway.call_tool
     )
     server.middleware.insert(0, handshake_era_only)

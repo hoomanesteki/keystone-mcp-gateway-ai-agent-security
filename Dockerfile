@@ -21,6 +21,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python:3.12.15-slim-trixie AS runtime
 RUN useradd --system --uid 10001 --user-group --home-dir /nonexistent --no-create-home keystone
 COPY --from=build /app/.venv /app/.venv
+# The stdio demo upstream (`python -m examples.upstreams.echo_server`) runs from /app.
+WORKDIR /app
+COPY examples ./examples
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1
 USER keystone

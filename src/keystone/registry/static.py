@@ -13,8 +13,8 @@ from keystone.core.canonical import canonical_json, sha256_hex
 from keystone.core.errors import Reject
 from keystone.core.types import ToolRef
 from keystone.gateway.upstreams import UpstreamPool
+from keystone.registry.config import UpstreamConfig
 from keystone.registry.naming import make_tool_name
-from keystone.settings import UpstreamConfig
 
 log = structlog.get_logger()
 
@@ -33,8 +33,8 @@ class StaticRegistry:
             if upstream.tenant is None or upstream.url is None:
                 raise ValueError(f"upstream {upstream.id!r} needs a tenant and a url")
             try:
-                client = await pool.get(upstream.id)
-                listed = await client.list_tools()
+                async with pool.lease(upstream.id) as client:
+                    listed = await client.list_tools()
             except Reject as reject:
                 log.warning("upstream_unavailable", upstream=upstream.id, code=reject.code.value)
                 continue

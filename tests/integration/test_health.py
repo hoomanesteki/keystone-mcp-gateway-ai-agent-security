@@ -18,6 +18,12 @@ async def get_readyz(settings: Settings) -> httpx.Response:
         return await client.get("/readyz")
 
 
+def without_upstreams(response: httpx.Response) -> dict[str, object]:
+    body: dict[str, object] = response.json()
+    body.pop("upstreams", None)
+    return body
+
+
 @pytest.fixture
 async def silent_port() -> AsyncIterator[int]:
     """A TCP server that accepts connections and never answers."""
@@ -36,11 +42,17 @@ async def silent_port() -> AsyncIterator[int]:
 async def test_readyz_reports_dependencies(settings: Settings) -> None:
     up = await get_readyz(settings)
     assert up.status_code == 200
-    assert up.json() == {"status": "ok", "dependencies": {"database": "ok", "redis": "ok"}}
+    # KS-209 added an `upstreams` object. Which upstreams a database holds is not this test's
+    # business, so only its type is checked here.
+    assert without_upstreams(up) == {
+        "status": "ok",
+        "dependencies": {"database": "ok", "redis": "ok"},
+    }
+    assert isinstance(up.json()["upstreams"], dict)
 
     down = await get_readyz(settings.model_copy(update={"redis_url": SecretStr(CLOSED_PORT_REDIS)}))
     assert down.status_code == 503
-    assert down.json() == {
+    assert without_upstreams(down) == {
         "status": "unavailable",
         "dependencies": {"database": "ok", "redis": "unavailable"},
     }

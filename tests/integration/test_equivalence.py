@@ -32,6 +32,7 @@ def blocks(result: Any) -> list[dict[str, Any]]:
     return [b.model_dump(by_alias=True, mode="json") for b in result.content]
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_direct_vs_gateway_identical(
     keystone_app: KeystoneApp, mcp_client: McpConnect, demo_upstreams: DemoUpstreams
@@ -60,6 +61,7 @@ async def test_direct_vs_gateway_identical(
     assert len(keystone_app.audit.records) == 8
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_the_comparison_can_fail(
     keystone_app: KeystoneApp, mcp_client: McpConnect, demo_upstreams: DemoUpstreams

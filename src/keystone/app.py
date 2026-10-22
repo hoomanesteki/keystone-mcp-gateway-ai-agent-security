@@ -2,22 +2,32 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
+import anyio
+import structlog
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from redis.asyncio import Redis
 
 from keystone import __version__
 from keystone.audit.sink import InMemoryAuditSink
 from keystone.db.session import create_engine, make_sessionmaker
 from keystone.db.tenants import upsert_tenants
 from keystone.gateway.dispatch import UpstreamDispatcher
+from keystone.gateway.health import UpstreamHealth
 from keystone.gateway.pipeline import AuditSink, Dispatcher, Interceptor
 from keystone.gateway.server import Gateway, mount_mcp
-from keystone.gateway.sessions import InMemorySessionStore
-from keystone.gateway.upstreams import UpstreamPool, http_client_factory
+from keystone.gateway.session_repo import SessionRepo
+from keystone.gateway.sessions import InMemorySessionStore, RedisSessionStore, SessionStore
+from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
 from keystone.gateway.wiring import PipelineDeps, build_pipeline
-from keystone.health import check_dependencies
-from keystone.registry.static import StaticRegistry
+from keystone.health import check_dependencies, upstream_statuses
+from keystone.registry.config import apply_config_upstreams, stdio_environments, tool_overrides
+from keystone.registry.repo import ToolRepo, UpstreamRepo
+from keystone.registry.service import RegistryService
+from keystone.registry.sync import RegistrySyncer
 from keystone.settings import Settings
+
+log = structlog.get_logger()
 
 
 def create_app(
@@ -30,36 +40,85 @@ def create_app(
     """Build the app. The keyword arguments are seams for tests: a different audit sink, a
     real interceptor in one slot, or a spy around the dispatcher."""
     settings = settings or Settings()
-    urls = {u.id: u.url for u in settings.upstreams if u.transport == "http" and u.url}
-    pool = UpstreamPool(http_client_factory(urls))
-    registry = StaticRegistry()
+    # The engine connects lazily, so building it needs no database. The lifespan disposes it.
+    engine = create_engine(settings.database_url.get_secret_value())
+    sessions = make_sessionmaker(engine)
+    directory = UpstreamDirectory()
+    pool = UpstreamPool(
+        directory_client_factory(directory, health_timeout_s=settings.health.timeout_s)
+    )
+    syncer = RegistrySyncer(
+        UpstreamRepo(sessions),
+        ToolRepo(sessions),
+        pool,
+        directory,
+        overrides=tool_overrides(settings.upstreams),
+        timeout_s=settings.registry.sync_timeout_s,
+        environments=stdio_environments(settings.upstreams),
+    )
+    registry = RegistryService(syncer, cache_ttl_s=settings.registry.cache_ttl_s)
+    health = UpstreamHealth(
+        pool,
+        syncer.upstreams,
+        syncer.learn,
+        interval_s=settings.health.interval_s,
+        timeout_s=settings.health.timeout_s,
+        degraded_after=settings.health.degraded_after,
+        down_after=settings.health.down_after,
+    )
     audit = audit or InMemoryAuditSink()
-    dispatcher: Dispatcher = UpstreamDispatcher(pool)
+    dispatcher: Dispatcher = UpstreamDispatcher(pool, health)
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
-    pipeline = build_pipeline(settings, PipelineDeps(dispatcher, audit), interceptors)
-    gateway = Gateway(settings, registry, InMemorySessionStore(), pipeline)
+    pipeline = build_pipeline(
+        settings, PipelineDeps(dispatcher, audit, tool_states=registry), interceptors
+    )
+    # An empty KEYSTONE_REDIS_URL keeps session state in this process, for a single-process setup.
+    redis = (
+        Redis.from_url(settings.redis_url.get_secret_value(), decode_responses=True)
+        if settings.redis_url.get_secret_value()
+        else None
+    )
+    session_store: SessionStore = (
+        RedisSessionStore(redis, SessionRepo(sessions)) if redis else InMemorySessionStore()
+    )
+    gateway = Gateway(settings, registry, session_store, pipeline)
+    registry.add_listener(gateway.notify_tools_changed)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # The engine connects lazily, so an app with no tenants starts without Postgres.
-        engine = create_engine(settings.database_url.get_secret_value())
-        app.state.engine = engine
-        app.state.sessionmaker = make_sessionmaker(engine)
         try:
-            await upsert_tenants(app.state.sessionmaker, settings.tenants)
-            # One task enters and leaves the pool and the session manager, as the SDK's
-            # cancel scopes require (engineering note 1).
+            await upsert_tenants(sessions, settings.tenants)
+            # A config the registry cannot use (unknown tenant, a URL the SSRF guard refuses)
+            # stops startup: serving with some upstreams silently missing is worse.
+            await apply_config_upstreams(
+                UpstreamRepo(sessions),
+                settings.upstreams,
+                [t.id for t in settings.tenants],
+                allow_private=settings.allow_private_upstreams,
+            )
+            # One task enters and leaves the pool, the sync loop and the session manager, as
+            # the SDK's cancel scopes require (engineering note 1).
             async with AsyncExitStack() as stack:
                 await stack.enter_async_context(pool)
-                await registry.load(pool, settings.upstreams)
+                # An upstream that is down now gets an error in its report and in `last_error`,
+                # and the periodic sync tries it again. It does not stop startup.
+                for report in await registry.sync_all():
+                    log.info("startup_sync", **report.model_dump())
+                await stack.enter_async_context(background_tasks(registry, health, settings))
                 await stack.enter_async_context(manager.run())
                 yield
         finally:
+            if redis is not None:
+                await redis.aclose()
             await engine.dispose()
 
     app = FastAPI(title="Keystone", version=__version__, lifespan=lifespan)
     app.state.settings = settings
+    app.state.engine = engine
+    app.state.sessionmaker = sessions
+    app.state.registry = registry
+    app.state.health = health
     app.state.gateway = gateway
     app.state.audit = audit
     manager = mount_mcp(app, gateway)
@@ -86,12 +145,44 @@ def create_app(
 
     @app.get("/readyz")
     async def readyz() -> JSONResponse:
-        results = await check_dependencies(settings)
+        results: dict[str, bool] = {}
+        statuses: dict[str, str] = {}
+
+        async def dependencies() -> None:
+            results.update(await check_dependencies(settings))
+
+        async def upstreams() -> None:
+            statuses.update(await upstream_statuses(syncer.upstreams))
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(dependencies)
+            group.start_soon(upstreams)
         ready = all(results.values())
         body = {
             "status": "ok" if ready else "unavailable",
             "dependencies": {name: "ok" if up else "unavailable" for name, up in results.items()},
+            # An upstream that is down does not make Keystone unready: the others still work.
+            "upstreams": dict(sorted(statuses.items())),
         }
         return JSONResponse(body, status_code=200 if ready else 503)
 
     return app
+
+
+@asynccontextmanager
+async def background_tasks(
+    registry: RegistryService, health: UpstreamHealth, settings: Settings
+) -> AsyncIterator[None]:
+    """Run the periodic sync (unless its interval is 0), the watch for changes made by other
+    processes and the health probes (unless their interval is 0) while the body of the `with`
+    runs."""
+    async with anyio.create_task_group() as group:
+        group.start_soon(registry.run_watch)
+        if settings.registry.sync_interval_s > 0:
+            group.start_soon(registry.run_periodic, settings.registry.sync_interval_s)
+        if settings.health.interval_s > 0:
+            group.start_soon(health.run)
+        try:
+            yield
+        finally:
+            group.cancel_scope.cancel()
