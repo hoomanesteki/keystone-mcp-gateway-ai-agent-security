@@ -1,4 +1,5 @@
 # Local stack for development and the demo. Host ports are fixed (see .env.example).
+# The four demo upstreams (<name>-mcp) are built from deploy/Dockerfile.upstreams, one image.
 # Every image is pinned to an exact tag and listed in docs/adr/0002-dependency-pins.md.
 name: keystone
 
@@ -105,6 +106,78 @@ services:
       interval: 5s
       timeout: 3s
       retries: 30
+
+  mail-mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.upstreams
+    image: keystone-upstreams:dev
+    command: ["examples.upstreams.mail_server", "--host", "0.0.0.0", "--port", "8101"]
+    ports:
+      - "${MAIL_PORT:-8101}:8101"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.urlopen('http://127.0.0.1:8101/healthz', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  files-mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.upstreams
+    image: keystone-upstreams:dev
+    command: ["examples.upstreams.files_server", "--host", "0.0.0.0", "--port", "8102"]
+    ports:
+      - "${FILES_PORT:-8102}:8102"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.urlopen('http://127.0.0.1:8102/healthz', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  bank-mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.upstreams
+    image: keystone-upstreams:dev
+    command: ["examples.upstreams.bank_server", "--host", "0.0.0.0", "--port", "8103"]
+    ports:
+      - "${BANK_PORT:-8103}:8103"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.urlopen('http://127.0.0.1:8103/healthz', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  echo-mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.upstreams
+    image: keystone-upstreams:dev
+    command: ["examples.upstreams.echo_server", "--host", "0.0.0.0", "--port", "8104"]
+    ports:
+      - "${ECHO_PORT:-8104}:8104"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.urlopen('http://127.0.0.1:8104/healthz', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
 volumes:
   pgdata:
