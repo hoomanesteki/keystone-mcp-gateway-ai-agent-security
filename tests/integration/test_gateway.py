@@ -175,13 +175,16 @@ async def test_a_client_pinned_to_the_newer_era_is_refused(
 
 
 @pytest.mark.phase(1)
-async def test_the_result_does_not_carry_the_upstreams_identity(
+async def test_the_result_names_the_call_and_not_the_upstream(
     keystone_app: KeystoneApp, mcp_client: McpConnect
 ) -> None:
     async with mcp_client(keystone_app) as client:
-        result = await client.call_tool("echo__echo", {"payload": "x"})
+        ok = await client.call_tool("echo__echo", {"payload": "x"})
+        refused = await client.call_tool("echo__nothing", {})
 
-    assert result.meta is None
+    [first, second] = keystone_app.audit.records
+    assert ok.meta == {"keystone/call_id": first["call_id"]}
+    assert refused.meta == {"keystone/call_id": second["call_id"]}
 
 
 @pytest.mark.phase(1)
