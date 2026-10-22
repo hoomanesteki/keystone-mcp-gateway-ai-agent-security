@@ -15,6 +15,8 @@ upstreams and Keystone, and waits until every container reports healthy. Cold st
 | `make demo` | `make up`, reset the upstreams, run the scripted agent through Keystone and print its transcript |
 | `make down` | Stop the stack and keep its data |
 | `make reset` | Stop the stack and delete its volumes |
+| `scripts/get_token.sh alice support-agent` | Print an access token for a Keycloak user (see Identity) |
+| `make test-e2e` | The end-to-end tests against the running stack. The nightly workflow runs `make up` and then this |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit count is off |
 | `bash scripts/smoke/phase_2.sh` | Lists the 15 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
@@ -68,6 +70,64 @@ Run one outside compose: `uv run python -m examples.upstreams.mail_server --port
 | `FILES_WORKSPACE` | Directory the files server confines itself to. Default: a temp directory. |
 | `MAIL_API_KEY`, `FILES_API_KEY`, `BANK_API_KEY`, `ECHO_API_KEY` | When set, `/mcp` requires a matching `X-Api-Key` header. Unset in tests and compose until Phase 3. |
 | `ECHO_POISONED` | `1` adds the poisoned tool. |
+
+## Identity (Keycloak)
+
+`make up` starts Keycloak 26 and imports the realm `keystone` from `deploy/keycloak/realm-keystone.json`.
+Its admin console is at `http://localhost:8180` (`admin` / `admin`).
+
+| User | Tenant | Groups | Realm role | Signs in through |
+|---|---|---|---|---|
+| `alice` | acme | `/tenants/acme`, `/support` | | `support-agent` |
+| `olivia` | acme | `/tenants/acme`, `/operators` | | `ops-agent` |
+| `lena` | acme | `/tenants/acme`, `/approvers` | `approver` | `keystone-cli` |
+| `bob` | globex | `/tenants/globex` | | `support-agent` |
+| `root` | acme | `/tenants/acme`, `/admins` | `admin` | `ops-agent` |
+
+The user id is the user name, so a token's `sub` reads `alice`. Passwords are `<name>-dev-password`.
+The clients `support-agent`, `ops-agent` and `keystone-cli` are confidential and allow the
+password grant, which exists for the demo and the smoke scripts. `console` is public and uses
+PKCE with the redirect `http://localhost:5173/*`. Every client puts `keystone` in `aud` and adds
+the claims `tenant` (from the user attribute), `groups` (full paths such as `/tenants/acme`) and
+`roles` (realm roles).
+
+```bash
+scripts/get_token.sh alice support-agent        # prints an access token
+```
+
+The script reads `<USER>_PASSWORD` and `<CLIENT>_SECRET` from the environment, then `.env`, then
+`.env.example`. Those files hold development values that are public in this repository. Never use
+them outside your own machine. The realm file contains `${NAME}` placeholders and no secrets;
+Keycloak fills them from its environment, which `deploy/docker-compose.yml` sets.
+
+A user needs an email, a first name, a last name, `emailVerified: true` and no required actions,
+or Keycloak 26 refuses the password grant with "Account is not fully set up". A custom user
+attribute such as `tenant` must be declared in the realm's user profile (the realm file does) or
+the realm must set `unmanagedAttributePolicy` to `ENABLED`.
+
+### The issuer
+
+A token's `iss` must be the same whichever address asked for the token, or validation fails for
+somebody. Compose sets `KC_HOSTNAME=http://localhost:8180` and `KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true`.
+Every token then carries `iss=http://localhost:8180/realms/keystone`, while a request to
+`http://keycloak:8080/...` from another container gets a `jwks_uri` that points at
+`keycloak:8080`. A service inside the network can then fetch the keys without going out through
+the host. `tests/e2e/test_keycloak.py` checks both answers.
+
+### Changing the realm
+
+Keycloak imports the realm file only when the realm does not exist. The development database
+lives in the Keycloak container, so removing the container removes the realm. After you edit
+`realm-keystone.json`:
+
+| What you run | Result |
+|---|---|
+| `make reset && make up` | The edited realm is imported. This also deletes the Postgres, Prometheus and Grafana volumes. |
+| `make down && make up` | The same for the realm, and the volumes stay. |
+| `make up` alone | Nothing changes: the container is reused and the realm already exists. |
+| `docker compose -f deploy/docker-compose.yml up -d --force-recreate keycloak` | Re-imports the file and touches nothing else. |
+
+Recreating Keycloak creates new signing keys, so tokens fetched before it stop validating.
 
 ## Keystone settings
 
@@ -282,6 +342,7 @@ a 1 second limit each and returns 503 if either is down.
 | An agent gets `Unsupported protocol version` | It pinned the `2026-07-28` version. Use the default mode or `mode="legacy"`. |
 | `421 Invalid Host header` from `/mcp` | The `Host` is not in `KEYSTONE_ALLOWED_HOSTS`. Add it, for example `keystone:*`. |
 | `make up` times out on Keycloak | `docker compose -f deploy/docker-compose.yml logs keycloak`. First start imports the realm and can take 60 seconds on a slow disk. |
+| `get_token.sh` says `Invalid user credentials` | The realm was imported with other passwords (an older `.env`, or `.env` changed after the first start). Recreate Keycloak, see "Changing the realm". |
 | Port already in use | Another process holds the port. Set a different one in `.env`. |
 | `make check` cannot reach Postgres | Run `make up-core`, then `docker compose -f deploy/docker-compose.yml ps`. |
 | `ModuleNotFoundError: keystone` right after `uv sync` (macOS) | A background process flagged `.venv` as hidden, and Python skips hidden `.pth` files. Check with `ls -lO .venv/lib/python3.12/site-packages/keystone.pth`. Set `UV_PROJECT_ENVIRONMENT` to a path outside the repo, for example `$HOME/.cache/keystone-venv`, then run `uv sync`. |

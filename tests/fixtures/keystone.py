@@ -24,6 +24,7 @@ from keystone.settings import HealthSettings, RegistrySettings, Settings, Tenant
 
 # Re-exported so tests/conftest.py can name one module: tests/unit/test_phase_plugin.py copies the
 # conftest and strips its single `pytest_plugins` line, so that line must stay on one line.
+from tests.fixtures.fake_idp import fake_idp  # noqa: F401
 from tests.fixtures.redis import redis, test_redis_url  # noqa: F401
 from tests.fixtures.servers import ServerThread
 from tests.fixtures.upstreams import (  # noqa: F401
