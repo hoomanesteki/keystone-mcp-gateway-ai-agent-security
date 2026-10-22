@@ -39,13 +39,14 @@ from keystone.core.errors import (
 from keystone.core.ids import new_id
 from keystone.core.types import CallContext, Principal, SessionState, ToolRef, ToolResult
 from keystone.gateway.pipeline import Pipeline
-from keystone.gateway.sessions import InMemorySessionStore
+from keystone.gateway.sessions import SessionStore
 from keystone.registry.service import ToolLookup
 from keystone.settings import Settings
 
 log = structlog.get_logger()
 
 SESSION_HEADER = "mcp-session-id"
+UNBOUND_PREFIX = "unbound-"
 CALL_ID_KEY = "keystone/call_id"
 MAX_OPEN_SESSIONS = 10_000
 NOTIFY_TIMEOUT_S = 2.0
@@ -60,7 +61,7 @@ class Gateway:
         self,
         settings: Settings,
         registry: ToolLookup,
-        sessions: InMemorySessionStore,
+        sessions: SessionStore,
         pipeline: Pipeline,
     ) -> None:
         self.settings = settings
@@ -97,13 +98,19 @@ class Gateway:
     ) -> types.CallToolResult:
         principal = self.principal()
         self._remember(ctx, principal.tenant_id)
-        session = await self._session(ctx, principal)
+        session: SessionState | None = None
+        try:
+            session = await self._session(ctx, principal)
+        except Exception as exc:
+            # Flags and taint live in the session. A call that cannot read them does not run, and
+            # is still refused through the pipeline so that it leaves its audit record.
+            log.error("session_store_failed", error=type(exc).__name__)
         tool = await self.registry.get(principal.tenant_id, params.name)
         call = CallContext(
             call_id=new_id(),
             received_at=datetime.now(UTC),
             principal=principal,
-            session=session,
+            session=session or unbound_session(principal),
             tool=tool or unknown_tool(params.name, principal),
             arguments=params.arguments or {},
         )
@@ -112,8 +119,13 @@ class Gateway:
             result = await self.pipeline.reject(
                 call, Reject(Code.TOOL_NOT_FOUND, f"there is no tool named {shown!r}")
             )
+        elif session is None:
+            result = await self.pipeline.reject(
+                call, Reject(Code.DENIED, "session state is unavailable")
+            )
         else:
             result = await self.pipeline.run(call)
+            await self._save(session)
         return to_call_tool_result(result, call.call_id)
 
     def _remember(self, ctx: Context, tenant_id: str) -> None:
@@ -144,17 +156,31 @@ class Gateway:
             for session_id, session in targets:
                 group.start_soon(tell, session_id, session)
 
+    async def _save(self, session: SessionState) -> None:
+        """Write the session back after a call. A failure is logged and does not undo the call."""
+        if session.session_id.startswith(UNBOUND_PREFIX):
+            return
+        try:
+            await self.sessions.save(session)
+        except Exception as exc:
+            log.error("session_not_saved", error=type(exc).__name__)
+
     async def _session(self, ctx: Context, principal: Principal) -> SessionState:
         # ctx.request is typed Any in the SDK. On HTTP it is the Starlette request.
         request = cast("Request | None", ctx.request)
         session_id = request.headers.get(SESSION_HEADER) if request is not None else None
         if not session_id:
-            return SessionState(
-                session_id=f"unbound-{new_id()}", principal=principal, created_at=datetime.now(UTC)
-            )
+            return unbound_session(principal)
         return await self.sessions.get(session_id) or await self.sessions.create(
             session_id, principal
         )
+
+
+def unbound_session(principal: Principal) -> SessionState:
+    """State for a request that names no session. It is never stored."""
+    return SessionState(
+        session_id=f"{UNBOUND_PREFIX}{new_id()}", principal=principal, created_at=datetime.now(UTC)
+    )
 
 
 def unknown_tool(name: str, principal: Principal) -> ToolRef:
