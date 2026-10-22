@@ -21,7 +21,7 @@ from keystone.db.session import create_engine, make_sessionmaker
 from keystone.defense.description_check import check_description
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
 from keystone.logging import configure_logging
-from keystone.registry.config import tool_overrides
+from keystone.registry.config import stdio_environments, tool_overrides
 from keystone.registry.naming import check_upstream_id
 from keystone.registry.pinning import (
     OPERATOR_DISABLED,
@@ -293,6 +293,7 @@ async def run_sync(
             directory,
             overrides=tool_overrides(settings.upstreams),
             timeout_s=settings.registry.sync_timeout_s,
+            environments=stdio_environments(settings.upstreams),
         )
         if upstream_id is not None:
             return [await syncer.sync_upstream(upstream_id)]

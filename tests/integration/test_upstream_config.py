@@ -164,6 +164,14 @@ async def test_private_urls_are_accepted_when_allowed(sessionmaker: Sessions) ->
         (UpstreamConfig(id="mail", tenant="acme"), "needs a url"),
         (UpstreamConfig(id="mail", tenant="acme", transport="stdio"), "needs a command"),
         (entry("mail", "ftp://93.184.216.34/"), "http or https"),
+        (
+            UpstreamConfig(id="mail", tenant="acme", url="http://93.184.216.34/", env={"A": "b"}),
+            "`command` and `env` do not apply",
+        ),
+        (
+            UpstreamConfig(id="mail", tenant="acme", url="http://93.184.216.34/", command=["x"]),
+            "`command` and `env` do not apply",
+        ),
     ],
 )
 async def test_each_unusable_entry_is_named(
@@ -330,3 +338,28 @@ async def test_cli_says_when_the_database_is_unreachable(clean_env: None) -> Non
     assert result.exit_code == 1
     assert "cannot use the database" in result.output
     assert "secretpw" not in result.output
+
+
+async def test_cli_adds_a_stdio_upstream_with_its_command(
+    clean_env: None, test_database_url: str, sessionmaker: Sessions
+) -> None:
+    await upsert_tenants(sessionmaker, [ACME])
+
+    added = await invoke(
+        test_database_url,
+        [
+            *("upstream", "add", "tools", "--tenant", "acme", "--transport", "stdio"),
+            *("--", "python", "-m", "my_server", "--transport", "stdio"),
+        ],
+    )
+    without_command = await invoke(
+        test_database_url, ["upstream", "add", "other", "--tenant", "acme", "--transport", "stdio"]
+    )
+    row = await UpstreamRepo(sessionmaker).get("tools")
+
+    assert added.exit_code == 0, added.output
+    assert row is not None
+    assert (row.transport, row.url, row.source) == ("stdio", None, "cli")
+    assert row.command == ["python", "-m", "my_server", "--transport", "stdio"]
+    assert without_command.exit_code == 1
+    assert "needs a command" in without_command.output

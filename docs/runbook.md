@@ -17,6 +17,7 @@ upstreams and Keystone, and waits until every container reports healthy. Cold st
 | `make reset` | Stop the stack and delete its volumes |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit count is off |
+| `bash scripts/smoke/phase_2.sh` | Lists the 15 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
 
 ## Host ports
 
@@ -121,6 +122,29 @@ server, so run it where `KEYSTONE_DATABASE_URL` points at the right database (in
 | `keystone upstream add ID --transport stdio -- CMD ARGS...` | Register a stdio upstream. |
 | `keystone upstream remove ID` | Disable a CLI upstream. A config upstream is removed by editing the file. |
 | `keystone db upgrade` | Apply database migrations. `keystone serve --migrate` does it before starting; the compose stack uses that. |
+
+### stdio upstreams
+
+An upstream with `transport: stdio` is a program that Keystone starts and talks to over its
+standard input and output. In the YAML it has a `command` (a list) and an optional `env` (a map);
+with the CLI, put the command after `--`:
+`keystone upstream add tools --transport stdio -- python -m my_server`. The compose stack starts
+one, `echostd`, which runs `python -m examples.upstreams.echo_server --transport stdio` inside the
+Keystone container (the image keeps `examples/` in `/app`).
+
+The program starts when the first call or sync needs it, starts again after a crash (with the
+reconnect backoff of 0.2, 0.8 and 3.2 seconds), and ends when Keystone shuts down. A call that
+was running when it died fails and is not sent again. Its environment is `PATH` (Keystone's, unless
+`env` sets one) and the variables in `env`, and nothing else: not `HOME`, not any `KEYSTONE_*`
+variable, never the master key or the database URL. A key in `env` that starts with `KEYSTONE_` is
+refused when the config loads. `env` values are plain text in the YAML, so they are for settings
+and not for secrets. `env` can only be set in the YAML; an upstream added with the CLI gets just
+`PATH`. POSIX only.
+
+A stdio upstream runs as the Keystone user, with no sandbox. Whoever can write a `command` into the
+`upstreams` table or run `keystone upstream add` can run a program inside the Keystone container,
+so treat both as operator rights and keep the database closed. Phase 8 adds containerized stdio
+upstreams for servers you do not trust.
 
 ### Tool lists and syncing
 
