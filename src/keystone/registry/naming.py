@@ -9,7 +9,8 @@ _TOOL_NAME = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _UPSTREAM_ID = re.compile(r"^[a-z][a-z0-9_]{1,30}$")
 
 
-def _check_upstream_id(upstream_id: str) -> None:
+def check_upstream_id(upstream_id: str) -> None:
+    """Raise ValueError unless `upstream_id` can be the first half of an exposed tool name."""
     # A trailing underscore would merge with the separator ("mail_" + "__" + "x"), and the
     # first "__" would then no longer end the id.
     if (
@@ -24,7 +25,7 @@ def _check_upstream_id(upstream_id: str) -> None:
 
 
 def make_tool_name(upstream_id: str, tool: str) -> str:
-    _check_upstream_id(upstream_id)
+    check_upstream_id(upstream_id)
     name = f"{upstream_id}{SEPARATOR}{tool}"
     if not tool or not _TOOL_NAME.fullmatch(name):
         raise ValueError(
@@ -38,7 +39,7 @@ def split_tool_name(name: str) -> tuple[str, str]:
     if not separator or not tool:
         raise ValueError(f"invalid tool name {name!r}: expected '<upstream>__<tool>'")
     try:
-        _check_upstream_id(upstream_id)
+        check_upstream_id(upstream_id)
     except ValueError as exc:
         raise ValueError(f"invalid tool name {name!r}: {exc}") from exc
     return upstream_id, tool
