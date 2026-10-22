@@ -1,0 +1,66 @@
+{
+  "accounts": [
+    {
+      "id": "CHK-001",
+      "owner": "Olivia Reyes",
+      "currency": "USD",
+      "balance_cents": 482550
+    },
+    {
+      "id": "SAV-002",
+      "owner": "Olivia Reyes",
+      "currency": "USD",
+      "balance_cents": 1250000
+    },
+    {
+      "id": "BIZ-003",
+      "owner": "Acme Corp Operations",
+      "currency": "USD",
+      "balance_cents": 7633075
+    }
+  ],
+  "transactions": [
+    {
+      "id": "tx-001",
+      "account": "CHK-001",
+      "date": "2026-10-01",
+      "description": "Payroll deposit",
+      "amount_cents": 320000
+    },
+    {
+      "id": "tx-002",
+      "account": "CHK-001",
+      "date": "2026-10-03",
+      "description": "Grocery market",
+      "amount_cents": -8642
+    },
+    {
+      "id": "tx-003",
+      "account": "CHK-001",
+      "date": "2026-10-05",
+      "description": "Electric utility",
+      "amount_cents": -12950
+    },
+    {
+      "id": "tx-004",
+      "account": "SAV-002",
+      "date": "2026-10-01",
+      "description": "Interest",
+      "amount_cents": 2104
+    },
+    {
+      "id": "tx-005",
+      "account": "BIZ-003",
+      "date": "2026-10-02",
+      "description": "Customer payment, Northwind",
+      "amount_cents": 450000
+    },
+    {
+      "id": "tx-006",
+      "account": "BIZ-003",
+      "date": "2026-10-06",
+      "description": "Cloud hosting",
+      "amount_cents": -98015
+    }
+  ]
+}

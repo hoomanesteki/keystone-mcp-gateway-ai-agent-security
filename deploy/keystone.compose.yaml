@@ -1,0 +1,9 @@
+# Keystone's settings inside the compose stack. The upstream URLs use the service names.
+# Environment variables in docker-compose.yml override anything set here.
+log_level: info
+
+upstreams:
+  - {id: mail, tenant: acme, transport: http, url: "http://mail-mcp:8101/mcp"}
+  - {id: files, tenant: acme, transport: http, url: "http://files-mcp:8102/mcp"}
+  - {id: bank, tenant: acme, transport: http, url: "http://bank-mcp:8103/mcp"}
+  - {id: echo, tenant: acme, transport: http, url: "http://echo-mcp:8104/mcp"}

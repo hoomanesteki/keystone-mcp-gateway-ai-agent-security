@@ -1,0 +1,122 @@
+[
+  {
+    "id": "m01",
+    "folder": "inbox",
+    "from": "dana.whitfield@acme.test",
+    "to": "olivia@acme.test",
+    "subject": "Q3 planning notes",
+    "body": "Hi Olivia,\n\nNotes from Tuesday are in the shared folder. Three open items: the vendor shortlist, the October staffing plan and the budget review on the 14th.\n\nDana",
+    "date": "2026-10-01T09:12:00Z",
+    "unread": true
+  },
+  {
+    "id": "m02",
+    "folder": "inbox",
+    "from": "billing@brightline.test",
+    "to": "olivia@acme.test",
+    "subject": "Invoice 4471 is due on 2026-10-20",
+    "body": "Hello,\n\nInvoice 4471 for 1,250.00 USD is due on 20 October. Payment details are unchanged: account BIZ-003 reference BL-4471.\n\nBrightline Billing",
+    "date": "2026-10-02T14:30:00Z",
+    "unread": true
+  },
+  {
+    "id": "m03",
+    "folder": "inbox",
+    "from": "sam.okafor@acme.test",
+    "to": "olivia@acme.test",
+    "subject": "Offsite agenda draft",
+    "body": "Olivia, here is the draft agenda for the offsite. Please add anything missing before Friday.\n\nSam",
+    "date": "2026-10-03T08:05:00Z",
+    "unread": false
+  },
+  {
+    "id": "m04",
+    "folder": "inbox",
+    "from": "it-help@acme.test",
+    "to": "olivia@acme.test",
+    "subject": "Scheduled maintenance on Saturday",
+    "body": "The file server will be offline from 22:00 to 23:30 on Saturday for patching. No action needed.",
+    "date": "2026-10-04T16:45:00Z",
+    "unread": true
+  },
+  {
+    "id": "m05",
+    "folder": "inbox",
+    "from": "priya.nair@acme.test",
+    "to": "olivia@acme.test",
+    "subject": "Re: customer call recap",
+    "body": "Thanks for joining. The customer wants a written summary by Monday. I drafted one and left it in the reports folder.\n\nPriya",
+    "date": "2026-10-05T11:20:00Z",
+    "unread": false
+  },
+  {
+    "id": "m06",
+    "folder": "inbox",
+    "from": "hr@acme.test",
+    "to": "olivia@acme.test",
+    "subject": "Benefits enrollment closes 31 October",
+    "body": "A reminder that open enrollment closes at the end of the month. Log in to the benefits portal to review your choices.",
+    "date": "2026-10-06T07:50:00Z",
+    "unread": true
+  },
+  {
+    "id": "m07",
+    "folder": "inbox",
+    "from": "marco.rossi@acme.test",
+    "to": "olivia@acme.test",
+    "subject": "Lunch on Thursday?",
+    "body": "Are you free for lunch on Thursday? The new place on 5th has a table at 12:30.\n\nMarco",
+    "date": "2026-10-07T13:10:00Z",
+    "unread": false
+  },
+  {
+    "id": "m08",
+    "folder": "inbox",
+    "from": "dana.whitfield@acme.test",
+    "to": "olivia@acme.test",
+    "subject": "Budget review: numbers attached",
+    "body": "The budget summary is in reports/q3-summary.csv. Operations is 4 percent over plan, mostly travel.\n\nDana",
+    "date": "2026-10-08T10:02:00Z",
+    "unread": true
+  },
+  {
+    "id": "m09",
+    "folder": "sent",
+    "from": "olivia@acme.test",
+    "to": "dana.whitfield@acme.test",
+    "subject": "Re: Q3 planning notes",
+    "body": "Thanks Dana. I will take the vendor shortlist and send options by Friday.\n\nOlivia",
+    "date": "2026-10-01T10:40:00Z",
+    "unread": false
+  },
+  {
+    "id": "m10",
+    "folder": "sent",
+    "from": "olivia@acme.test",
+    "to": "sam.okafor@acme.test",
+    "subject": "Offsite venue options",
+    "body": "Sam, three venues to consider: the lakeside lodge, the downtown loft and the vineyard. Prices are in the notes folder.\n\nOlivia",
+    "date": "2026-10-02T09:15:00Z",
+    "unread": false
+  },
+  {
+    "id": "m11",
+    "folder": "archive",
+    "from": "travel@acme.test",
+    "to": "olivia@acme.test",
+    "subject": "Your itinerary for Lisbon",
+    "body": "Flight AC 764 departs 6 November at 18:05. Hotel confirmation 88213 is attached.",
+    "date": "2026-09-20T12:00:00Z",
+    "unread": false
+  },
+  {
+    "id": "m12",
+    "folder": "archive",
+    "from": "dana.whitfield@acme.test",
+    "to": "olivia@acme.test",
+    "subject": "Q2 retrospective",
+    "body": "Short retrospective on Q2: hiring finished early, the migration slipped two weeks, and support tickets fell 12 percent.\n\nDana",
+    "date": "2026-07-15T15:30:00Z",
+    "unread": false
+  }
+]

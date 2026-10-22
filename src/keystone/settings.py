@@ -2,13 +2,16 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
     YamlConfigSettingsSource,
 )
+
+from keystone.core.types import Principal
+from keystone.registry.naming import check_upstream_id
 
 CONFIG_ENV_VAR = "KEYSTONE_CONFIG"
 
@@ -21,6 +24,32 @@ DEFAULT_REDIS_URL = "redis://localhost:56379/0"
 class TenantConfig(BaseModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")
     name: str = Field(min_length=1)
+
+
+class UpstreamConfig(BaseModel):
+    """One upstream MCP server. The gateway checks that an http upstream has a tenant and a url
+    when it starts, so a half-written entry loads here and fails there with a clear message."""
+
+    id: str
+    tenant: str | None = None
+    transport: Literal["http", "builtin"] = "http"
+    url: str | None = None
+
+    @field_validator("id")
+    @classmethod
+    def _valid_id(cls, value: str) -> str:
+        check_upstream_id(value)
+        return value
+
+
+# Host header values the MCP endpoint accepts. A browser on another site can be tricked into
+# calling localhost, and its Host header then names that site (DNS rebinding).
+DEFAULT_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+
+# Phase 1 has no authentication. Until KS-304, every caller is this person.
+DEV_PRINCIPAL = Principal(
+    tenant_id="acme", user_id="olivia", groups=("operators",), agent_id="ops-agent"
+)
 
 
 class Settings(BaseSettings):
@@ -39,6 +68,19 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     config_path: Path | None = Field(default=None, validation_alias=CONFIG_ENV_VAR)
     tenants: list[TenantConfig] = Field(default_factory=list)
+    upstreams: list[UpstreamConfig] = Field(default_factory=list)
+    # Who every caller is until real authentication arrives (KS-304). Never allowed in prod.
+    dev_principal: Principal | None = None
+    allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))
+
+    @model_validator(mode="after")
+    def _dev_principal_only_outside_prod(self) -> "Settings":
+        if self.env == "prod":
+            if self.dev_principal is not None:
+                raise ValueError("dev_principal is not allowed when env is prod")
+        elif self.dev_principal is None:
+            self.dev_principal = DEV_PRINCIPAL
+        return self
 
     @field_validator("log_level", mode="before")
     @classmethod
