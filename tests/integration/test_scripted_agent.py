@@ -15,6 +15,7 @@ from tests.fixtures.upstreams import DemoUpstreams
 DEMO = Path(__file__).resolve().parents[2] / "examples" / "agents" / "scripts" / "demo_p1.yaml"
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_the_demo_script_runs_through_keystone(
     keystone_app: KeystoneApp, demo_upstreams: DemoUpstreams
@@ -42,6 +43,7 @@ async def test_the_demo_script_runs_through_keystone(
     ]
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_a_refusal_matches_expect_error_code_and_anything_else_fails(
     keystone_app: KeystoneApp,
@@ -83,6 +85,7 @@ async def test_the_token_is_sent_as_a_bearer_header() -> None:
     assert set(seen) == {"Bearer t0ken"}
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 def test_the_command_line_prints_json_lines_and_the_exit_code_says_pass_or_fail(
     keystone_app: KeystoneApp, capsys: pytest.CaptureFixture[str], tmp_path: Path
@@ -98,6 +101,7 @@ def test_the_command_line_prints_json_lines_and_the_exit_code_says_pass_or_fail(
     assert "FAIL mail__nope" in capsys.readouterr().out
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 def test_the_command_line_reads_the_token_from_the_environment(
     monkeypatch: pytest.MonkeyPatch, keystone_app: KeystoneApp

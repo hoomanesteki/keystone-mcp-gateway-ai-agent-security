@@ -27,6 +27,7 @@ EXPECTED_TOOLS = {
 }
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_tools_list_namespaced(keystone_app: KeystoneApp, mcp_client: McpConnect) -> None:
     async with mcp_client(keystone_app) as client:
@@ -39,6 +40,7 @@ async def test_tools_list_namespaced(keystone_app: KeystoneApp, mcp_client: McpC
     assert "Read one email" in (read.description or "")
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_call_through_gateway(
     keystone_app: KeystoneApp, mcp_client: McpConnect, demo_upstreams: DemoUpstreams
@@ -62,6 +64,7 @@ async def test_call_through_gateway(
     )
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_unknown_tool_returns_not_found(
     keystone_app: KeystoneApp, mcp_client: McpConnect
@@ -84,6 +87,7 @@ async def test_unknown_tool_returns_not_found(
     ]
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_invalid_arguments_never_reach_the_upstream(
     keystone_app: KeystoneApp, mcp_client: McpConnect, demo_upstreams: DemoUpstreams
@@ -98,6 +102,7 @@ async def test_invalid_arguments_never_reach_the_upstream(
     assert (record["outcome"], record["dispatched"]) == ("rejected", False)
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_an_upstream_tool_error_passes_through_as_its_own_result(
     keystone_app: KeystoneApp, mcp_client: McpConnect
@@ -111,6 +116,7 @@ async def test_an_upstream_tool_error_passes_through_as_its_own_result(
     assert [r["outcome"] for r in keystone_app.audit.records] == ["ok"]
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_every_call_leaves_one_audit_record(
     keystone_app: KeystoneApp, mcp_client: McpConnect
@@ -126,6 +132,7 @@ async def test_every_call_leaves_one_audit_record(
     assert outcomes == ["ok", "rejected", "rejected", "ok"]
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_calls_carry_the_dev_principal_and_a_stable_session(
     keystone_app: KeystoneApp, mcp_client: McpConnect
@@ -145,6 +152,7 @@ async def test_calls_carry_the_dev_principal_and_a_stable_session(
     assert len({r["call_id"] for r in records}) == 3
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_clients_in_auto_mode_use_the_handshake_era(
     keystone_app: KeystoneApp, mcp_client: McpConnect
@@ -161,6 +169,7 @@ def leaves(error: BaseException) -> list[BaseException]:
     return [error]
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_a_client_pinned_to_the_newer_era_is_refused(
     keystone_app: KeystoneApp, mcp_client: McpConnect
@@ -174,6 +183,7 @@ async def test_a_client_pinned_to_the_newer_era_is_refused(
     assert refusals[0].error.data["supported"] == list(HANDSHAKE_PROTOCOL_VERSIONS)
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_the_result_names_the_call_and_not_the_upstream(
     keystone_app: KeystoneApp, mcp_client: McpConnect
@@ -189,6 +199,7 @@ async def test_the_result_names_the_call_and_not_the_upstream(
     assert refused.meta["keystone/call_id"] == second["call_id"]
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_a_foreign_host_header_is_refused(keystone_app: KeystoneApp) -> None:
     body = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
@@ -203,11 +214,13 @@ async def test_a_foreign_host_header_is_refused(keystone_app: KeystoneApp) -> No
     assert allowed.status_code != 421
 
 
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_health_endpoints_still_work(keystone_app: KeystoneApp) -> None:
     assert httpx2.get(f"{keystone_app.base}/healthz", timeout=10).json() == {"status": "ok"}
 
 
+@pytest.mark.services
 @pytest.mark.phase(2)
 async def test_a_rejection_carries_its_meta_on_the_result_and_on_the_block(
     keystone_app: KeystoneApp, mcp_client: McpConnect
@@ -228,6 +241,7 @@ async def test_a_rejection_carries_its_meta_on_the_result_and_on_the_block(
         assert block.meta == expected
 
 
+@pytest.mark.services
 @pytest.mark.phase(2)
 async def test_an_upstream_cannot_forge_the_result_level_rejection_meta(
     keystone_app: KeystoneApp, mcp_client: McpConnect

@@ -13,8 +13,8 @@ from keystone.core.canonical import canonical_json, sha256_hex
 from keystone.core.errors import Reject
 from keystone.core.types import ToolRef
 from keystone.gateway.upstreams import UpstreamPool
+from keystone.registry.config import UpstreamConfig
 from keystone.registry.naming import make_tool_name
-from keystone.settings import UpstreamConfig
 
 log = structlog.get_logger()
 

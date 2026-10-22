@@ -80,13 +80,44 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` |
 | `KEYSTONE_CONFIG` | unset | Path to a YAML file with the same keys |
 | `KEYSTONE_ALLOWED_HOSTS` | `["127.0.0.1:*","localhost:*","[::1]:*"]` | JSON list of `Host` header values the MCP endpoint accepts (DNS rebinding guard). `:*` matches any port. Add the service name, for example `keystone:*`, to reach it from another container. |
+| `KEYSTONE_ALLOW_PRIVATE_UPSTREAMS` | `false` | When `false`, an upstream URL whose host resolves to a loopback, private (RFC 1918), link-local (including 169.254.169.254), CGNAT (100.64.0.0/10) or IPv6 unique-local address is refused. Local compose sets it to `true`, because the demo upstreams are on a private network. |
 | `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is, until real authentication arrives in Phase 3. Refused when `KEYSTONE_ENV=prod`. |
 
 Two sections come from the YAML file only: `tenants` and `upstreams` (see `keystone.example.yaml`).
+
+## Upstreams
+
 Each upstream has an `id` (lowercase letters, digits and single underscores, not ending in an
-underscore), a `tenant` and, for `transport: http`, a `url`. Keystone reads each upstream's tool
-list once when it starts. An upstream that is down then is skipped and logged, and its tools stay
-missing until Keystone restarts. Phase 2 adds syncing.
+underscore), a `tenant` that is listed under `tenants` and, for `transport: http`, a `url`. A
+`credential_mode` (`none`, `static` or `per_user`) and per-tool settings are optional. An unknown
+key is an error, so a typo does not pass quietly.
+
+Keystone applies the `upstreams` section every time it starts. It adds or updates each entry with
+`source=config`, and a config upstream that is no longer in the file is set to `disabled`. Rows are
+never deleted, because audit records name upstreams. If any entry cannot be used (an unknown
+tenant, a missing url, a URL the SSRF guard refuses), Keystone stops at startup, names every
+problem, and writes nothing. Until syncing arrives, Keystone reads each http upstream's tool list
+once at startup; an upstream that is down then is skipped and logged.
+
+The URL check resolves the host and refuses it unless every address is public. It runs when an
+upstream is registered, so it does not stop a name that points somewhere public today and
+somewhere private later (DNS rebinding). Keep the network policy around the gateway tight in
+production.
+
+The `keystone` command manages upstreams without a restart. It reads the same settings as the
+server, so run it where `KEYSTONE_DATABASE_URL` points at the right database (inside compose:
+`docker compose -f deploy/docker-compose.yml exec keystone keystone upstream list`).
+
+| Command | What it does |
+|---|---|
+| `keystone upstream list [--all] [--json]` | Id, tenant, transport, status, source, last sync and target. `--all` includes disabled upstreams. |
+| `keystone upstream add ID --url URL [--tenant T]` | Register an http upstream with `source=cli`. The URL goes through the SSRF guard. |
+| `keystone upstream add ID --transport stdio -- CMD ARGS...` | Register a stdio upstream. |
+| `keystone upstream remove ID` | Disable a CLI upstream. A config upstream is removed by editing the file. |
+| `keystone db upgrade` | Apply database migrations. `keystone serve --migrate` does it before starting; the compose stack uses that. |
+
+Without `--tenant`, `add` uses the config's only tenant, and fails when the config names none or
+several.
 
 ## The MCP endpoint
 

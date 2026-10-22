@@ -16,6 +16,8 @@ from keystone.gateway.sessions import InMemorySessionStore
 from keystone.gateway.upstreams import UpstreamPool, http_client_factory
 from keystone.gateway.wiring import PipelineDeps, build_pipeline
 from keystone.health import check_dependencies
+from keystone.registry.config import apply_config_upstreams
+from keystone.registry.repo import UpstreamRepo
 from keystone.registry.static import StaticRegistry
 from keystone.settings import Settings
 
@@ -48,6 +50,14 @@ def create_app(
         app.state.sessionmaker = make_sessionmaker(engine)
         try:
             await upsert_tenants(app.state.sessionmaker, settings.tenants)
+            # A config the registry cannot use (unknown tenant, a URL the SSRF guard refuses)
+            # stops startup: serving with some upstreams silently missing is worse.
+            await apply_config_upstreams(
+                UpstreamRepo(app.state.sessionmaker),
+                settings.upstreams,
+                [t.id for t in settings.tenants],
+                allow_private=settings.allow_private_upstreams,
+            )
             # One task enters and leaves the pool and the session manager, as the SDK's
             # cancel scopes require (engineering note 1).
             async with AsyncExitStack() as stack:

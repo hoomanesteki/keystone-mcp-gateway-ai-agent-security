@@ -2,6 +2,10 @@
 # Environment variables in docker-compose.yml override anything set here.
 log_level: info
 
+tenants:
+  - id: acme
+    name: Acme Corp
+
 upstreams:
   - {id: mail, tenant: acme, transport: http, url: "http://mail-mcp:8101/mcp"}
   - {id: files, tenant: acme, transport: http, url: "http://files-mcp:8102/mcp"}
