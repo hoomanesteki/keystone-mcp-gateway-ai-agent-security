@@ -1,5 +1,6 @@
 # Local stack for development and the demo. Host ports are fixed (see .env.example).
 # The four demo upstreams (<name>-mcp) are built from deploy/Dockerfile.upstreams, one image.
+# Keystone is built from the Dockerfile at the repository root.
 # Every image is pinned to an exact tag and listed in docs/adr/0002-dependency-pins.md.
 name: keystone
 
@@ -175,6 +176,45 @@ services:
         - python
         - -c
         - "import urllib.request as u; u.urlopen('http://127.0.0.1:8104/healthz', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  keystone:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: keystone:dev
+    environment:
+      KEYSTONE_ENV: dev
+      KEYSTONE_CONFIG: /etc/keystone/keystone.yaml
+      KEYSTONE_DATABASE_URL: postgresql+asyncpg://keystone:keystone@postgres:5432/keystone
+      KEYSTONE_REDIS_URL: redis://redis:6379/0
+      # Other containers reach Keystone by its service name.
+      KEYSTONE_ALLOWED_HOSTS: '["127.0.0.1:*", "localhost:*", "[::1]:*", "keystone:*"]'
+    volumes:
+      - ./keystone.compose.yaml:/etc/keystone/keystone.yaml:ro
+    ports:
+      - "${KEYSTONE_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mail-mcp:
+        condition: service_healthy
+      files-mcp:
+        condition: service_healthy
+      bank-mcp:
+        condition: service_healthy
+      echo-mcp:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"
       interval: 5s
       timeout: 3s
       retries: 20
