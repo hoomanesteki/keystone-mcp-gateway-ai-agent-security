@@ -18,7 +18,7 @@ from keystone.gateway.sessions import InMemorySessionStore
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
 from keystone.gateway.wiring import PipelineDeps, build_pipeline
 from keystone.health import check_dependencies
-from keystone.registry.config import apply_config_upstreams
+from keystone.registry.config import apply_config_upstreams, tool_overrides
 from keystone.registry.repo import ToolRepo, UpstreamRepo
 from keystone.registry.service import RegistryService
 from keystone.registry.sync import RegistrySyncer
@@ -47,7 +47,7 @@ def create_app(
         ToolRepo(sessions),
         pool,
         directory,
-        overrides={u.id: u.tools for u in settings.upstreams if u.tools},
+        overrides=tool_overrides(settings.upstreams),
         timeout_s=settings.registry.sync_timeout_s,
     )
     registry = RegistryService(syncer, cache_ttl_s=settings.registry.cache_ttl_s)
