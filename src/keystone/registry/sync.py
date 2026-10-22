@@ -11,7 +11,7 @@ alone anyone else's.
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import anyio
 import structlog
@@ -56,11 +56,12 @@ class SyncReport(BaseModel):
         return not self.errors
 
 
-def target_of(row: Upstream) -> UpstreamTarget:
+def target_of(row: Upstream, env: Mapping[str, str] | None = None) -> UpstreamTarget:
     return UpstreamTarget(
         transport=row.transport,
         url=row.url,
         command=tuple(row.command) if row.command else None,
+        env=tuple(sorted((env or {}).items())),
     )
 
 
@@ -122,11 +123,15 @@ class RegistrySyncer:
     # upstream id -> upstream tool name -> what the config says about it
     overrides: Mapping[str, Mapping[str, ToolOverride]]
     timeout_s: float = DEFAULT_TIMEOUT_S
+    # upstream id -> the environment its stdio child gets (from the config file only)
+    environments: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
     async def learn(self, rows: Iterable[Upstream]) -> None:
         """Tell the directory where the upstreams are, and drop pooled clients whose address
         changed since the last time."""
-        changed = self.directory.update({row.id: target_of(row) for row in rows})
+        changed = self.directory.update(
+            {row.id: target_of(row, self.environments.get(row.id)) for row in rows}
+        )
         for upstream_id in changed:
             await self.pool.forget(upstream_id)
 

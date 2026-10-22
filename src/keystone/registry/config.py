@@ -8,6 +8,7 @@ pointing at nothing.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
@@ -22,6 +23,8 @@ from keystone.registry.repo import CredentialMode, UpstreamRepo, UpstreamSpec
 from keystone.registry.ssrf import UnsafeUpstreamUrl, check_upstream_url
 
 log = structlog.get_logger()
+
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class ConfigError(ValueError):
@@ -54,6 +57,9 @@ class UpstreamConfig(BaseModel):
     transport: Literal["http", "stdio", "builtin"] = "http"
     url: str | None = None
     command: list[str] | None = None
+    # Environment for a stdio child, on top of PATH. Keystone's own environment is never passed.
+    # It holds settings, not secrets: this file is not a secret store.
+    env: dict[str, str] = Field(default_factory=dict)
     credential_mode: CredentialMode = "none"
     tools: dict[str, ToolOverride] = Field(default_factory=dict)
 
@@ -62,6 +68,23 @@ class UpstreamConfig(BaseModel):
     def _valid_id(cls, value: str) -> str:
         check_upstream_id(value)
         return value
+
+    @field_validator("env")
+    @classmethod
+    def _safe_env(cls, value: dict[str, str]) -> dict[str, str]:
+        for name in value:
+            if not _ENV_NAME.fullmatch(name):
+                raise ValueError(f"{name!r} is not a valid environment variable name")
+            if name.upper().startswith("KEYSTONE_"):
+                # Copying Keystone's master key or database URL into a third-party server's
+                # environment is the leak this key exists to prevent.
+                raise ValueError(f"{name} is Keystone's own setting and cannot go to an upstream")
+        return value
+
+
+def stdio_environments(upstreams: Sequence[UpstreamConfig]) -> dict[str, dict[str, str]]:
+    """The environment each stdio upstream asks for, by upstream id."""
+    return {u.id: dict(u.env) for u in upstreams if u.env}
 
 
 def tool_overrides(upstreams: Sequence[UpstreamConfig]) -> dict[str, dict[str, ToolOverride]]:
@@ -105,6 +128,8 @@ async def _problems(
                 problems.append(f"{name}: {exc}")
         elif not upstream.command:
             problems.append(f"{name} needs a command")
+        if upstream.transport == "http" and (upstream.command or upstream.env):
+            problems.append(f"{name} is http, so `command` and `env` do not apply")
     return problems
 
 

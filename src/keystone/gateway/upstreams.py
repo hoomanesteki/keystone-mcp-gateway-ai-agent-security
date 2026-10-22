@@ -1,9 +1,9 @@
 """Clients for upstream MCP servers, and the pool that keeps them open (ADR-0003).
 
-Each HttpUpstreamClient holds its MCP session open inside one background task, from the moment
-it connects until it is closed. The anyio cancel scopes in the SDK's transport must be left in the
-task that entered them (engineering note 1), so request handlers never enter or leave a session.
-They borrow the open one.
+Each client (HTTP or stdio) holds its MCP session open inside one background task, from the
+moment it connects until it is closed. The anyio cancel scopes in the SDK's transport must be left
+in the task that entered them (engineering note 1), so request handlers never enter or leave a
+session. They borrow the open one.
 
 A call is only resent when the upstream refused it before running the tool (its session was
 gone). A call that died in flight is not resent, because the tool may already have run and a
@@ -13,9 +13,10 @@ second transfer or email would be a second effect.
 from __future__ import annotations
 
 import hashlib
+import sys
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from types import TracebackType
 from typing import Any, Literal, Protocol, Self
 
@@ -24,6 +25,7 @@ import httpx2
 import structlog
 from anyio.abc import TaskGroup
 from mcp import Client
+from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from pydantic import BaseModel, SecretStr
@@ -48,6 +50,10 @@ _SESSION_LOST = {"Session not found", "Session terminated"}
 _INVALID_REQUEST = -32600
 
 Protocol_ = Literal["auto", "legacy"]
+
+# Opens a transport and closes it again when the context ends, so that whatever the transport owns
+# (an HTTP client, a child process) is released by the task that opened it.
+OpenTransport = Callable[[], AbstractAsyncContextManager[Any]]
 
 
 class UpstreamTool(BaseModel, frozen=True):
@@ -74,10 +80,9 @@ def _session_lost(exc: MCPError) -> bool:
 class _Connection:
     """One MCP session, owned by one task from open to close."""
 
-    def __init__(self, upstream_id: str, url: str, headers: Mapping[str, str], protocol: str):
+    def __init__(self, upstream_id: str, open_transport: OpenTransport, protocol: str):
         self.upstream_id = upstream_id
-        self.url = url
-        self.headers = dict(headers)
+        self.open_transport = open_transport
         self.protocol = protocol
         self.client: Client | None = None
         self.ready = anyio.Event()
@@ -93,19 +98,15 @@ class _Connection:
     async def run(self) -> None:
         try:
             with self.scope:
-                async with httpx2.AsyncClient(
-                    headers=self.headers,
-                    timeout=httpx2.Timeout(CONNECT_TIMEOUT_S, read=300.0),
-                    follow_redirects=False,
-                ) as http:
-                    transport = streamable_http_client(self.url, http_client=http)
+                async with self.open_transport() as transport:
                     mode: Any = self.protocol
                     async with Client(transport, mode=mode) as client:
                         self.client = client
                         self.ready.set()
                         await self.closing.wait()
         except Exception as exc:
-            # The text of the error can hold the URL and header values, so log its type only.
+            # The text of the error can hold the URL, header values or a command line, so log its
+            # type only.
             log.warning(
                 "upstream_connection_ended", upstream=self.upstream_id, error=type(exc).__name__
             )
@@ -124,11 +125,14 @@ class _Connection:
                 await self.done.wait()
 
 
-class HttpUpstreamClient:
+class _SessionClient:
+    """What the HTTP and the stdio client share: one session held by a background task, a lock
+    around connecting, a reconnect with backoff, and the mapping of failures to rejections. A
+    subclass says how to open the transport."""
+
     def __init__(
         self,
-        url: str,
-        headers: Mapping[str, str] | None,
+        open_transport: OpenTransport,
         task_group: TaskGroup,
         *,
         upstream_id: str = "upstream",
@@ -136,10 +140,8 @@ class HttpUpstreamClient:
         backoff_s: Sequence[float] = RECONNECT_BACKOFF_S,
         health_timeout_s: float = HEALTH_TIMEOUT_S,
     ) -> None:
-        self.url = url
+        self._open_transport = open_transport
         self.upstream_id = upstream_id
-        self._headers = dict(headers or {})
-        inject_trace_headers(self._headers)
         self._task_group = task_group
         self._protocol = protocol
         self._backoff_s = tuple(backoff_s)
@@ -266,7 +268,7 @@ class HttpUpstreamClient:
             raise Reject(Code.UPSTREAM_ERROR, "the upstream server is not reachable")
 
     async def _open(self) -> _Connection:
-        connection = _Connection(self.upstream_id, self.url, self._headers, self._protocol)
+        connection = _Connection(self.upstream_id, self._open_transport, self._protocol)
         self._task_group.start_soon(connection.run)
         try:
             with anyio.fail_after(CONNECT_TIMEOUT_S):
@@ -288,6 +290,103 @@ class HttpUpstreamClient:
     async def _drop_if_dead(self, client: Client, exc: MCPError) -> None:
         if exc.error.message == "Connection closed":
             await self._drop(client)
+
+
+@asynccontextmanager
+async def _http_transport(url: str, headers: Mapping[str, str]) -> AsyncIterator[Any]:
+    async with httpx2.AsyncClient(
+        headers=dict(headers),
+        timeout=httpx2.Timeout(CONNECT_TIMEOUT_S, read=300.0),
+        follow_redirects=False,
+    ) as http:
+        yield streamable_http_client(url, http_client=http)
+
+
+class HttpUpstreamClient(_SessionClient):
+    def __init__(
+        self,
+        url: str,
+        headers: Mapping[str, str] | None,
+        task_group: TaskGroup,
+        *,
+        upstream_id: str = "upstream",
+        protocol: Protocol_ = "auto",
+        backoff_s: Sequence[float] = RECONNECT_BACKOFF_S,
+        health_timeout_s: float = HEALTH_TIMEOUT_S,
+    ) -> None:
+        self.url = url
+        fixed = dict(headers or {})
+        inject_trace_headers(fixed)
+        super().__init__(
+            lambda: _http_transport(url, fixed),
+            task_group,
+            upstream_id=upstream_id,
+            protocol=protocol,
+            backoff_s=backoff_s,
+            health_timeout_s=health_timeout_s,
+        )
+
+
+# Runs in a fresh interpreter in front of the real command. It keeps the variables named in its
+# first argument and nothing else, then replaces itself with the command, so the child has the
+# same process id and the same pipes. The SDK's stdio client starts the child with a few variables
+# of its own (HOME, USER, SHELL, ...) and has no way to turn that off, so the filtering is done
+# here. The values never appear on a command line: only the names do.
+_CLEAN_EXEC = (
+    "import os, sys\n"
+    "keep = set(sys.argv[1].split(','))\n"
+    "env = {k: v for k, v in os.environ.items() if k in keep}\n"
+    "os.execvpe(sys.argv[2], sys.argv[2:], env)\n"
+)
+
+
+def clean_launch(command: Sequence[str], env: Mapping[str, str]) -> StdioServerParameters:
+    """How to start `command` so that its environment is `env` plus PATH and nothing of
+    Keystone's own. PATH comes from Keystone unless `env` sets it. POSIX only."""
+    keep = ["PATH", *sorted(set(env) - {"PATH"})]
+    return StdioServerParameters(
+        command=sys.executable,
+        args=["-I", "-S", "-c", _CLEAN_EXEC, ",".join(keep), *command],
+        env=dict(env),
+    )
+
+
+@asynccontextmanager
+async def _stdio_transport(params: StdioServerParameters) -> AsyncIterator[Any]:
+    yield stdio_client(params)
+
+
+class StdioUpstreamClient(_SessionClient):
+    """An MCP server that Keystone starts as a child process and talks to over its pipes.
+
+    It starts when the first call needs it, and starts again, with the same backoff as an HTTP
+    reconnect, after the child dies. A call that was running when the child died fails and is not
+    resent (the tool may have run). Closing the client ends the child.
+    """
+
+    def __init__(
+        self,
+        command: Sequence[str],
+        env: Mapping[str, str] | None,
+        task_group: TaskGroup,
+        *,
+        upstream_id: str = "upstream",
+        protocol: Protocol_ = "auto",
+        backoff_s: Sequence[float] = RECONNECT_BACKOFF_S,
+        health_timeout_s: float = HEALTH_TIMEOUT_S,
+    ) -> None:
+        if not command:
+            raise ValueError(f"upstream {upstream_id!r}: a stdio upstream needs a command")
+        self.command = tuple(command)
+        params = clean_launch(self.command, env or {})
+        super().__init__(
+            lambda: _stdio_transport(params),
+            task_group,
+            upstream_id=upstream_id,
+            protocol=protocol,
+            backoff_s=backoff_s,
+            health_timeout_s=health_timeout_s,
+        )
 
 
 _MCP_ERROR_MESSAGE = "the upstream server rejected the request"
@@ -477,6 +576,8 @@ class UpstreamTarget(BaseModel, frozen=True):
     transport: str
     url: str | None = None
     command: tuple[str, ...] | None = None
+    # Extra environment for a stdio child, as sorted (name, value) pairs. Never logged.
+    env: tuple[tuple[str, str], ...] = ()
 
 
 class UpstreamDirectory:
@@ -511,6 +612,16 @@ def directory_client_factory(
             return HttpUpstreamClient(
                 target.url,
                 headers,
+                task_group,
+                upstream_id=upstream_id,
+                protocol=protocol,
+                backoff_s=backoff_s,
+                health_timeout_s=health_timeout_s,
+            )
+        if target.transport == "stdio" and target.command:
+            return StdioUpstreamClient(
+                target.command,
+                dict(target.env),
                 task_group,
                 upstream_id=upstream_id,
                 protocol=protocol,
