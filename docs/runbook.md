@@ -114,6 +114,49 @@ Every token then carries `iss=http://localhost:8180/realms/keystone`, while a re
 `keycloak:8080`. A service inside the network can then fetch the keys without going out through
 the host. `tests/e2e/test_keycloak.py` checks both answers.
 
+### How Keystone checks a token
+
+`identity/jwt.py` does it in this order, and stops at the first failure:
+
+1. The header is read without verifying anything. An `alg` other than `RS256` or `ES256` is
+   refused here, so `none`, the HMAC algorithms and anything else never reach a key. A header with
+   `jku`, `jwk`, `x5u`, `crit` or `b64` is refused too, and so is a token without a `kid`.
+2. The `kid` selects one key from the identity provider's published set. Encryption keys
+   (`use: enc`), RSA keys under 2048 bits and EC keys that are not P-256 are not used.
+3. The key must match the algorithm: RSA for `RS256`, EC P-256 for `ES256`.
+4. The signature and the claims are verified with exactly that one algorithm. `exp`, `iat`,
+   `iss`, `aud` and `sub` must be present. `iss` must equal the configured issuer, `aud` must
+   contain the configured audience, and `exp`, `nbf` and `iat` get 60 seconds of leeway.
+
+The keys are fetched from the discovery document with a 3 second timeout and kept in memory. A
+token with an unknown `kid` makes Keystone fetch them again, at most once a minute, so a rotation
+is picked up and a stream of made-up key ids costs the identity provider one request a minute.
+While Keystone holds no keys at all, a failed fetch is retried after 2 seconds. If the keys cannot
+be fetched, the answer is 503, not 401: the token was not shown to be bad.
+
+`tenant` is required and must look like a tenant id. The agent is `azp`, or `client_id` when
+there is no `azp`. Groups lose their leading `/`, and the `/tenants/...` groups are dropped,
+because the tenant has its own claim. The roles come from `roles`, or from `realm_access.roles`
+when there is no `roles` claim, and only `admin` and `approver` are kept.
+
+### Agents
+
+An agent is the OAuth client that acts for a user (`azp`). The `agents` section of the config
+lists the ones that may connect and how far Keystone trusts each (`low`, `standard` or `high`):
+
+```yaml
+agents:
+  support-agent: {trust: standard}
+  ops-agent: {trust: high}
+auth:
+  allow_unknown_agents: false   # true lets an unlisted agent in with trust low
+```
+
+A token from an agent that is not listed is refused with 403, after it has been validated. Set
+`KEYSTONE_AUTH__ALLOW_UNKNOWN_AGENTS=true` to let such an agent in with trust `low` instead.
+`keystone agent list` prints the table and says which of the two applies. The trust level is in
+the principal that policy sees (Phase 4).
+
 ### Changing the realm
 
 Keycloak imports the realm file only when the realm does not exist. The development database
@@ -150,8 +193,9 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_HEALTH__DEGRADED_AFTER` | `1` | Consecutive failed probes before an upstream is `degraded`. |
 | `KEYSTONE_HEALTH__DOWN_AFTER` | `3` | Consecutive failed probes before it is `down`. Not less than `DEGRADED_AFTER`. |
 | `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is, until real authentication arrives in Phase 3. Refused when `KEYSTONE_ENV=prod`. |
+| `KEYSTONE_AUTH__ALLOW_UNKNOWN_AGENTS` | `false` | Let an agent that is not under `agents` in with trust `low`. Also `auth.allow_unknown_agents` in the YAML. |
 
-Two sections come from the YAML file only: `tenants` and `upstreams` (see `keystone.example.yaml`).
+Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
 
 ## Upstreams
 
@@ -181,6 +225,7 @@ server, so run it where `KEYSTONE_DATABASE_URL` points at the right database (in
 | `keystone upstream add ID --url URL [--tenant T]` | Register an http upstream with `source=cli`. The URL goes through the SSRF guard. |
 | `keystone upstream add ID --transport stdio -- CMD ARGS...` | Register a stdio upstream. |
 | `keystone upstream remove ID` | Disable a CLI upstream. A config upstream is removed by editing the file. |
+| `keystone agent list [--json]` | The agents in the config with their trust level, and what an unlisted agent gets. |
 | `keystone db upgrade` | Apply database migrations. `keystone serve --migrate` does it before starting; the compose stack uses that. |
 
 ### stdio upstreams
