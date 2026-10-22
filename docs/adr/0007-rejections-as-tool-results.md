@@ -22,7 +22,10 @@ user, wait for approval, or pick another tool.
   from the `Reject`. In the SDK the field is `meta` with the alias `_meta`; code passes `_meta=`.
   The plan's `ToolResult` has no result-level meta field, and its contract is unchanged, so the
   `_meta` sits on the text content block (`result.content[0].meta` in a client). MCP allows `_meta`
-  on any content block.
+  on any content block. Since KS-193 the `keystone/*` keys are also on the result (`result.meta`),
+  so a client can read the code without looking at the blocks. `RejectionResult`, a subclass of
+  `ToolResult` that only Keystone creates, carries them to the gateway; an upstream result with a
+  lookalike block never reaches the result-level `_meta`.
 - Missing or invalid authentication is not a tool result. It is an HTTP 401 before the MCP layer
   runs, because the client has to handle it and the model cannot fix it.
 - A malformed request, an unknown method or a failed handshake stay protocol errors, because the

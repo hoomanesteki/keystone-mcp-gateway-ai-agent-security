@@ -34,9 +34,9 @@ the "Found" list at the end.
 
 | ID | Title | Pts | Status | PR | Notes |
 |---|---|---|---|---|---|
-| KS-191 | Pipeline refuses to dispatch without an allow decision | 1 | todo | | Found at gate 1. Structural I1: dispatch only when `decision.effect` is `allow`, or `require_approval` with a consumed approval. |
-| KS-192 | Pool eviction waits for in-flight calls | 2 | todo | | Found at gate 1. |
-| KS-193 | Rejection meta on the MCP result | 1 | todo | | Found at gate 1. Copy `keystone/*` meta to the result-level `_meta`. |
+| KS-191 | Pipeline refuses to dispatch without an allow decision | 1 | done | | `fix/ks-191-pipeline-hardening`. Dispatch only when `decision.effect` is `allow`, or `require_approval` with `approval_id` set; otherwise `KS_DENIED` with reason `no-decision`. The Phase 6 approval interceptor must set `approval_id` only after a successful `consume`. |
+| KS-192 | Pool eviction waits for in-flight calls | 2 | done | | Same branch. `UpstreamPool.lease()` counts calls in flight; an evicted client leaves the pool at once and closes after its last call. |
+| KS-193 | Rejection meta on the MCP result | 1 | done | | Same branch. `to_tool_result` returns `RejectionResult` (a `ToolResult` subclass, contract unchanged); only that type puts its `keystone/*` keys on the result-level `_meta`. The block copy stays. |
 | KS-201 | Schema for upstreams, tools and sessions | 3 | todo | | |
 | KS-202 | Upstream config, admin CLI and SSRF guard | 5 | todo | | |
 | KS-203 | Tool discovery and sync | 5 | todo | | |
