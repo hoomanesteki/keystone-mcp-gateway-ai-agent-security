@@ -14,7 +14,7 @@ the "Found" list at the end.
 | KS-004 | Settings, logging and health endpoints | 2 | done | | `feat/ks-004-settings-health`. No CI yet at merge time. |
 | KS-005 | Database layer and migrations | 3 | done | | `feat/ks-005-db`. CI runs `alembic upgrade head` before the integration tests. |
 | KS-006 | Docs skeleton and contributor rules | 2 | done | | `docs/ks-006-docs-skeleton`. Also adds `scripts/lint_prose.py` (planned for KS-907) and turns on the commits and docs CI jobs. |
-| KS-007 | Backlog import and traceability scripts | 5 | todo | | |
+| KS-007 | Backlog import and traceability scripts | 5 | done | | `chore/ks-007-backlog-scripts`. Deferred: needs gh auth (the real import; only dry runs and a fake-gh test were run). |
 
 ## Phase 1: MCP proxy core
 
@@ -133,6 +133,19 @@ the "Found" list at the end.
 | KS-907 | Docs, results and fresh-clone check | 3 | todo | | |
 | KS-908 | Release v1.0.0 | 2 | todo | | |
 
+## Deferred
+
+Everything here needs a signed-in GitHub CLI, which this machine does not have. The scripts are
+written and their dry runs pass.
+
+| Item | Command | Status |
+|---|---|---|
+| Branch protection on `main` and `dev` | `make github-setup` | deferred: needs gh auth |
+| Milestones, labels and one issue per story | `make github-setup` | deferred: needs gh auth (dry run lists 79 stories, 10 phases, 301 points) |
+| GitHub release for `v0.0.1` | `scripts/publish_releases.sh v0.0.1` | deferred: needs gh auth |
+
 ## Found
 
-Nothing yet.
+On macOS, a background process can flag dot-directories such as `.venv` as hidden, and Python
+skips hidden `.pth` files, so `import keystone` fails after `uv sync`. Setting
+`UV_PROJECT_ENVIRONMENT` to a path outside the repo avoids it (see docs/runbook.md).
