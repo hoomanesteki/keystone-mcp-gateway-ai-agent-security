@@ -47,8 +47,10 @@ extend-exclude = ["src/keystone/db/migrations/versions"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "ASYNC", "S", "SIM", "RUF"]
 
+# Tests and dev scripts call docker, git and gh with fixed arguments, so S603 and S607 are noise there.
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = ["S101", "S603", "S607"]
+"scripts/**" = ["S603", "S607"]
 
 [tool.mypy]
 python_version = "3.12"
