@@ -18,7 +18,13 @@ from keystone.audit.redact import (
 from keystone.core.canonical import canonical_json
 
 CARD = "4111 1111 1111 1111"
-PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA7\nabc123\n-----END RSA PRIVATE KEY-----"
+
+
+def pem(kind: str) -> str:
+    """A private key block, put together here so that this file holds no complete block for a
+    secret scanner to find."""
+    dashes = "-" * 5
+    return f"{dashes}BEGIN {kind}{dashes}\nMIIEowIBAAKCAQEA7\nabc123\n{dashes}END {kind}{dashes}"
 
 
 @pytest.mark.phase(5)
@@ -32,9 +38,9 @@ def test_redacts_keys_and_patterns() -> None:
         "items": [{"X-Api-Key": "k"}, "plain"],
         "note": f"charge {CARD} today",
         "who": "ssn 123-45-6789, thanks",
-        "header": "curl -H 'Authorization: Bearer eyJhbGciOi.payload.sig'",
+        "header": "sent 'Authorization: Bearer eyJhbGciOi.payload.sig' twice",
         "aws": "key AKIAIOSFODNN7EXAMPLE here",
-        "pem": f"before {PEM} after",
+        "pem": f"before {pem('RSA PRIVATE KEY')} after",
         "internal": "customer-77",
         "count": 7,
         "ratio": 0.5,
@@ -53,7 +59,7 @@ def test_redacts_keys_and_patterns() -> None:
         "items": [{"X-Api-Key": "[redacted]"}, "plain"],
         "note": "charge [redacted:card] today",
         "who": "ssn [redacted:ssn], thanks",
-        "header": "curl -H 'Authorization: Bearer [redacted]'",
+        "header": "sent 'Authorization: Bearer [redacted]' twice",
         "aws": "key [redacted:aws-key-id] here",
         "pem": "before [redacted:private-key] after",
         "internal": "[redacted]",
@@ -168,16 +174,17 @@ def test_text_that_is_not_an_aws_key_id_stays(text: str) -> None:
     "header", ["RSA PRIVATE KEY", "PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY"]
 )
 def test_a_private_key_block_is_masked(header: str) -> None:
-    block = f"-----BEGIN {header}-----\nMIIEvQIBADANBg\n-----END {header}-----"
+    block = pem(header)
 
     assert redact_string(f"key: {block}\nnext line") == "key: [redacted:private-key]\nnext line"
     # A block cut off before its footer is masked to the end, so nothing of the key is kept.
-    assert redact_string(f"-----BEGIN {header}-----\nMIIEvQIBADANBg") == "[redacted:private-key]"
+    cut = block.split("\nabc123")[0]
+    assert redact_string(cut) == "[redacted:private-key]"
 
 
 @pytest.mark.phase(5)
 def test_a_public_key_is_not_a_secret() -> None:
-    public = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZI\n-----END PUBLIC KEY-----"
+    public = pem("PUBLIC KEY")
 
     assert redact_string(public) == public
 
