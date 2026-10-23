@@ -9,8 +9,10 @@ Read this file for one rule: every path that does not end in an explicit allow e
                            listing stops after pass 1, because "who may see it" is not "when a
                            person must look".
 
-There is exactly one place that returns `Effect.ALLOW` (the end of `_decide`), and it is reached
-only after both passes answered cleanly. Everything else is a deny:
+Only two lines return `Effect.ALLOW`, both in `_decide`: the end of the access pass for a tool
+listing, and the end of the approval pass for a call. Each is reached only after the pass before
+it answered cleanly, with an explicit allow that names the policies behind it. Everything else is
+a deny:
 
 - a policy that failed to evaluate, in either pass (`errors` is not empty). Cedar skips such a
   policy, so a broken `forbid` would otherwise not forbid and a broken approval permit would not
