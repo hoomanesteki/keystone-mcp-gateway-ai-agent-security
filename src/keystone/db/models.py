@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    LargeBinary,
     Numeric,
     Text,
     UniqueConstraint,
@@ -140,6 +141,39 @@ class McpSession(Base):
         ARRAY(Text), nullable=False, server_default=text("'{}'")
     )
     tainted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class Credential(Base):
+    """Headers Keystone adds to calls to one upstream, encrypted with the master key (KS-305).
+    A null `user_id` is the upstream's static credential. The plaintext is never stored."""
+
+    __tablename__ = "credentials"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "upstream_id"],
+            ["upstreams.tenant_id", "upstreams.id"],
+            name="fk_credentials_upstream",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "upstream_id",
+            "user_id",
+            name="uq_credentials_owner",
+            postgresql_nulls_not_distinct=True,
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    upstream_id: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[str | None] = mapped_column(Text)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # A short fingerprint of the master key that encrypted the row, never the key.
+    key_id: Mapped[str] = mapped_column(Text, nullable=False)
+    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

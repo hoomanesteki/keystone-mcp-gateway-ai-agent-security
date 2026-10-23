@@ -206,10 +206,63 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_OIDC_AUDIENCE` | `keystone` | The value `aud` must contain. |
 | `KEYSTONE_OIDC_DISCOVERY_URL` | the issuer's own `/.well-known/openid-configuration` | Where to read the discovery document, when that is not the issuer's address. See "The issuer". |
 | `KEYSTONE_PUBLIC_BASE_URL` | the address of the request | How clients reach Keystone, for the sign-in metadata (`http://localhost:8080` in compose). Set it behind a proxy that changes the scheme or the host. |
+| `KEYSTONE_MASTER_KEYS` | unset | Fernet keys for the credential vault, comma separated. The first encrypts, all decrypt. Needed by `keystone cred ...` and, from KS-306, by the gateway. |
 | `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is when `KEYSTONE_AUTH__MODE=none`. Refused in any other mode. |
 | `KEYSTONE_AUTH__ALLOW_UNKNOWN_AGENTS` | `false` | Let an agent that is not under `agents` in with trust `low`. Also `auth.allow_unknown_agents` in the YAML. |
 
 Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
+
+## Credentials
+
+An upstream that needs an API key gets it from Keystone, never from the agent and never from the
+config file. The key is stored encrypted in Postgres (table `credentials`) and Keystone adds it to
+the call as an HTTP header. This section is the storage. The injection and the proof that no
+credential leaks come with KS-306.
+
+`credential_mode` on the upstream says whose credential it is:
+
+| Mode | What Keystone sends |
+|---|---|
+| `none` (default) | Nothing |
+| `static` | The upstream's own credential, the same for every caller |
+| `per_user` | The credential of the user making the call. A user without one is refused with `KS_DENIED` ("no credential for this user on mail") |
+
+```bash
+echo -n "$MAIL_KEY" | keystone cred set --upstream mail --header X-Api-Key     # the value comes from stdin
+keystone cred set --upstream mail --header X-Api-Key --from-env MAIL_API_KEY   # or from a variable
+keystone cred set --upstream crm --user alice --header X-Api-Key --from-env ALICE_CRM_KEY
+keystone cred list                                                             # who, which key, when
+```
+
+There is no option that takes the value on the command line, where a process list would show it.
+On a terminal the command asks for the value without echoing it. `cred set` replaces the
+credential it finds for that upstream and user, and holds one header. `cred list` prints the
+tenant, upstream, user, the id of the master key and two times. It does not decrypt anything.
+
+The vault needs `KEYSTONE_MASTER_KEYS`: one or more Fernet keys, comma separated. The first
+encrypts and every one decrypts. Make a key with
+`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. The
+key in `.env.example` is public, for local use only: `KEYSTONE_ENV=prod` refuses it.
+
+To rotate the master key, put the new key first and keep the old one, run
+`keystone cred rotate-keys`, then remove the old key:
+
+```bash
+KEYSTONE_MASTER_KEYS="$NEW,$OLD" keystone cred rotate-keys     # rotated 12, already under the first key 0
+KEYSTONE_MASTER_KEYS="$NEW"      keystone serve                # now the old key can go
+```
+
+It exits 1 and names the rows it could not decrypt if some credential was written under a key that
+is no longer listed. A rotation never undoes a `cred set` made while it runs.
+
+Header names are letters, digits and dashes. `Host`, `Content-Type`, `Mcp-Session-Id` and the
+other headers the HTTP layer owns are refused. Values are printable ASCII on one line, up to 4096
+characters.
+
+Every credential the vault decrypts is also registered with the log scrubber, which replaces it
+wherever it appears in a log line, in a field of any name and inside an exception message. A
+value shorter than 8 characters is not registered, because it would match inside ordinary words, so
+use keys longer than that.
 
 ## Upstreams
 
@@ -239,6 +292,9 @@ server, so run it where `KEYSTONE_DATABASE_URL` points at the right database (in
 | `keystone upstream add ID --url URL [--tenant T]` | Register an http upstream with `source=cli`. The URL goes through the SSRF guard. |
 | `keystone upstream add ID --transport stdio -- CMD ARGS...` | Register a stdio upstream. |
 | `keystone upstream remove ID` | Disable a CLI upstream. A config upstream is removed by editing the file. |
+| `keystone cred set --upstream ID --header NAME [--user U] [--from-env VAR]` | Store an upstream credential, read from stdin or the variable. |
+| `keystone cred list [--json]` | Stored credentials, without their values. |
+| `keystone cred rotate-keys` | Re-encrypt every credential under the first master key. |
 | `keystone agent list [--json]` | The agents in the config with their trust level, and what an unlisted agent gets. |
 | `keystone db upgrade` | Apply database migrations. `keystone serve --migrate` does it before starting; the compose stack uses that. |
 

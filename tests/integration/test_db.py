@@ -40,6 +40,7 @@ def test_migrations_up_down(clean_env: None) -> None:
             "upstreams",
             "tools",
             "sessions",
+            "credentials",
         }
 
         command.downgrade(config, "base")

@@ -137,6 +137,10 @@ class Settings(BaseSettings):
     # The address clients use to reach Keystone, for the sign-in metadata (RFC 9728). Without it
     # the address of the request is used.
     public_base_url: str | None = None
+    # Fernet keys for the credential vault, comma separated: the first encrypts and every one
+    # decrypts (KS-305). They are checked when the vault is built, not here, because a validation
+    # error would print the value it rejected.
+    master_keys: SecretStr | None = None
     # Who every caller is when `auth.mode` is `none`. It exists only then.
     dev_principal: Principal | None = None
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))
