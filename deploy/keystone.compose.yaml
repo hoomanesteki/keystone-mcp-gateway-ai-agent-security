@@ -16,6 +16,12 @@ policy:
   root: /etc/keystone/policies
   include_demo: true
 
+# A call the policy sends to approval is held this long (the default is 60 s), then the agent is
+# told KS_APPROVAL_PENDING with an id and waits with keystone__await_approval (ADR-0010). The demo
+# and the smoke scripts do not want to wait a minute to see a timeout.
+approvals:
+  wait_seconds: 10
+
 # Who may connect (KS-308): the OAuth clients of the Keycloak realm that act for users. The
 # issuer and the keys come from the environment (docker-compose.yml).
 agents:

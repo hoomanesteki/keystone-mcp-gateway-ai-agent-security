@@ -23,6 +23,7 @@ from keystone.app import create_app
 from keystone.registry.config import ToolOverride, UpstreamConfig
 from keystone.settings import (
     AgentConfig,
+    ApprovalSettings,
     HealthSettings,
     PolicySettings,
     RegistrySettings,
@@ -32,6 +33,7 @@ from keystone.settings import (
 
 # Re-exported so tests/conftest.py can name one module: tests/unit/test_phase_plugin.py copies the
 # conftest and strips its single `pytest_plugins` line, so that line must stay on one line.
+from tests.fixtures.approvals import approval_service, approver  # noqa: F401
 from tests.fixtures.audit import AuditView
 from tests.fixtures.fake_idp import FakeIdp, fake_idp  # noqa: F401
 from tests.fixtures.policies import POLICY_ROOT, ROOT
@@ -49,6 +51,9 @@ from tests.fixtures.upstreams import (  # noqa: F401
 )
 
 AGENTS = {"support-agent": AgentConfig(trust="standard"), "ops-agent": AgentConfig(trust="high")}
+# A call that needs approval is held for a second in the test apps, not a minute, and the polls and
+# the sweeper are quick. A test that wants to wait longer sets `approvals` in its own settings.
+TEST_APPROVALS = ApprovalSettings(wait_seconds=1.0, poll_interval_s=0.2, sweep_interval_s=1.0)
 # The vault key of every test app. Made when the test run starts and never written anywhere.
 TEST_MASTER_KEY = Fernet.generate_key().decode()
 
@@ -181,6 +186,7 @@ def keystone_app_factory(
             "upstreams": upstreams,
             # The repository's own policies, wherever the tests are run from.
             "policy": PolicySettings(root=POLICY_ROOT, include_demo=True),
+            "approvals": TEST_APPROVALS,
             **auth_options(fake_idp),
         }
         options.update(settings or {})
@@ -230,6 +236,7 @@ def start_keystone(
             registry=registry or RegistrySettings(sync_interval_s=0),
             health=health or HealthSettings(interval_s=0),
             policy=PolicySettings(root=POLICY_ROOT, include_demo=True),
+            approvals=TEST_APPROVALS,
             **auth_options(fake_idp),
         )
         app = create_app(settings, **app_options)

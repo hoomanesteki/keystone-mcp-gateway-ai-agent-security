@@ -20,7 +20,7 @@ upstreams and Keystone, and waits until every container reports healthy. Cold st
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit log (read through the admin API) does not hold one new record for each call |
 | `bash scripts/smoke/phase_5.sh` | Runs the demo, finds a Jaeger trace of more than 9 spans with no user or argument in it, reads `keystone_tool_calls_total` from `/metrics` and from Prometheus, finds the dashboard in Grafana, verifies the audit chain, edits a record as the Postgres superuser and checks that `keystone audit verify` exits 2 and names the seq, then puts the record back. About 15 seconds. |
-| `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 13 tools; olivia's transfer of 900 shows `require_approval` / `approve-transfer-over-500` in the audit and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 20 seconds. |
+| `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 13 tools; olivia's transfer of 900 is held for approval (10 s in the local stack) and answered `KS_APPROVAL_PENDING`, the audit shows `require_approval` / `approve-transfer-over-500` and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 30 seconds. |
 | `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), alice's 15 tools, bob's 3 globex tools and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
 | `bash scripts/smoke/phase_2.sh` | Lists the 15 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
 
@@ -389,7 +389,7 @@ flags, taint, call count, hour in UTC and the extracted `args`), and asks the en
 |---|---|---|
 | allow | the call goes on | `allow`, with the ids of the permits that allowed it |
 | deny | `KS_DENIED`, "denied by policy: `<ids>`", and the ids in `_meta` as `keystone/reasons` | `deny`, with the ids of the forbids that matched, or `default-deny` when nothing allowed it |
-| require approval | until Phase 6 the approval stub refuses it: `KS_DENIED`, "approval not available" | `require_approval`, with the ids of the approval permits that matched |
+| require approval | the call is held for a person (see Approvals), then runs, or ends as `KS_APPROVAL_REJECTED`, `KS_APPROVAL_EXPIRED` or `KS_APPROVAL_PENDING` | `require_approval`, with the ids of the approval permits that matched |
 | the rules could not be evaluated | `KS_DENIED` with the reason `policy-error` | `deny`, reason `policy-error` |
 
 The last row is the fail-closed rule. It covers a policy that failed to evaluate in either pass
@@ -415,9 +415,8 @@ decision can be read back from the log (see Audit).
 Risk comes from the upstream config, so in the local stack `mail__send_email` and
 `bank__transfer` are high risk: support (alice) is refused both with `default-deny`, and an
 operator (olivia) is allowed `bank__transfer` up to 500 and `mail__send_email` to `acme.test`
-(`operators-high`), and asked about the rest. Until Phase 6 a call that needs approval is refused
-by the approval stub (`KS_DENIED`, "approval not available") and nothing is sent or moved.
-`scripts/smoke/phase_4.sh` runs the demo.
+(`operators-high`), and asked about the rest: the call waits for a person (see Approvals), and
+nothing is sent or moved until one approves it. `scripts/smoke/phase_4.sh` runs the demo.
 
 ### The tool list
 
@@ -537,10 +536,38 @@ The rules, each one SQL statement in `src/keystone/approvals/service.py`:
 the sweeper starts and after each request, decision and sweep.
 
 Approvals need `KEYSTONE_MASTER_KEYS`, because the arguments are encrypted with the vault's keys.
-Without them there is no approval service and a call that needs approval is refused, as before.
-Rotating the keys needs no re-encryption of the arguments: every key decrypts, and a request lives
-for 15 minutes at most. Removing a key before the requests it encrypted have expired makes those
-requests unusable.
+Without them there is no approval service and a call that needs approval is refused with
+`KS_DENIED`, "approval not available". Rotating the keys needs no re-encryption of the arguments:
+every key decrypts, and a request lives for 15 minutes at most. Removing a key before the requests
+it encrypted have expired makes those requests unusable.
+
+### Holding a call
+
+The approval slot runs after the policy slot. For a `require_approval` decision it does one of two
+things (`gateway/interceptors/approval.py`, ADR-0010).
+
+A new call is stored as a request and held in line for `approvals.wait_seconds` (60 by default;
+the local stack uses 10). The agent sees one slow call, and then one of:
+
+| What happened in the wait | The agent gets | The audit record has |
+|---|---|---|
+| a person approved it | the upstream's result, as if there had been no approval | `require_approval`, outcome `ok`, `dispatched` true |
+| a person rejected it | `KS_APPROVAL_REJECTED`, with the approver's note as the message | outcome `rejected`, code `KS_APPROVAL_REJECTED` |
+| it expired | `KS_APPROVAL_EXPIRED` | outcome `rejected`, code `KS_APPROVAL_EXPIRED` |
+| nobody decided | `KS_APPROVAL_PENDING` | outcome `rejected`, code `KS_APPROVAL_PENDING` |
+
+A pending answer carries the id of the request in the text, where a model reads it, and in `_meta`
+as `keystone/approval_id`, with `keystone/expires_at` and `keystone/next` (`call
+keystone__await_approval`). The call does not run until the request is approved and used.
+
+A call that arrives with an approval id on its context is the re-entry of a call that waited. The
+slot takes the id off the context, uses the approval against the call's tool, session, user and
+arguments digest, and puts the id back only if that worked. The pipeline dispatches a
+`require_approval` call only when the id is on the context (KS-191), so a call with a made-up id,
+one for other arguments, a used one or an expired one is refused with `KS_APPROVAL_EXPIRED` and
+never reaches the upstream. Invariant I7 (`tests/invariants/test_i7_approvals.py`) tries every
+combination of an id in each of its six states with arguments, tool, session and user that are the
+approved ones or not: exactly one dispatches.
 
 ## Upstreams
 

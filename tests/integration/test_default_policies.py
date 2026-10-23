@@ -52,9 +52,12 @@ async def test_external_email_requires_approval(
         support = await alice.call_tool("mail__send_email", {"to": "bob@evil.test", **MAIL})
 
     assert external.is_error and several.is_error and not internal.is_error
+    # Nobody decides in this test, so after the wait (a second here) the agent is told the request
+    # is pending, with its id (before Phase 6 the approval stub refused it with KS_DENIED).
     for refused in (external, several):
-        assert refused.meta is not None and refused.meta["keystone/code"] == "KS_DENIED"
-        assert "approval not available" in str(refused.content[0])
+        assert refused.meta is not None
+        assert refused.meta["keystone/code"] == "KS_APPROVAL_PENDING"
+        assert refused.meta["keystone/approval_id"]
     assert support.meta is not None and support.meta["keystone/reasons"] == ["default-deny"]
     # Only the message to acme.test was sent.
     sent: list[dict[str, str]] = demo_upstreams.state("mail")["sent"]  # type: ignore[assignment]

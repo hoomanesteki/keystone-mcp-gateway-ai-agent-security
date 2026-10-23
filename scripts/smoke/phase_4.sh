@@ -3,8 +3,9 @@
 #   1. Alice (support) asks for a transfer: KS_DENIED, reason default-deny. Her tool list has 13
 #      tools; the two high-risk ones are hidden from her.
 #   2. Olivia (an operator) transfers 900: the audit shows require_approval with the reason
-#      approve-transfer-over-500. The approval stub then refuses it, because approvals arrive in
-#      Phase 6, and nothing moves.
+#      approve-transfer-over-500. Nobody decides, so the call is held for approvals.wait_seconds
+#      (10 s here) and then answered KS_APPROVAL_PENDING with an id, and nothing moves. (Before
+#      Phase 6 the approval stub refused it with KS_DENIED at once.)
 #   3. Olivia transfers 100: it is dispatched.
 #   4. A policy file is broken on the host and reloaded as root: 422, and the version in force does
 #      not change. The file is put back and a reload succeeds with the same version.
@@ -85,7 +86,7 @@ entry=$(audit_entry "$(call_id_of "$asked")")
 echo "audit: $entry"
 [ "$entry" = "require_approval approve-transfer-over-500" ] \
   || fail "the audit shows '$entry', not 'require_approval approve-transfer-over-500'"
-grep -q 'code=KS_DENIED' <<<"$asked" || fail "the approval stub did not refuse the transfer"
+grep -q 'code=KS_APPROVAL_PENDING' <<<"$asked" || fail "the held transfer was not answered KS_APPROVAL_PENDING"
 
 step "3. olivia transfers 100"
 sent=$(probe_as olivia ops-agent call bank__transfer "$SMALL")

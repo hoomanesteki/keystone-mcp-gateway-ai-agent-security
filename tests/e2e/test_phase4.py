@@ -32,6 +32,7 @@ def test_phase_4_smoke(stack: None) -> None:
     assert "audit: deny default-deny" in out
     assert "tools: 13" in out
     assert "audit: require_approval approve-transfer-over-500" in out
+    assert "code=KS_APPROVAL_PENDING" in out  # held for approval, and nobody decided
     assert "audit: allow operators-high" in out
     assert "transfers at the bank: 1" in out
     assert "reload: 422" in out and "stays in force" in out
