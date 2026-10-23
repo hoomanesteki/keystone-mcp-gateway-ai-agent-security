@@ -64,8 +64,8 @@ the "Found" list at the end.
 
 | ID | Title | Pts | Status | PR | Notes |
 |---|---|---|---|---|---|
-| KS-391 | Upstream authentication failures fail fast | 1 | todo | | Found at gate 3. A 401 or 403 from an upstream maps to `KS_UPSTREAM_ERROR` at once, without the reconnect backoff. |
-| KS-392 | Scrub registered secrets from tool results | 2 | todo | | Found at gate 3. An upstream that echoes its credential must not hand it to the agent. |
+| KS-391 | Upstream authentication failures fail fast | 1 | done | | `fix/ks-391-upstream-auth-hardening`. Found at gate 3. The SDK turns every error status into one protocol error without the status, so a response hook on the HTTP client (`AuthWatch`) notes a 401 or 403, and a connection attempt that saw one raises `KS_UPSTREAM_ERROR` at once instead of walking through the backoff. A call took 41 ms in the test, against about 4.2 s before. A refusal on a session that is already open was never slow. |
+| KS-392 | Scrub registered secrets from tool results | 2 | done | | Same branch. `gateway/scrub.py` replaces the injected credential values and every secret in the scrubber's registry with `[redacted]` in every string of the result (all block types, structured content, object keys), inside `UpstreamDispatcher.dispatch`, and logs `upstream_result_redacted`. A value Keystone sent is replaced whatever its length; the registry still skips values under 8 characters. The test-only upstream is `tests/fixtures/reflecting_upstream.py`; I3 now includes it and a second test shows the search finds the canary when the scrub is off. A value that comes back changed (reversed, encoded) is not caught. |
 | KS-401 | Spike: cedarpy capabilities | 2 | todo | | |
 | KS-402 | Cedar schema and entity builder | 5 | todo | | |
 | KS-403 | Policy store with validation and reload | 5 | todo | | |
