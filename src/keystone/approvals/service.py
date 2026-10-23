@@ -23,6 +23,15 @@ many gateways run and however they interleave:
 A message on Redis wakes a waiter early, and the database is what it believes: the message carries
 no verdict, and a waiter reads the row again whenever it wakes, on a message or after
 `poll_interval_s`. Redis being away costs the early wake-up and nothing else.
+
+The original arguments are kept, encrypted, for one purpose: to run an approved call. The statement
+that makes a request unusable (a rejection, a use, the sweeper marking it expired) empties the
+column in the same change, so a request that can run nothing holds no arguments (KS-691). The
+masked form that people read, and the digest, stay as the record of what was asked.
+
+An id is text from outside (an agent's arguments, a URL), so it is cleaned like every other value
+before it reaches a statement: Postgres cannot hold a NUL character, and an id that has one is an
+id nobody has.
 """
 
 from __future__ import annotations
@@ -64,6 +73,8 @@ SUBSCRIBE_TIMEOUT_S = 1.0
 CLOSE_TIMEOUT_S = 1.0
 # Rows that can still be used, and so can run out of time.
 OPEN_STATUSES = ("pending", "approved")
+# What the column holds once a request can no longer be used. The column is not nullable.
+NO_ARGUMENTS = b""
 
 
 def request_channel(tenant_id: str) -> str:
@@ -275,21 +286,24 @@ class ApprovalService:
             raise NotAnApprover("the approver or admin role is required")
         user = clean_text(approver.user_id)
         wanted: Status = "approved" if approve else "rejected"
+        changes: dict[str, Any] = {
+            "status": wanted,
+            "decided_by": user,
+            "decision_note": _clean_note(note),
+            "decided_at": _now(),
+        }
+        if not approve:
+            changes["args_ciphertext"] = NO_ARGUMENTS  # nothing will run, so nothing is kept
         statement = (
             update(APPROVALS)
             .where(
-                APPROVALS.c.id == approval_id,
+                APPROVALS.c.id == clean_text(approval_id),
                 APPROVALS.c.tenant_id == clean_text(approver.tenant_id),
                 APPROVALS.c.status == "pending",
                 APPROVALS.c.expires_at > _now(),
                 APPROVALS.c.requested_by_user != user,
             )
-            .values(
-                status=wanted,
-                decided_by=user,
-                decision_note=_clean_note(note),
-                decided_at=_now(),
-            )
+            .values(**changes)
             .returning(*_columns())
         )
         async with self._sessions() as session, session.begin():
@@ -312,7 +326,7 @@ class ApprovalService:
             APPROVALS.c.tenant_id,
             APPROVALS.c.requested_by_user,
             _effective_status().label("status"),
-        ).where(APPROVALS.c.id == approval_id)
+        ).where(APPROVALS.c.id == clean_text(approval_id))
         async with self._sessions() as session:
             row = (await session.execute(statement)).first()
         if row is None or row.tenant_id != clean_text(approver.tenant_id):
@@ -339,7 +353,7 @@ class ApprovalService:
         statement = (
             update(APPROVALS)
             .where(
-                APPROVALS.c.id == approval_id,
+                APPROVALS.c.id == clean_text(approval_id),
                 APPROVALS.c.tenant_id == clean_text(tenant_id),
                 APPROVALS.c.status == "approved",
                 APPROVALS.c.args_digest == args_digest,
@@ -348,7 +362,8 @@ class ApprovalService:
                 APPROVALS.c.requested_by_user == clean_text(user_id),
                 APPROVALS.c.expires_at > _now(),
             )
-            .values(status="consumed")
+            # The arguments are emptied in the same statement: a used approval runs nothing again.
+            .values(status="consumed", args_ciphertext=NO_ARGUMENTS)
             .returning(APPROVALS.c.id)
         )
         async with self._sessions() as session, session.begin():
@@ -360,7 +375,7 @@ class ApprovalService:
         approved, was used or expired. They are checked against the digest before they are
         returned. Raises ApprovalError when they cannot be read."""
         statement = select(APPROVALS.c.args_ciphertext, APPROVALS.c.args_digest).where(
-            APPROVALS.c.id == approval_id,
+            APPROVALS.c.id == clean_text(approval_id),
             APPROVALS.c.tenant_id == clean_text(tenant_id),
             APPROVALS.c.status == "approved",
             APPROVALS.c.expires_at > _now(),
@@ -383,7 +398,8 @@ class ApprovalService:
 
     async def get(self, tenant_id: str, approval_id: str) -> ApprovalRecord | None:
         statement = select(*_columns()).where(
-            APPROVALS.c.id == approval_id, APPROVALS.c.tenant_id == clean_text(tenant_id)
+            APPROVALS.c.id == clean_text(approval_id),
+            APPROVALS.c.tenant_id == clean_text(tenant_id),
         )
         async with self._sessions() as session:
             row = (await session.execute(statement)).mappings().first()
@@ -409,7 +425,7 @@ class ApprovalService:
             return [_record(row) for row in (await session.execute(statement)).mappings()]
 
     async def _status(self, approval_id: str) -> str | None:
-        statement = select(_effective_status()).where(APPROVALS.c.id == approval_id)
+        statement = select(_effective_status()).where(APPROVALS.c.id == clean_text(approval_id))
         async with self._sessions() as session:
             return (await session.execute(statement)).scalar_one_or_none()
 
@@ -450,6 +466,12 @@ class ApprovalService:
                 log.warning("approval_subscribe_failed", error=type(exc).__name__)
                 await self._close(pubsub)
                 pubsub = None
+            except BaseException:
+                # Cancelled in the middle of subscribing (the agent went away, the gateway is
+                # stopping): the subscription has already taken a connection, and the `finally`
+                # below is not reached yet. Give it back, then let the cancellation go on.
+                await self._close(pubsub)
+                raise
 
         async def pause(seconds: float) -> None:
             nonlocal pubsub
@@ -490,7 +512,7 @@ class ApprovalService:
         statement = (
             update(APPROVALS)
             .where(APPROVALS.c.status.in_(OPEN_STATUSES), APPROVALS.c.expires_at <= _now())
-            .values(status="expired")
+            .values(status="expired", args_ciphertext=NO_ARGUMENTS)
             .returning(APPROVALS.c.id, APPROVALS.c.tenant_id)
         )
         async with self._sessions() as session, session.begin():

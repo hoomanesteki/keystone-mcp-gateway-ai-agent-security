@@ -153,6 +153,11 @@ class ApprovalItem(BaseModel):
     risk: str | None = Field(description="The tool's risk, or null if the tool is not registered.")
     tags: list[str]
     arguments: Any = Field(description="The arguments with secrets masked, as the audit log shows.")
+    arguments_masked: bool = Field(
+        description="Something in `arguments` was hidden or cut: a secret, a card number, a long "
+        "text, or more than a row keeps. What runs is more than what is shown, so what is not "
+        "shown is unknown to the person who decides."
+    )
     args_digest: str = Field(description="sha256 of the arguments, the one the audit log writes.")
     reasons: list[str] = Field(
         description="The ids of the policies that sent the call to approval."

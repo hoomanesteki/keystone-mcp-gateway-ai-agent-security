@@ -311,3 +311,52 @@ def test_a_notifier_with_nothing_to_tell_does_nothing() -> None:
 
     assert quiet.enabled is False
     quiet.notify(record())  # no queue entry, no error
+
+
+# -- KS-691
+
+
+def test_the_slack_message_cannot_be_made_to_mention_anyone_or_link_anywhere() -> None:
+    """The agent's id, the tool's name and the rules' ids are written by others. In Slack's
+    text `<!channel>` pings a room and `<url|text>` is a link that reads as it likes."""
+    crafted = record().__class__(
+        **{
+            **record().__dict__,
+            "requested_by_agent": "<!channel> ops",
+            "requested_by_user": "a&b",
+            "tool_name": "<https://evil.test|bank__transfer>",
+            "reasons": ("<!here>",),
+        }
+    )
+
+    text = slack_payload(crafted, ORIGIN)["text"]
+
+    assert "<" not in text.replace(f"{ORIGIN}/approvals?id=01JAPPROVAL", "")
+    assert ">" not in text
+    assert "&lt;!channel&gt; ops" in text and "a&amp;b" in text and "&lt;!here&gt;" in text
+    # The link to the console is ours and stays whole.
+    assert text.endswith(f"{ORIGIN}/approvals?id=01JAPPROVAL")
+
+
+@pytest.mark.parametrize("short", ["x", "0123456789abcde"])
+def test_a_webhook_secret_shorter_than_sixteen_characters_is_refused(short: str) -> None:
+    with pytest.raises(ApprovalConfigError, match="at least 16") as refused:
+        ApprovalNotifier(
+            console_origin=ORIGIN,
+            webhook_url="https://hooks.example.test/keystone",
+            webhook_secret=SecretStr(short),
+        )
+
+    assert short not in str(refused.value)
+
+
+def test_a_webhook_secret_of_sixteen_characters_is_enough() -> None:
+    sixteen = "0123456789abcdef"
+
+    notifier_ = ApprovalNotifier(
+        console_origin=ORIGIN,
+        webhook_url="https://hooks.example.test/keystone",
+        webhook_secret=SecretStr(sixteen),
+    )
+
+    assert notifier_.enabled

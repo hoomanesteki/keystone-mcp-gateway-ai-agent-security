@@ -75,3 +75,12 @@ def test_the_test_client_waits_longer_than_the_app_holds_a_call() -> None:
     assert hold_time(app) == 42
     assert PATIENCE_S + hold_time(app) > 42
     assert hold_time(object()) == 0  # not a Keystone app: nothing is held
+
+
+def test_a_webhook_secret_that_is_too_short_stops_startup_and_is_not_repeated() -> None:
+    weak = "short-secret"
+
+    with pytest.raises(ApprovalConfigError, match="at least 16") as refused:
+        build(settings(webhook_url=HOOK), {WEBHOOK_SECRET_ENV: weak})
+
+    assert weak not in str(refused.value)

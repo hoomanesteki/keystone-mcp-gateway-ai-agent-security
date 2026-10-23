@@ -26,6 +26,11 @@ from keystone.audit.normalize import stable_json
 from keystone.core.canonical import canonical_json, sha256_hex
 from keystone.logging import REDACTED, SENSITIVE_KEY
 
+# What every way of hiding a value leaves in its place: "[redacted]" for a secret key, and
+# "[redacted:card]", "Bearer [redacted]" and the like for a pattern inside a string.
+MASK_MARK = "[redacted"
+# What a string over the limit ends with: "...[sha256:<64 hex digits>]".
+CUT_STRING = re.compile(r"\.\.\.\[sha256:[0-9a-f]{64}\]\Z")
 MAX_STRING = 2048
 KEPT_OF_LONG_STRING = 256
 MAX_DEPTH = 32
@@ -149,3 +154,26 @@ def audit_arguments(
     if size > MAX_REDACTED_BYTES:
         return {TRUNCATED: f"{size} bytes after redaction"}, digest
     return shown, digest
+
+
+def is_masked(shown: Any, _depth: int = 0) -> bool:
+    """True when arguments in the form `audit_arguments` stores hold anything that was hidden,
+    masked or cut. A person who is asked to approve a call reads that form and approves what
+    runs, which is the whole of it (KS-691), so they are told when it is not all there.
+
+    It looks for what `redact` leaves behind and so errs toward true: text that happens to hold
+    "[redacted" is called masked. It cannot err the other way for a value `redact` changed, which
+    the tests in `tests/unit/test_redact.py` hold to for every kind of change.
+    """
+    if _depth > MAX_DEPTH + 2:
+        return True  # deeper than `redact` ever writes, so not a form to vouch for
+    if isinstance(shown, str):
+        return MASK_MARK in shown or shown == TRUNCATED or CUT_STRING.search(shown) is not None
+    if isinstance(shown, Mapping):
+        return any(
+            str(key).endswith(TRUNCATED) or is_masked(item, _depth + 1)
+            for key, item in shown.items()
+        )
+    if isinstance(shown, list | tuple):
+        return any(is_masked(item, _depth + 1) for item in shown)
+    return False

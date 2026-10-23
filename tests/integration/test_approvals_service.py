@@ -7,7 +7,7 @@ clock at the time it runs and not by the time it began.
 """
 
 import time
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -572,3 +572,97 @@ async def test_the_time_to_live_comes_from_the_service(
     record = await short.get("acme", await asked(short))
 
     assert record is not None and 25 < record.expires_in_s <= 30
+
+
+# -- KS-691
+
+
+async def test_the_stored_arguments_are_wiped_once_a_request_can_no_longer_be_used(
+    service: ApprovalService, sessionmaker: Sessions
+) -> None:
+    """The original arguments are kept, encrypted, so that an approved call can run. A request
+    that was used, rejected or has expired can run nothing, and its arguments are not kept."""
+    used = await approved(service)
+    rejected = await asked(service)
+    stale = await asked(service)
+    unused = await approved(service)
+    waiting = await asked(service)
+    open_for_use = await approved(service)
+
+    assert await service.consume(used, digest_of(), **binding()) is True
+    await service.decide(rejected, LENA, False, "no")
+    await expire(sessionmaker, stale)
+    await expire(sessionmaker, unused)
+    assert await service.sweep() == 2
+
+    for approval_id in (used, rejected, stale, unused):
+        assert (await stored(sessionmaker, approval_id))["args_ciphertext"] == b"", approval_id
+        assert await service.load_args(approval_id, tenant_id="acme") is None
+    # What can still be used keeps what the call needs in order to run.
+    for approval_id in (waiting, open_for_use):
+        assert bytes((await stored(sessionmaker, approval_id))["args_ciphertext"]) != b""
+    assert await service.load_args(open_for_use, tenant_id="acme") == TRANSFER
+
+
+async def test_a_second_use_finds_no_arguments_and_no_approval(
+    service: ApprovalService, sessionmaker: Sessions
+) -> None:
+    approval_id = await approved(service)
+    assert await service.consume(approval_id, digest_of(), **binding()) is True
+
+    assert await service.consume(approval_id, digest_of(), **binding()) is False
+    row = await stored(sessionmaker, approval_id)
+    assert (row["status"], bytes(row["args_ciphertext"])) == ("consumed", b"")
+
+
+@pytest.mark.parametrize("bad", ["\x00", "01J\x00APPROVAL", "\ud800", "01J" + "\x00" * 40])
+async def test_an_id_the_database_cannot_hold_is_an_id_nobody_has(
+    service: ApprovalService, bad: str
+) -> None:
+    """An id comes from an agent's arguments and from a URL, and Postgres has no NUL character.
+    It must read as a request that does not exist, and not as an error."""
+    assert await service.get("acme", bad) is None
+    assert await service.load_args(bad, tenant_id="acme") is None
+    assert await service.consume(bad, digest_of(), **binding()) is False
+    assert await service.wait(bad, 0) == "expired"
+    with pytest.raises(ApprovalNotFound):
+        await service.decide(bad, LENA, True)
+
+
+class SubscribingForever:
+    """A Redis whose subscription never completes, as a slow or stuck one's does. It notes what
+    was done to the connection that the subscription took."""
+
+    class PubSub:
+        def __init__(self) -> None:
+            self.subscribing = anyio.Event()
+            self.closed = False
+
+        async def subscribe(self, *channels: str) -> None:
+            self.subscribing.set()
+            await anyio.sleep_forever()
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    def __init__(self) -> None:
+        self.made = self.PubSub()
+
+    def pubsub(self) -> "SubscribingForever.PubSub":
+        return self.made
+
+
+async def test_a_waiter_cancelled_while_it_subscribes_gives_its_connection_back(
+    sessionmaker: Sessions, cipher: Cipher
+) -> None:
+    """The agent goes away, or the gateway stops, in the middle of subscribing."""
+    fake = SubscribingForever()
+    service = ApprovalService(sessionmaker, cipher, redis=cast("Redis", fake))
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(service.wait, "01JANYAPPROVAL000000000000", 30)
+        with anyio.fail_after(5):
+            await fake.made.subscribing.wait()
+        tasks.cancel_scope.cancel()
+
+    assert fake.made.closed is True
