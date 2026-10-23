@@ -166,24 +166,28 @@ extra code. The tool-list cache of KS-406 covers the rest.
 3. **An empty policy set denies.** `PolicySet.from_str("")` loads, and every request is a `Deny`
    with no reasons. Invariant I6 holds even if the loader finds no files.
 
-## Measured in the engine (KS-404)
+## Measured in the engine (KS-404 to KS-408)
 
 `scripts/bench_policy.py` times `CedarPolicyEngine.evaluate`, the call the policy slot makes: it
 builds the five entities of the call, asks the access set and, when that allows, the approval
-set. 10,000 runs after 200 warm-up calls on the machine above with the Docker stack idle. The
-50-policy tenant is the plan's four access policies plus 46 of the shapes a team writes, split
-between its two sets.
+set. 10,000 runs after 200 warm-up calls, on the machine above with the Docker stack idle, run
+twice. The 50-policy tenant is the plan's four access policies plus 46 of the shapes a team
+writes, split between its two sets. The last row adds what the policy slot does around the engine:
+it reads the arguments with the extractor and builds the context.
 
-| Set | Policies | Decision | p50 | p95 | p99 |
+| Set | Policies | Decision | p50 | p95 (worst of two runs) | p99 (worst of two runs) |
 |---|---|---|---|---|---|
-| The shipped pack (KS-403: the four access policies) | 4 | allow | 0.15 ms | 0.16 ms | 0.17 ms |
-| A tenant with 50 policies, nothing asks for approval | 50 | allow | 0.18 ms | 0.19 ms | 0.21 ms |
-| The same tenant, a transfer over the limit | 50 | require approval | 0.18 ms | 0.19 ms | 0.39 ms |
+| The shipped pack, acme's sets | 6 | allow | 0.16 ms | 0.16 ms | 0.18 ms |
+| A tenant with 50 policies, nothing asks for approval | 50 | allow | 0.18 ms | 0.29 ms | 0.55 ms |
+| The same tenant, a transfer over the limit | 50 | require approval | 0.18 ms | 0.20 ms | 0.49 ms |
+| The shipped pack, the whole slot (extract, context, decide) | 6 | require approval | 0.16 ms | 0.17 ms | 0.22 ms |
 
 Both passes together cost less than one pass in the spike (0.24 ms for 50 policies and 20
 entities), because each pass holds only its own set and a call has five entities, not twenty. The
-plan's budget is a p95 under 5 ms in CI (`test_eval_latency_budget`), which is 25 times the figure
-here; a hosted runner is slower, and the margin is for that.
+slot around the engine adds under 0.01 ms. The plan's budget is a p95 under 5 ms in CI
+(`test_eval_latency_budget`), which is 17 times the worst figure here; a hosted runner is slower,
+and the margin is for that. The two runs differ most in the tail: one run of the 50-policy
+allowed case had a p95 of 0.20 ms and the other 0.29 ms.
 
 ## What I did not test
 

@@ -5,6 +5,7 @@ import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Annotated, Any
 
 import httpx2
@@ -28,6 +29,9 @@ from keystone.identity.middleware import AuthConfigError
 from keystone.identity.vault import UnknownUpstream, Vault, VaultError
 from keystone.logging import configure_logging
 from keystone.policy.store import PolicyLoadError
+from keystone.policy.testrunner import CaseError
+from keystone.policy.testrunner import render as render_report
+from keystone.policy.testrunner import run as run_policy_cases
 from keystone.registry.config import stdio_environments, tool_overrides
 from keystone.registry.naming import check_upstream_id
 from keystone.registry.pinning import (
@@ -820,3 +824,40 @@ def policy_reload(
     why = body.get("reason") or body.get("error") or "no reason given"
     typer.echo(f"error: Keystone answered {response.status_code} ({why})", err=True)
     raise typer.Exit(1)
+
+
+@policy_app.command("test")
+def policy_test(
+    policy_root: Annotated[
+        Path, typer.Argument(metavar="POLICY_ROOT", help="The directory with the policies.")
+    ],
+    cases: Annotated[
+        list[Path],
+        typer.Argument(metavar="CASES...", help="Case files, or directories that hold them."),
+    ],
+    coverage: Annotated[
+        bool,
+        typer.Option(
+            "--coverage",
+            help="Also list the policies no case matched, and fail if there are any.",
+        ),
+    ] = False,
+) -> None:
+    """Check that the policies decide the cases as the cases say (see docs/policies.md). Prints a
+    table, and exits 1 if any case fails, the policies or the cases cannot be read, or, with
+    --coverage, a policy was matched by no case."""
+    try:
+        report = run_policy_cases(policy_root, cases, coverage=coverage)
+    except PolicyLoadError as exc:
+        typer.echo("error: the policies cannot be loaded:", err=True)
+        for problem in exc.problems:
+            typer.echo(f"  {problem}", err=True)
+        raise typer.Exit(1) from None
+    except CaseError as exc:
+        typer.echo("error: the cases cannot be read:", err=True)
+        for problem in exc.problems:
+            typer.echo(f"  {problem}", err=True)
+        raise typer.Exit(1) from None
+    typer.echo(render_report(report))
+    if not report.ok:
+        raise typer.Exit(1)

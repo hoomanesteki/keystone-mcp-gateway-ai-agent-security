@@ -454,6 +454,13 @@ written, so the same files give the same version on every start. Each version th
 recorded in `policy_versions` with every file's path, sha256 and content, so the rules in force at
 the time of a decision can be read back from the version the audit record names.
 
+### Testing
+
+`uv run keystone policy test policies tests/policy_cases --coverage` runs the cases in
+`tests/policy_cases/` through the loader and the engine, prints one row per case and exits 1 if any
+case decides differently or a policy was matched by no case. The `policy` job of CI runs it on every
+push, and `make gate` expects it to pass. `docs/policies.md` describes the case format.
+
 ### Reloading
 
 | How | What it does |

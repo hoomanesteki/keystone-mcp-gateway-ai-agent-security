@@ -24,6 +24,7 @@ def test_workflow_has_the_planned_jobs() -> None:
     assert set(WORKFLOW["jobs"]) == {
         "lint-type",
         "unit",
+        "policy",
         "integration",
         "security",
         "docker",

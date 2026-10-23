@@ -161,6 +161,41 @@ forbid (principal, action == Keystone::Action::"call_tool", resource)
 when { context.agent_trust == "low" && resource.tags.contains("external_effect") };
 ```
 
+## Testing policies
+
+A policy change is checked like code. Cases in `tests/policy_cases/*.yaml` say who calls what and
+which decision the policies must give, and `keystone policy test` runs them through the same
+loader and engine the gateway uses:
+
+```yaml
+# a policy case
+- name: support cannot transfer
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: {name: bank__transfer, risk: high, tags: [external_effect]}
+  args: {amount: 90000}
+  session: {flags: [], tainted: false}
+  expect: deny
+  expect_reasons: [default-deny]
+```
+
+`args` are the facts a policy reads (`context.args`), as the extractors give them: cents for the
+transfer tool. To test the extractors with the policies, give the call's own `arguments` and the
+tool's `extract` instead, as the cases for the transfer and mail rules do. `expect_reasons` is
+optional. A case can also set `action: list_tool`, `tool.tenant` (a tool of another tenant), the
+`hour` (0 to 23), the session's `call_count`, and the principal's `roles`. A key that is not in
+this list is an error, so a typo cannot weaken a case.
+
+```bash
+uv run keystone policy test policies tests/policy_cases --coverage
+```
+
+It prints one row per case and exits 1 if any case decides differently, or the policies or the
+cases cannot be read. `--coverage` also lists every policy that no case matched, and fails: a
+policy is matched when it is among the reasons of a decision. The `policy` job of CI runs this on
+every push, so a pull request that flips a decision fails there, naming the case, and a rule added
+without a case is listed. The shipped cases are in `tests/policy_cases/`.
+
 ## Reloading
 
 Edit the files, then `keystone policy reload` (or `POST /admin/api/v1/policies/reload`, or SIGHUP

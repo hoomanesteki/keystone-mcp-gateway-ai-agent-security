@@ -1,0 +1,245 @@
+# Decisions the default pack and the demo pack must keep making (KS-408). Run with
+#   keystone policy test policies tests/policy_cases --coverage
+# `args` are the facts a policy reads, as the extractors give them (the transfer tool reads cents).
+# `arguments` are a call's own arguments, run through the tool's `extract` config first.
+
+# The access set: who may use what.
+
+- name: support can read mail
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: {name: mail__read_email, risk: low, tags: [reads_untrusted, reads_sensitive]}
+  expect: allow
+  expect_reasons: [same-tenant-low-medium]
+
+- name: support can check a balance
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: {name: bank__get_balance, risk: medium, tags: [reads_sensitive]}
+  expect: allow
+  expect_reasons: [same-tenant-low-medium]
+
+- name: support can list a medium risk tool
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: {name: bank__get_balance, risk: medium}
+  action: list_tool
+  expect: allow
+  expect_reasons: [same-tenant-low-medium]
+
+- name: support cannot transfer
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: {name: bank__transfer, risk: high, tags: [external_effect]}
+  args: {amount: 90000}
+  session: {flags: [], tainted: false}
+  expect: deny
+  expect_reasons: [default-deny]
+
+- name: support cannot send mail
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: {name: mail__send_email, risk: high, tags: [external_effect]}
+  expect: deny
+  expect_reasons: [default-deny]
+
+- name: support does not see a high risk tool
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: {name: bank__transfer, risk: high, tags: [external_effect]}
+  action: list_tool
+  expect: deny
+  expect_reasons: [default-deny]
+
+- name: a user with no group gets low risk tools only
+  tenant: acme
+  principal: {user: nobody, agent: support-agent}
+  tool: {name: files__read_file, risk: low}
+  expect: allow
+  expect_reasons: [same-tenant-low-medium]
+
+- name: a user with no group is refused a high risk tool
+  tenant: acme
+  principal: {user: nobody, agent: support-agent}
+  tool: {name: files__write_file, risk: high}
+  expect: deny
+  expect_reasons: [default-deny]
+
+- name: operators can use a high risk tool
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: {name: files__write_file, risk: high}
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: operators see a high risk tool
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: {name: files__write_file, risk: high}
+  action: list_tool
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: operators are refused a critical tool
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: {name: admin__wipe, risk: critical}
+  expect: deny
+  expect_reasons: [default-deny]
+
+- name: admins can use a critical tool
+  tenant: acme
+  principal: {user: root, groups: [admins], agent: ops-agent, trust: high, roles: [admin]}
+  tool: {name: admin__wipe, risk: critical}
+  expect: allow
+  expect_reasons: [admins-critical]
+
+- name: admins who are not operators get critical tools only
+  tenant: acme
+  principal: {user: root, groups: [admins], agent: ops-agent, trust: high, roles: [admin]}
+  tool: {name: files__write_file, risk: high}
+  expect: deny
+  expect_reasons: [default-deny]
+
+- name: a member of both groups may use high and critical tools
+  tenant: acme
+  principal: {user: both, groups: [operators, admins], agent: ops-agent, trust: high}
+  tool: {name: admin__wipe, risk: critical}
+  expect: allow
+  expect_reasons: [admins-critical]
+
+- name: an operator never reaches another tenant's tool
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: {name: files_globex__read_file, risk: low, tenant: globex}
+  expect: deny
+  expect_reasons: [deny-cross-tenant]
+
+- name: nor sees it
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: {name: files_globex__read_file, risk: low, tenant: globex}
+  action: list_tool
+  expect: deny
+  expect_reasons: [deny-cross-tenant]
+
+- name: another tenant's user is allowed in their own tenant
+  tenant: globex
+  principal: {user: bob, agent: support-agent}
+  tool: {name: files_globex__read_file, risk: medium}
+  expect: allow
+  expect_reasons: [same-tenant-low-medium]
+
+# The base pack does not read the agent's trust, the session or the hour. Phase 7 adds rules that
+# read the session; these cases keep the base pack honest until then.
+
+- name: a low trust agent does not change what an operator may do
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: unknown-agent, trust: low}
+  tool: {name: files__write_file, risk: high}
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: a tainted session does not change a medium risk call yet
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: {name: bank__get_balance, risk: medium}
+  session: {flags: [reads_untrusted, reads_sensitive], tainted: true, call_count: 40}
+  hour: 3
+  expect: allow
+  expect_reasons: [same-tenant-low-medium]
+
+# The approval set of the demo pack: a transfer over 500 needs a person.
+
+- name: an operator's transfer of 100 goes through
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: &transfer
+    name: bank__transfer
+    risk: high
+    tags: [external_effect]
+    extract: {amount: "$.amount | cents"}
+  arguments: {from_account: CHK-001, to: SAV-002, amount: 100}
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: a transfer of exactly 500 goes through
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: *transfer
+  arguments: {from_account: CHK-001, to: SAV-002, amount: 500}
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: a transfer of 500.01 needs approval
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: *transfer
+  arguments: {from_account: CHK-001, to: SAV-002, amount: 500.01}
+  expect: require_approval
+  expect_reasons: [approve-transfer-over-500]
+
+- name: a transfer of 900 needs approval
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: *transfer
+  arguments: {from_account: CHK-001, to: SAV-002, amount: 900}
+  expect: require_approval
+  expect_reasons: [approve-transfer-over-500]
+
+- name: a transfer whose amount cannot be read needs approval
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: *transfer
+  arguments: {from_account: CHK-001, to: SAV-002, amount: plenty}
+  expect: require_approval
+  expect_reasons: [approve-transfer-over-500]
+
+- name: a huge transfer needs approval
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: *transfer
+  arguments: {from_account: CHK-001, to: SAV-002, amount: 1.0e30}
+  expect: require_approval
+  expect_reasons: [approve-transfer-over-500]
+
+- name: the limit in cents, when the facts are given directly
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: {name: bank__transfer, risk: high, tags: [external_effect]}
+  args: {amount: 50000}
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: and one cent over it
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: {name: bank__transfer, risk: high, tags: [external_effect]}
+  args: {amount: 50001}
+  expect: require_approval
+  expect_reasons: [approve-transfer-over-500]
+
+- name: approval is not asked of someone who may not transfer at all
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: *transfer
+  arguments: {from_account: CHK-001, to: SAV-002, amount: 900}
+  expect: deny
+  expect_reasons: [default-deny]
+
+- name: the transfer rule applies to every tenant that reads the demo pack
+  tenant: globex
+  principal: {user: gina, groups: [operators], agent: ops-agent, trust: high}
+  tool: *transfer
+  arguments: {from_account: CHK-001, to: SAV-002, amount: 900}
+  expect: require_approval
+  expect_reasons: [approve-transfer-over-500]
+
+- name: a listing never asks for approval
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: *transfer
+  action: list_tool
+  args: {amount: 90000}
+  expect: allow
+  expect_reasons: [operators-high]
