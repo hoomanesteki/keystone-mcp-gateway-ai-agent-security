@@ -1,0 +1,175 @@
+@import "tailwindcss";
+
+/*
+ * One neutral scale, one accent (indigo), and status colors that always travel with a word.
+ * The values live in custom properties so that the dark scheme only has to redefine them.
+ * Text pairs were checked against WCAG AA (4.5:1) in both schemes.
+ */
+:root {
+  color-scheme: light dark;
+
+  --canvas: #f6f6f7;
+  --surface: #ffffff;
+  --sunken: #f4f4f5;
+  --line: #e4e4e7;
+  --line-strong: #d4d4d8;
+  --fg: #18181b;
+  --fg-muted: #52525b;
+  --fg-subtle: #6b6b76;
+
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-fg: #ffffff;
+  --accent-text: #4338ca;
+  --accent-soft: #eef2ff;
+  --accent-soft-fg: #3730a3;
+
+  --ok-bg: #dcfce7;
+  --ok-fg: #166534;
+  --ok-line: #bbf7d0;
+  --warn-bg: #fef3c7;
+  --warn-fg: #92400e;
+  --warn-line: #fde68a;
+  --high-bg: #ffedd5;
+  --high-fg: #9a3412;
+  --high-line: #fed7aa;
+  --danger-bg: #fee2e2;
+  --danger-fg: #991b1b;
+  --danger-line: #fecaca;
+  --critical-bg: #b91c1c;
+  --critical-fg: #ffffff;
+  --neutral-bg: #f4f4f5;
+  --neutral-fg: #3f3f46;
+  --neutral-line: #e4e4e7;
+
+  --drop-card: 0 1px 2px rgb(0 0 0 / 0.05);
+  --drop-raised: 0 10px 30px rgb(0 0 0 / 0.12);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #0c0c0e;
+    --surface: #151518;
+    --sunken: #1c1c21;
+    --line: #2a2a30;
+    --line-strong: #3b3b44;
+    --fg: #f4f4f5;
+    --fg-muted: #b4b4bd;
+    --fg-subtle: #9494a0;
+
+    --accent: #5b5ef0;
+    --accent-hover: #5256e0;
+    --accent-fg: #ffffff;
+    --accent-text: #a5b4fc;
+    --accent-soft: #1e1b4b;
+    --accent-soft-fg: #c7d2fe;
+
+    --ok-bg: #052e16;
+    --ok-fg: #86efac;
+    --ok-line: #14532d;
+    --warn-bg: #3b2a05;
+    --warn-fg: #fcd34d;
+    --warn-line: #5c4208;
+    --high-bg: #3a1a07;
+    --high-fg: #fdba74;
+    --high-line: #5c2a0b;
+    --danger-bg: #3b0d0d;
+    --danger-fg: #fca5a5;
+    --danger-line: #5c1515;
+    --critical-bg: #dc2626;
+    --critical-fg: #ffffff;
+    --neutral-bg: #27272a;
+    --neutral-fg: #d4d4d8;
+    --neutral-line: #3b3b44;
+
+    --drop-card: 0 1px 2px rgb(0 0 0 / 0.4);
+    --drop-raised: 0 10px 30px rgb(0 0 0 / 0.55);
+  }
+}
+
+@theme inline {
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-sunken: var(--sunken);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-text: var(--accent-text);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-soft-fg: var(--accent-soft-fg);
+  --color-ok-bg: var(--ok-bg);
+  --color-ok-fg: var(--ok-fg);
+  --color-ok-line: var(--ok-line);
+  --color-warn-bg: var(--warn-bg);
+  --color-warn-fg: var(--warn-fg);
+  --color-warn-line: var(--warn-line);
+  --color-high-bg: var(--high-bg);
+  --color-high-fg: var(--high-fg);
+  --color-high-line: var(--high-line);
+  --color-danger-bg: var(--danger-bg);
+  --color-danger-fg: var(--danger-fg);
+  --color-danger-line: var(--danger-line);
+  --color-critical-bg: var(--critical-bg);
+  --color-critical-fg: var(--critical-fg);
+  --color-neutral-bg: var(--neutral-bg);
+  --color-neutral-fg: var(--neutral-fg);
+  --color-neutral-line: var(--neutral-line);
+  --shadow-card: var(--drop-card);
+  --shadow-raised: var(--drop-raised);
+}
+
+@layer base {
+  html {
+    background: var(--canvas);
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--canvas);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* One focus ring for everything a keyboard can reach. */
+  :focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
+  }
+
+  button:not(:disabled),
+  summary,
+  [role="button"] {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: var(--accent-soft);
+    color: var(--accent-soft-fg);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
