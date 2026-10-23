@@ -170,7 +170,7 @@ async def test_i3(
     }
     # The search is only worth something if the session really happened and really logged.
     assert keyed_upstreams.state("echo")["api_key_received"] is True  # the canary was sent
-    assert [(r["tool"], r["outcome"]) for r in app.audit.records] == [
+    assert [(r["tool_name"], r["outcome"]) for r in app.audit.records] == [
         ("echo__echo", "ok"),
         ("reflect__show_key", "ok"),
         ("reflect__shout", "ok"),

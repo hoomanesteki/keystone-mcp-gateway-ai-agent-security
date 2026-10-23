@@ -79,7 +79,7 @@ the "Found" list at the end.
 
 | ID | Title | Pts | Status | PR | Notes |
 |---|---|---|---|---|---|
-| KS-501 | Hash-chained audit writer | 5 | todo | | |
+| KS-501 | Hash-chained audit writer | 5 | done | | `feat/ks-501-audit-chain`. `PostgresAuditSink` replaces the in-memory sink in the app (the pipeline's unit tests keep the in-memory one) and `/_dev/audit` is gone; the phase 1 and 4 smokes read the log through `scripts/smoke/audit_lib.sh` (psql) until the admin API arrives in KS-507. A failed batch is kept and retried in order; a record the database refuses as data is dropped alone; both are logged and counted in `keystone_audit_failures_total` (ADR-0009). `AuditSink.healthy()` is the one contract change, and `audit.fail_closed` defaults to true unless env is dev. The table has two columns beyond section 3.7 (`dispatched`, `decision_source`) and no `created_at`. `prometheus-client` came in early for the failure counter. Earlier tests changed: every test that read `keystone_app.audit.records` now reads Postgres rows (`tool_name` for `tool`, `effect` for `decision`); `test_dev_audit.py` became `test_audit_rows.py`. Measured: 11,228 rows per second with one writer (`scripts/bench_audit.py`). |
 | KS-502 | Redaction and argument digests | 3 | todo | | |
 | KS-503 | Audit verify and export | 3 | todo | | |
 | KS-504 | OpenTelemetry tracing | 5 | todo | | |

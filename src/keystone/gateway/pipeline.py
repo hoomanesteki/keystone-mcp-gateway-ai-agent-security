@@ -9,6 +9,8 @@ Rules the code below keeps:
   output is blocked. The audit outcome for a crash is "error", not "rejected".
 - The pipeline dispatches only when a decision allows it (`require_dispatch_decision`), so
   invariant I1 does not rest on the policy slot alone.
+- With `fail_closed`, a call is refused before anything runs while the audit sink is unhealthy
+  (KS-501, ADR-0009): an action with no record is what the audit log exists to prevent.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ MAX_VALIDATION_MESSAGE = 300
 
 CRASH_MESSAGE = "the gateway could not finish checking this call"
 NO_DECISION = "no-decision"
+AUDIT_UNAVAILABLE = "audit-unavailable"
 
 Outcome = Literal["ok", "rejected", "error"]
 
@@ -51,6 +54,10 @@ class Dispatcher(Protocol):
 
 class AuditSink(Protocol):
     async def record(self, ctx: CallContext, outcome: Outcome, reject: Reject | None) -> None: ...
+
+    # False when a record handed to the sink might not be written: the queue is nearly full or
+    # the last flush failed. Added in KS-501 (ADR-0009).
+    def healthy(self) -> bool: ...
 
 
 class _Crash(Reject):
@@ -113,11 +120,14 @@ class Pipeline:
         dispatcher: Dispatcher,
         audit: AuditSink,
         tracer: Tracer,
+        *,
+        fail_closed: bool = False,
     ) -> None:
         self.interceptors = interceptors
         self.dispatcher = dispatcher
         self.audit = audit
         self.tracer = tracer
+        self.fail_closed = fail_closed
         # A plain counter until Phase 5 adds a metric.
         self.audit_failures = 0
 
@@ -128,6 +138,7 @@ class Pipeline:
         with self.tracer.span("pipeline.run", call_id=ctx.call_id, tool=ctx.tool.name):
             try:
                 try:
+                    self._require_audit(ctx)
                     validate_arguments(ctx)
                     for interceptor in self.interceptors:
                         await self._hook(interceptor, interceptor.before_call, ctx, Code.DENIED)
@@ -158,6 +169,21 @@ class Pipeline:
                 return ctx.result
             finally:
                 await self._audit(ctx, "rejected", reject)
+
+    def _require_audit(self, ctx: CallContext) -> None:
+        """Raise Reject(DENIED) when the pipeline fails closed and the audit sink says it may
+        lose records. It runs before any interceptor, so nothing is decided or dispatched."""
+        if not self.fail_closed:
+            return
+        try:
+            healthy = self.audit.healthy()
+        except Exception:
+            log.error("audit_health_check_failed", call_id=ctx.call_id, exc_info=True)
+            healthy = False
+        if healthy:
+            return
+        log.warning("audit_unavailable", call_id=ctx.call_id, tool=ctx.tool.name)
+        raise Reject(Code.DENIED, "audit unavailable", {"keystone/reason": AUDIT_UNAVAILABLE})
 
     async def _hook(
         self,

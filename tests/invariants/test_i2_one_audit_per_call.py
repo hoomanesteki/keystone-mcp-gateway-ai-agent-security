@@ -1,4 +1,7 @@
-"""I2: every call leaves exactly one audit record, whatever happened to it."""
+"""I2: every call leaves exactly one audit record, whatever happened to it.
+
+Since KS-501 the records are the rows of `audit_events` in Postgres, read back after the writer
+has flushed them, and the rows must form one whole hash chain."""
 
 from typing import Any
 
@@ -8,6 +11,7 @@ import pytest
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, ToolResult
 from keystone.gateway.pipeline import Dispatcher
+from tests.fixtures.audit import chain_problems
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 
 
@@ -61,6 +65,7 @@ async def test_i2(keystone_app_factory: Any, mcp_client: McpConnect) -> None:
     assert len(records) == len(CALLS)
     assert [r["outcome"] for r in records] == [outcome for *_, outcome in CALLS]
     assert len({r["call_id"] for r in records}) == len(CALLS)
+    assert chain_problems(records) == []
 
 
 @pytest.mark.services
@@ -79,3 +84,4 @@ async def test_i2_concurrent_calls(keystone_app: KeystoneApp, mcp_client: McpCon
     assert len(records) == 30
     assert len({r["call_id"] for r in records}) == 30
     assert sorted(r["outcome"] for r in records) == ["ok"] * 10 + ["rejected"] * 20
+    assert chain_problems(records) == []

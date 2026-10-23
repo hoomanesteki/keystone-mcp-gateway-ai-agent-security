@@ -97,6 +97,6 @@ async def test_i4(
         assert way.upstream_tool not in calls, way.tool
     # Three single tools are gone, and so are all three tools of the disabled upstream.
     assert len(names) == 12 - 3 - 3
-    refused = [r for r in app.audit.records if r["tool"] in gone]
+    refused = [r for r in app.audit.records if r["tool_name"] in gone]
     assert len(refused) == 4
     assert all(r["dispatched"] is False and r["outcome"] == "rejected" for r in refused)

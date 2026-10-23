@@ -94,7 +94,7 @@ async def test_the_call_is_audited_as_a_success_and_the_record_holds_no_key(
             await client.call_tool("reflect__show_key", {})
 
     [record] = app.audit.records
-    assert (record["tool"], record["outcome"], record["dispatched"]) == (
+    assert (record["tool_name"], record["outcome"], record["dispatched"]) == (
         "reflect__show_key",
         "ok",
         True,

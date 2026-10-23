@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -191,3 +192,57 @@ class PolicyVersion(Base):
     loaded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class AuditEvent(Base):
+    """One record per tool call, chained by hash (KS-501, ADR-0009). Nothing updates or deletes a
+    row: the application's database role may only insert and select (KS-503).
+
+    `ts` is the time of the call. There is no created_at, because a time the database chose would
+    sit outside the hash. The writer assigns `seq` under an advisory lock, so a batch that fails
+    leaves no gap, and the unique `prev_hash` refuses a second record after the same one."""
+
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        UniqueConstraint("prev_hash", name="uq_audit_events_prev_hash"),
+        CheckConstraint(
+            "effect IS NULL OR effect IN ('allow', 'deny', 'require_approval')",
+            name="ck_audit_events_effect",
+        ),
+        CheckConstraint("outcome IN ('ok', 'rejected', 'error')", name="ck_audit_events_outcome"),
+        Index("ix_audit_events_tenant_seq", "tenant_id", "seq"),
+        Index("ix_audit_events_tenant_ts", "tenant_id", "ts"),
+        Index("ix_audit_events_call_id", "call_id"),
+    )
+
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    call_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    effect: Mapped[str | None] = mapped_column(Text)
+    # Which part decided: policy, pinning, a rate limit.
+    decision_source: Mapped[str | None] = mapped_column(Text)
+    reasons: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'")
+    )
+    policy_version: Mapped[str | None] = mapped_column(Text)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    reject_code: Mapped[str | None] = mapped_column(Text)
+    # Whether the call reached the upstream. `outcome` cannot say: a result the output scan
+    # blocked was dispatched and still rejected.
+    dispatched: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    args_redacted: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True))
+    args_digest: Mapped[str | None] = mapped_column(Text)
+    # Money, scores and durations are Decimals with a fixed scale (audit.chain.DECIMAL_SCALES), so
+    # the hash of what was written equals the hash of what is read back.
+    scan_score: Mapped[Decimal | None] = mapped_column(Numeric)
+    scan_action: Mapped[str | None] = mapped_column(Text)
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric, nullable=False, server_default=text("0"))
+    latency_ms: Mapped[Decimal | None] = mapped_column(Numeric)
+    trace_id: Mapped[str | None] = mapped_column(Text)
+    prev_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    hash: Mapped[str] = mapped_column(Text, nullable=False)

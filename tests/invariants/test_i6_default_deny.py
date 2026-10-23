@@ -161,6 +161,6 @@ async def test_i6_through_the_gateway(
     assert all(demo_upstreams.state(name)["calls"] == [] for name in NAMES)
     records = app.audit.records
     assert len(records) == 3 * len(CALLS)
-    assert {(r["decision"], r["dispatched"], r["reject_code"]) for r in records} == {
+    assert {(r["effect"], r["dispatched"], r["reject_code"]) for r in records} == {
         ("deny", False, "KS_DENIED")
     }

@@ -87,6 +87,17 @@ class PolicySettings(BaseModel):
     list_cache_ttl_s: float = Field(default=60.0, ge=0)
 
 
+class AuditSettings(BaseModel):
+    """What the gateway does when the audit log cannot be written (KS-501)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # True: while the audit writer is unhealthy, every call is refused before it runs, because an
+    # action with no record is what an audit log exists to prevent. Unset means true, except when
+    # env is dev, where a stopped Postgres should not stop the demo.
+    fail_closed: bool | None = None
+
+
 class HealthSettings(BaseModel):
     """How the gateway watches its upstreams (KS-209)."""
 
@@ -141,6 +152,7 @@ class Settings(BaseSettings):
     allow_private_upstreams: bool = False
     registry: RegistrySettings = Field(default_factory=RegistrySettings)
     health: HealthSettings = Field(default_factory=HealthSettings)
+    audit: AuditSettings = Field(default_factory=AuditSettings)
     policy: PolicySettings = Field(default_factory=PolicySettings)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
     auth: AuthSettings = Field(default_factory=AuthSettings)
@@ -161,6 +173,13 @@ class Settings(BaseSettings):
     # Who every caller is when `auth.mode` is `none`. It exists only then.
     dev_principal: Principal | None = None
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))
+
+    @property
+    def audit_fail_closed(self) -> bool:
+        """Whether an unhealthy audit writer stops calls: `audit.fail_closed`, or true unless env
+        is dev."""
+        configured = self.audit.fail_closed
+        return configured if configured is not None else self.env != "dev"
 
     @model_validator(mode="after")
     def _dev_principal_only_without_authentication(self) -> "Settings":

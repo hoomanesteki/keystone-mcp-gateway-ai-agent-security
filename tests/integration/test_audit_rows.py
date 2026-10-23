@@ -1,5 +1,9 @@
+"""What a call leaves in the audit table, read back from Postgres (the in-memory log and its
+`/_dev/audit` route went away with KS-501)."""
+
+from typing import Literal
+
 import httpx
-import httpx2
 import pytest
 
 from keystone.app import create_app
@@ -9,32 +13,27 @@ from tests.fixtures.keystone import KeystoneApp, McpConnect
 
 @pytest.mark.services
 @pytest.mark.phase(1)
-async def test_the_dev_audit_count_follows_the_calls(
+async def test_the_audit_rows_follow_the_calls(
     keystone_app: KeystoneApp, mcp_client: McpConnect
 ) -> None:
-    def audit() -> dict[str, object]:
-        body: dict[str, object] = httpx2.get(f"{keystone_app.base}/_dev/audit", timeout=10).json()
-        return body
-
-    assert audit() == {"count": 0, "recent": []}
+    assert keystone_app.audit.records == []
 
     async with mcp_client(keystone_app) as client:
         await client.call_tool("echo__echo", {"payload": "a"})
         await client.call_tool("echo__nothing", {})
 
-    body = audit()
-    recent = body["recent"]
-    assert body["count"] == 2
-    assert isinstance(recent, list)
-    assert [(r["tool"], r["outcome"]) for r in recent] == [
+    rows = keystone_app.audit.records
+    assert [(r["tool_name"], r["outcome"]) for r in rows] == [
         ("echo__echo", "ok"),
         ("echo__nothing", "rejected"),
     ]
+    assert [r["seq"] for r in rows] == [1, 2]
 
 
-@pytest.mark.phase(1)
-async def test_prod_has_no_dev_audit_endpoint(clean_env: None) -> None:
-    app = create_app(Settings(env="prod", oidc_issuer="https://idp.test/realms/keystone"))
+@pytest.mark.phase(5)
+@pytest.mark.parametrize("env", ["dev", "prod"])
+async def test_there_is_no_dev_audit_endpoint(clean_env: None, env: Literal["dev", "prod"]) -> None:
+    app = create_app(Settings(env=env, oidc_issuer="https://idp.test/realms/keystone"))
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
@@ -46,7 +45,7 @@ async def test_prod_has_no_dev_audit_endpoint(clean_env: None) -> None:
 
 @pytest.mark.services
 @pytest.mark.phase(4)
-async def test_the_dev_audit_shows_the_decision_and_its_reasons(
+async def test_the_audit_row_shows_the_decision_and_its_reasons(
     keystone_app: KeystoneApp, mcp_client: McpConnect
 ) -> None:
     async with mcp_client(keystone_app) as client:  # alice
@@ -56,9 +55,9 @@ async def test_the_dev_audit_shows_the_decision_and_its_reasons(
         )
         await client.call_tool("echo__nothing", {})
 
-    recent = httpx2.get(f"{keystone_app.base}/_dev/audit", timeout=10).json()["recent"]
+    rows = keystone_app.audit.records
 
-    assert [(r["tool"], r["effect"], r["reasons"]) for r in recent] == [
+    assert [(r["tool_name"], r["effect"], r["reasons"]) for r in rows] == [
         ("echo__echo", "allow", ["same-tenant-low-medium"]),
         ("bank__transfer", "deny", ["default-deny"]),
         ("echo__nothing", None, []),  # never reached the policy

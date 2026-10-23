@@ -60,7 +60,7 @@ async def test_external_email_requires_approval(
     sent: list[dict[str, str]] = demo_upstreams.state("mail")["sent"]  # type: ignore[assignment]
     assert [m["to"] for m in sent] == ["bob@acme.test"]
     seen = [
-        (r["user_id"], r["decision"], tuple(r["reasons"]), r["outcome"], r["dispatched"])
+        (r["user_id"], r["effect"], tuple(r["reasons"]), r["outcome"], r["dispatched"])
         for r in keystone_app.audit.records
     ]
     assert seen == [
@@ -84,7 +84,7 @@ async def test_a_transfer_over_500_asks_and_nothing_moves_until_it_is_approved(
 
     assert big.is_error and cents.is_error and not edge.is_error
     assert len(demo_upstreams.state("bank")["transfers"]) == 1  # type: ignore[arg-type]
-    assert [(r["decision"], tuple(r["reasons"])) for r in keystone_app.audit.records] == [
+    assert [(r["effect"], tuple(r["reasons"])) for r in keystone_app.audit.records] == [
         ("require_approval", ("approve-transfer-over-500",)),
         ("allow", ("operators-high",)),
         ("require_approval", ("approve-transfer-over-500",)),
