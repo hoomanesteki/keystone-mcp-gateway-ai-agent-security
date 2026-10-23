@@ -39,6 +39,12 @@ from tests.fixtures.audit import AuditView
 from tests.fixtures.fake_idp import FakeIdp, fake_idp  # noqa: F401
 from tests.fixtures.policies import POLICY_ROOT, ROOT
 from tests.fixtures.redis import redis, test_redis_url  # noqa: F401
+from tests.fixtures.sandbox import (  # noqa: F401
+    _no_sandbox_container_is_left,
+    docker_client,
+    runner,
+    sandbox_image,
+)
 from tests.fixtures.servers import ServerThread
 from tests.fixtures.upstreams import (  # noqa: F401
     NAMES,

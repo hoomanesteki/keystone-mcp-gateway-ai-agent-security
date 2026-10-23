@@ -15,6 +15,7 @@ dependencies = [
     "asyncpg>=0.32.0",
     "cedarpy>=4.12.2",
     "cryptography>=50.0.2",
+    "docker>=7.2.0",
     "fastapi>=0.159.1",
     "jsonschema>=4.26.0",
     "mcp>=2.3.0",
@@ -110,6 +111,8 @@ module = [
     "keystone.approvals.*",
     "keystone.defense",
     "keystone.defense.*",
+    "keystone.sandbox",
+    "keystone.sandbox.*",
 ]
 disallow_any_generics = true
 disallow_subclassing_any = true
@@ -134,5 +137,5 @@ addopts = "--strict-markers"
 
 # Third-party packages that ship no type information.
 [[tool.mypy.overrides]]
-module = ["asyncpg", "asyncpg.*", "pyarrow", "pyarrow.*"]
+module = ["asyncpg", "asyncpg.*", "docker", "docker.*", "pyarrow", "pyarrow.*"]
 ignore_missing_imports = true

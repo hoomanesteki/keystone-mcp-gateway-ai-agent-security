@@ -227,6 +227,47 @@ class ScannerSettings(BaseModel):
         return hosts
 
 
+IMAGE_REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,254}$")
+RUNTIME_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+
+
+class SandboxSettings(BaseModel):
+    """Where the code an agent writes runs (KS-801, ADR-0012). The limits of a container are not
+    settings: they are in `keystone.sandbox.runner` and a deployment cannot loosen them."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # false leaves the `sandbox` upstream unregistered, and nothing then talks to Docker. A
+    # deployment with no Docker socket (a Fargate task) sets it to false. KEYSTONE_SANDBOX_ENABLED
+    # is the short name for it.
+    enabled: bool = True
+    # The image the code runs in: deploy/sandbox/Dockerfile.python, built by `make sandbox-image`.
+    image: str = "keystone-sandbox-python:dev"
+    # `runc`, or `runsc` where gVisor is installed. The name is one the Docker daemon knows.
+    runtime: str = "runc"
+    # How long one run may take before its container is killed. A tool's own timeout is this plus
+    # ten seconds, so that a run that ran out of time is a result and not a failed call.
+    timeout_s: float = Field(default=30.0, gt=0, le=300)
+    # Containers running at once. A call over this waits for one to end.
+    max_concurrent: int = Field(default=4, ge=1, le=64)
+
+    @field_validator("image")
+    @classmethod
+    def _an_image_name(cls, value: str) -> str:
+        if not IMAGE_REFERENCE.fullmatch(value):
+            raise ValueError(
+                "image must be a Docker image name, such as keystone-sandbox-python:dev"
+            )
+        return value
+
+    @field_validator("runtime")
+    @classmethod
+    def _a_runtime_name(cls, value: str) -> str:
+        if not RUNTIME_NAME.fullmatch(value):
+            raise ValueError("runtime must be the name of a Docker runtime, such as runc or runsc")
+        return value
+
+
 class HealthSettings(BaseModel):
     """How the gateway watches its upstreams (KS-209)."""
 
@@ -296,6 +337,10 @@ class Settings(BaseSettings):
     # model off without the nested spelling (KEYSTONE_SCANNER__CLASSIFIER). It wins when both are
     # set, because it is the one a person types to change a running stack.
     scanner_classifier: Classifier | None = None
+    sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
+    # A short name for `sandbox.enabled`, so that KEYSTONE_SANDBOX_ENABLED=false turns the sandbox
+    # off without the nested spelling (KEYSTONE_SANDBOX__ENABLED). It wins when both are set.
+    sandbox_enabled: bool | None = None
     policy: PolicySettings = Field(default_factory=PolicySettings)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
     auth: AuthSettings = Field(default_factory=AuthSettings)
@@ -334,6 +379,12 @@ class Settings(BaseSettings):
     def _the_short_name_of_the_classifier(self) -> "Settings":
         if self.scanner_classifier is not None:
             self.scanner = self.scanner.model_copy(update={"classifier": self.scanner_classifier})
+        return self
+
+    @model_validator(mode="after")
+    def _the_short_name_of_the_sandbox_switch(self) -> "Settings":
+        if self.sandbox_enabled is not None:
+            self.sandbox = self.sandbox.model_copy(update={"enabled": self.sandbox_enabled})
         return self
 
     @model_validator(mode="after")
