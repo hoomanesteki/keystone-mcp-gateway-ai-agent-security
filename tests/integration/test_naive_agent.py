@@ -65,7 +65,6 @@ async def test_a_summary_of_harmless_mail_sends_nothing(poisoned_mail: ServerThr
 
 
 @pytest.mark.services
-@pytest.mark.xfail(strict=True, reason="needs KS-705")
 async def test_attack_blocked_with_gateway(
     poisoned_mail: ServerThread,
     keystone_app_factory: Factory,
@@ -89,6 +88,6 @@ async def test_attack_blocked_with_gateway(
     assert attack.error_code == "KS_APPROVAL_REJECTED"
     assert sent_mail(poisoned_mail) == []
     # The call waited for a person because the session had read untrusted data and was tainted,
-    # and the approval says so. This needs the taint of KS-704 and the policies of KS-705.
+    # and the approval says so (the taint of KS-704, the policies of KS-705).
     [rejected] = await approver.service.list_for_tenant("acme", "rejected")
     assert {"tainted-external-effect", "rule-of-two"} <= set(rejected.reasons)

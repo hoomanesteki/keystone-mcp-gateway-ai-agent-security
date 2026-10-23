@@ -221,7 +221,7 @@ def create_app(
         ),
         interceptors,
     )
-    virtual.bind(pipeline)
+    virtual.bind(pipeline, session_store)
     tool_filter = PolicyToolFilter(
         policy_engine,
         RedisListCache(redis) if redis else MemoryListCache(),

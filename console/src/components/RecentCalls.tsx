@@ -1,11 +1,20 @@
 import { useId, useState } from "react";
 import { useApprovalDetail } from "../api/approvals";
-import { formatClock } from "../lib/format";
+import { formatClock, formatScan } from "../lib/format";
 import { describeError } from "../lib/errors";
-import { OutcomeBadge } from "./Badge";
+import { Badge, OutcomeBadge } from "./Badge";
 import { Button } from "./Button";
 import { Icon } from "./Icon";
 import { Skeleton } from "./StateViews";
+
+/** What the scanner made of the output of a call. An output that was flagged is marked, so the
+ * call that brought the injection in is the one the eye finds in the list. */
+function Scan({ score, action }: { score: string | null; action: string | null }) {
+  const scan = formatScan(score, action);
+  if (scan === null) return <span className="text-fg-subtle">not scanned</span>;
+  if (action === "pass") return <span className="text-fg-muted">{scan}</span>;
+  return <Badge tone={action === "block" ? "danger" : "warn"}>{scan}</Badge>;
+}
 
 function Calls({ id }: { id: string }) {
   const detail = useApprovalDetail(id, true);
@@ -50,6 +59,9 @@ function Calls({ id }: { id: string }) {
           <th scope="col" className="py-1 pr-4 font-medium">
             Result
           </th>
+          <th scope="col" className="py-1 pr-4 font-medium">
+            Scan
+          </th>
           <th scope="col" className="py-1 font-medium">
             Detail
           </th>
@@ -64,6 +76,9 @@ function Calls({ id }: { id: string }) {
             <td className="py-1.5 pr-4 font-mono">{call.tool_name}</td>
             <td className="py-1.5 pr-4">
               <OutcomeBadge outcome={call.outcome} code={call.reject_code} />
+            </td>
+            <td className="py-1.5 pr-4 font-mono whitespace-nowrap">
+              <Scan score={call.scan_score} action={call.scan_action} />
             </td>
             <td className="py-1.5 font-mono text-fg-muted">{call.reject_code ?? call.effect}</td>
           </tr>

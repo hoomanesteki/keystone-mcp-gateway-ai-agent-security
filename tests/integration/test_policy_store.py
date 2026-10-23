@@ -70,7 +70,16 @@ def test_loads_default_and_tenant_policies(tmp_path: Path) -> None:
 
     acme = {p.id for p in loaded.tenants["acme"].policies}
     globex = {p.id for p in loaded.tenants["globex"].policies}
-    shared = {"same-tenant-low-medium", "operators-high", "admins-critical", "deny-cross-tenant"}
+    shared = {
+        "same-tenant-low-medium",
+        "operators-high",
+        "admins-critical",
+        "deny-cross-tenant",
+        # The Rule of Two (KS-705) is every tenant's.
+        "deny-critical-when-tainted",
+        "rule-of-two",
+        "tainted-external-effect",
+    }
     assert acme == shared | {"acme-asks-for-mail"}
     assert globex == shared | {"globex-no-writes"}
     assert len(loaded.version) == 64

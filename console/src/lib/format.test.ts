@@ -3,6 +3,7 @@ import {
   formatCost,
   formatCountdown,
   formatLatency,
+  formatScan,
   isMaskedText,
   isMaskedValue,
   relativeTime,
@@ -51,6 +52,15 @@ describe("the figures of the audit log", () => {
     expect(formatLatency("12.4")).toBe("12 ms");
     expect(formatLatency("10051.040")).toBe("10.05 s");
     expect(formatLatency(null)).toBe("none");
+  });
+
+  test("a scan is the score to two places and what was done", () => {
+    expect(formatScan("0.880000", "annotate")).toBe("0.88 annotate");
+    expect(formatScan("0.000000", "pass")).toBe("0.00 pass");
+    expect(formatScan("1", "block")).toBe("1.00 block");
+    expect(formatScan("0", "error")).toBe("0.00 error");
+    expect(formatScan(null, null)).toBeNull();
+    expect(formatScan("n/a", "pass")).toBe("n/a pass");
   });
 
   test("a cost is free, or dollars with as many places as it needs", () => {

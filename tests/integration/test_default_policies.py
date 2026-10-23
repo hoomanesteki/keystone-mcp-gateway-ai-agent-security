@@ -22,6 +22,10 @@ def test_default_pack_validates() -> None:
         ("operators-high", "access"),
         ("admins-critical", "access"),
         ("deny-cross-tenant", "access"),
+        # The Rule of Two (KS-705) is every tenant's.
+        ("deny-critical-when-tainted", "access"),
+        ("rule-of-two", "approval"),
+        ("tainted-external-effect", "approval"),
     }
     assert acme == base | {
         ("approve-transfer-over-500", "approval"),

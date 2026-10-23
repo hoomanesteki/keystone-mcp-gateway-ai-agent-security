@@ -1,0 +1,172 @@
+# The Rule of Two (plan sections 3.5 and 3.8, KS-705, policies/default/**/rule_of_two.cedar).
+#
+# A session should not combine all three of these without a person: it processes untrusted input
+# (flag reads_untrusted), it has access to sensitive data (flag reads_sensitive), and it changes
+# state or sends data out (the tool being called has the tag external_effect). A session that read
+# an injection is tainted, and asks before any external effect on its own; it never runs a critical
+# tool. Run with
+#   keystone policy test policies tests/policy_cases --coverage
+#
+# Most cases use files__write_file, which has the tag and no rule of its own, so the reasons are the
+# Rule of Two's and nothing else. The mail cases at the end add acme's own rule.
+
+# The same caller and the same tool in most cases, so a case reads as the one thing it changes.
+- name: a clean session uses an external tool without asking
+  tenant: acme
+  principal: &olivia {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: &write {name: files__write_file, risk: high, tags: [external_effect]}
+  session: {flags: [], tainted: false}
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: untrusted and sensitive then an external effect needs approval
+  tenant: acme
+  principal: *olivia
+  tool: *write
+  session: {flags: [reads_untrusted, reads_sensitive], tainted: false}
+  expect: require_approval
+  expect_reasons: [rule-of-two]
+
+- name: untrusted alone is not enough
+  tenant: acme
+  principal: *olivia
+  tool: *write
+  session: {flags: [reads_untrusted], tainted: false}
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: sensitive alone is not enough
+  tenant: acme
+  principal: *olivia
+  tool: *write
+  session: {flags: [reads_sensitive], tainted: false}
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: the other tags do not count towards the rule
+  tenant: acme
+  principal: *olivia
+  tool: *write
+  session: {flags: [external_effect, code_exec], tainted: false}
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: a tool with no external effect is not asked about, whatever the session read
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: {name: mail__read_email, risk: low, tags: [reads_untrusted, reads_sensitive]}
+  session: {flags: [reads_untrusted, reads_sensitive], tainted: true}
+  expect: allow
+  expect_reasons: [same-tenant-low-medium]
+
+- name: a low risk tool with an external effect is asked about as well
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: {name: web__post, risk: low, tags: [external_effect]}
+  session: {flags: [reads_untrusted, reads_sensitive], tainted: false}
+  expect: require_approval
+  expect_reasons: [rule-of-two]
+
+- name: a tainted session asks before an external effect, flags or none
+  tenant: acme
+  principal: *olivia
+  tool: *write
+  session: {flags: [], tainted: true}
+  expect: require_approval
+  expect_reasons: [tainted-external-effect]
+
+- name: a tainted session that also read both is asked for both reasons
+  tenant: acme
+  principal: *olivia
+  tool: *write
+  session: {flags: [reads_untrusted, reads_sensitive], tainted: true}
+  expect: require_approval
+  expect_reasons: [rule-of-two, tainted-external-effect]
+
+- name: taint alone does not stop a high risk tool that has no external effect
+  tenant: acme
+  principal: *olivia
+  tool: {name: files__read_private, risk: high, tags: [reads_sensitive]}
+  session: {flags: [], tainted: true}
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: a tainted session never runs a critical tool
+  tenant: acme
+  principal: &root {user: root, groups: [admins], agent: ops-agent, trust: high, roles: [admin]}
+  tool: &wipe {name: admin__wipe, risk: critical}
+  session: {flags: [], tainted: true}
+  expect: deny
+  expect_reasons: [deny-critical-when-tainted]
+
+- name: a clean session may run it, which is what the rule takes away
+  tenant: acme
+  principal: *root
+  tool: *wipe
+  session: {flags: [reads_untrusted, reads_sensitive], tainted: false}
+  expect: allow
+  expect_reasons: [admins-critical]
+
+- name: a critical tool with an external effect is denied before the approval set is asked
+  tenant: acme
+  principal: *root
+  tool: {name: admin__wire, risk: critical, tags: [external_effect]}
+  session: {flags: [reads_untrusted, reads_sensitive], tainted: true}
+  expect: deny
+  expect_reasons: [deny-critical-when-tainted]
+
+- name: belonging to both groups does not get past it
+  tenant: acme
+  principal: {user: both, groups: [operators, admins], agent: ops-agent, trust: high}
+  tool: *wipe
+  session: {flags: [], tainted: true}
+  expect: deny
+  expect_reasons: [deny-critical-when-tainted]
+
+- name: the ban is on calling, and a tainted session is still shown the tool
+  tenant: acme
+  principal: *root
+  tool: *wipe
+  action: list_tool
+  session: {flags: [], tainted: true}
+  expect: allow
+  expect_reasons: [admins-critical]
+
+- name: support is refused by the access set before the rule is asked
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: *write
+  session: {flags: [reads_untrusted, reads_sensitive], tainted: true}
+  expect: deny
+  expect_reasons: [default-deny]
+
+- name: the rule is every tenant's, not acme's
+  tenant: globex
+  principal: {user: gina, groups: [operators], agent: ops-agent, trust: high}
+  tool: {name: files_globex__write_file, risk: high, tags: [external_effect], tenant: globex}
+  session: {flags: [], tainted: true}
+  expect: require_approval
+  expect_reasons: [tainted-external-effect]
+
+# Acme's own rule for mail joins the Rule of Two: the reasons add up.
+- name: an internal mail after reading mail asks, and says why
+  tenant: acme
+  principal: *olivia
+  tool: &send
+    name: mail__send_email
+    risk: high
+    tags: [external_effect]
+    extract: {recipient_domain: "$.to | domain"}
+  arguments: {to: colleague@acme.test, subject: Q3, body: The numbers are in}
+  session: {flags: [reads_untrusted, reads_sensitive], tainted: false}
+  expect: require_approval
+  expect_reasons: [rule-of-two]
+
+- name: the poisoned email of the demo is asked about for all three reasons
+  tenant: acme
+  principal: *olivia
+  tool: *send
+  arguments: {to: attacker@evil.test, subject: Invoice 4471, body: Payment details are unchanged}
+  session: {flags: [reads_untrusted, reads_sensitive], tainted: true}
+  expect: require_approval
+  expect_reasons: [external-email-needs-approval, rule-of-two, tainted-external-effect]
