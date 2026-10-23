@@ -1193,6 +1193,29 @@ runs the same command and fails if the file differs, so the console cannot drift
 client in `src/api/client.ts` takes its routes, parameters and answers from that file, so a change
 that breaks a call fails the build, not a page.
 
+### The approvals page
+
+`/approvals` lists the tenant's pending requests, oldest first, and reads the list again every 5
+seconds. The Approvals entry in the menu shows how many are waiting, from any page. A card shows:
+
+- the tool, its risk (the word low, medium, high or critical, with a color and bars) and a red
+  "tainted" badge when the session has read untrusted content;
+- who asked, through which agent, and when;
+- the arguments as the audit log keeps them, sorted by name. A value that was hidden or cut is
+  marked, and the card says that the call runs with more than it shows;
+- the reasons, which are policy ids and link to that policy's heading in `docs/policies.md`
+  (every shipped id has one; a test checks that);
+- the session's flags, and the time left in minutes and seconds, counted from the server's figure
+  and not the browser's clock;
+- the last calls of the session, loaded when the card's list is opened and read again every 5
+  seconds while it is.
+
+Approve takes an optional note. Reject needs one, because the agent is told it. The card leaves the
+list at once and comes back if the decision cannot be sent. A 409 (someone else decided it, or it
+expired) says "Already decided" and reads the list again. A request the person made has no buttons,
+because the API would refuse them (403). The link in the webhook and Slack message,
+`/approvals?id=<id>`, scrolls to that request and outlines it.
+
 ### Settings
 
 Vite reads these when it starts. Only the `VITE_` ones reach the browser.
