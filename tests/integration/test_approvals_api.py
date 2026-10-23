@@ -271,7 +271,10 @@ async def test_the_schema_describes_the_approvals_routes(keystone_app: KeystoneA
         schema["paths"]
     )
     decision = schema["paths"]["/approvals/{approval_id}/decision"]["post"]
-    assert {"200", "403", "404", "409"} <= set(decision["responses"])
+    assert {"200", "403", "404", "409", "503"} <= set(decision["responses"])
+    one = schema["paths"]["/approvals/{approval_id}"]["get"]
+    assert {"200", "404", "503"} <= set(one["responses"])
+    assert "503" in schema["paths"]["/approvals"]["get"]["responses"]
     assert "ApprovalItem" in schema["components"]["schemas"]
 
 

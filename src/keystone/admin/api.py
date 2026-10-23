@@ -391,6 +391,7 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
         "/approvals",
         tags=["approvals"],
         summary="The tenant's approval requests in one state, pending by default",
+        responses={503: {"model": ErrorBody, "description": "Keystone has no master keys."}},
     )
     async def list_approvals(
         principal: admin,
@@ -406,6 +407,10 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
         "/approvals/{approval_id}",
         tags=["approvals"],
         summary="One request, with the last calls of the session that asked",
+        responses={
+            404: {"model": ErrorBody, "description": "No such request in the caller's tenant."},
+            503: {"model": ErrorBody, "description": "Keystone has no master keys."},
+        },
     )
     async def get_approval(principal: admin, approval_id: str) -> ApprovalDetail:
         record = await approval_service().get(principal.tenant_id, approval_id)
@@ -438,6 +443,7 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
             },
             404: {"model": ErrorBody, "description": "No such request in the caller's tenant."},
             409: {"model": ErrorBody, "description": "The request is no longer pending."},
+            503: {"model": ErrorBody, "description": "Keystone has no master keys."},
         },
     )
     async def decide_approval(
