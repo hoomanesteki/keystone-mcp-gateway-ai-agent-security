@@ -230,6 +230,43 @@ Where I read the story narrowly or widely:
 - **With `scanner.enabled: false`** only the first check runs, on the description alone, and the
   reason is the rule ids, exactly as before Phase 7.
 
+**The evaluation (KS-707).** `eval/detector/` scores the scanner on a fixed dataset and
+`docs/results.md` holds what it measured, with the date and the commit. `eval/DATASETS.md` has the
+sources and licenses. Where I read the story narrowly or widely:
+
+- **The split is by carrier.** A carrier is a harmless document, and it is used as it is and with
+  two attacks put in it. A hash of its name and a fixed seed puts the carrier, and everything made
+  from it, in `dev` or in `test`, so a threshold tuned on dev was never fitted to a document that
+  test also holds. No generator calls `random`, and `manifest.json` holds the sha256 of every
+  text, so a build is the same everywhere and a text that changed is an error.
+- **The thresholds are tuned on dev by a rule written before the numbers.** `suspicious` is the
+  threshold with the highest F0.5 (precision counts twice as much as recall: the Rule of Two asks a
+  person before a tainted session acts outside, so a miss has a second layer and a false positive
+  has none). `injection` is the lowest threshold from there up with a precision of 0.95, because a
+  taint lasts the session. I looked at F1 first. Its best point on dev is below 0.45, where texts
+  that only the weak rule `tool_directive` flags start to count, and it costs 18 points of false
+  positives on hard negatives for 7 of recall. I chose F0.5 after seeing that, and the sweep prints
+  both. On dev the combined score peaks at 0.5 and no threshold reaches a precision of 0.95, so
+  0.5 and 0.85 stay. The rules alone would recommend 0.4 and 0.8. I did not take those: the gateway
+  uses the combined score, and the poisoned email of the demo, which scores 0.88 from the rules,
+  must stay an `injection`.
+- **The test split is looked at as little as possible, and every look is logged** in
+  `eval/results/test-runs.jsonl`, which the report quotes. The story says to run `test` once per
+  threshold change. No threshold changed, and the split was scored three times: a trial of the
+  nightly command on 200 texts before the thresholds were frozen, the report, and the report again
+  after its wording changed (same classification numbers).
+- **The nightly job reads dev.** "The nightly CI runs 200 samples" could be read as a sample of
+  test. It scores 200 texts of dev with the rules alone, since no model is installed in CI, and it
+  fails when the data differs from the manifest or when the sample's ROC AUC is under 0.7. That
+  floor is a guard against a scanner that stopped working, and it is not a result.
+- **The public data is read as parquet at a pinned revision**, with pyarrow from the optional
+  extra `keystone[eval]` (ADR-0002). The datasets server's JSON API answered 429 after a few dozen
+  requests, which 60 articles of WikiText-2 cannot stay under. Without the extra, or without the
+  network, the build is the synthetic parts and says so.
+- **The attacks of the documents are the templates of KS-708**, written alongside the rules, so the
+  rules' recall on them says less than it seems to. The public prompts are the independent check,
+  and the report gives the two apart.
+
 **A contract changes.** `ScanResult.action` (plan section 3.6) gains `"error"` beside `pass`,
 `annotate`, `redact` and `block`, so that the audit record can say `scan_action="error"`. Nothing
 else in `core` changes. The audit column is text and takes the value as it is.
@@ -274,10 +311,27 @@ else in `core` changes. The audit column is text and takes the value as it is.
 - The lower-case views make the rules about twice as fast and make their places in the text
   unreliable for cutting. `hidden_unicode` and `markdown_exfil` are the rules whose places are
   used to cut a text (KS-703), and they are run again on the text as it came.
+- On the test split the higher of the two scores finds fewer attacks than the rules alone at a
+  false positive rate of 5 percent (0.35 against 0.59), although it ranks best over all
+  thresholds (ROC AUC 0.884). The model flags 11 of 197 harmless documents and 18 of 66 hard
+  negatives at 0.5, and a maximum keeps every flag the model gives. Dev says the same (0.16
+  against 0.52). On dev the model gives 0.95 or more to 42 of 456 harmless texts, 30 of them hard
+  negatives, which is more than the 5 percent the metric allows, so the threshold of the model rows
+  sits at the top of its range, above the 0.85 that taints a session.
+- The row for the gateway's wait of 300 ms (0.72 at 5 percent on test) is not a stable number. On
+  dev the same row is 0.14, against 0.16 without the wait, because only 10 of those 42 texts take
+  longer than 300 ms. Whether the wait helps depends on which long texts the model gets wrong, and
+  the report says so under that table.
+- On the public prompts the rules reach a recall of 0.09 at 5 percent and the model 0.71; on the
+  generated documents it is 0.68 and 0.12. The two miss different things, which is why there are
+  two, and also why a maximum is the blunt way to join them.
 
 ## Revisit when
 
 The evaluation shows a rule that is wrong more often than right at its weight, the gateway needs
 to scan outputs of several megabytes (then the rules move out of the process, or the scan is split
 and yields between pieces), or the model is too slow for the outputs a deployment has (a quantized
-or ONNX copy, or a smaller model, would be measured against the same dev split first).
+or ONNX copy, or a smaller model, would be measured against the same dev split first), or the
+maximum is replaced by another way to join the scores. The rules alone beat the maximum at 5
+percent on both splits, so a join that asks the rules to agree before a session is tainted is the
+first thing to try, and it would be tuned on dev.
