@@ -104,9 +104,10 @@ and audit slots as any call.
 - Nothing limits the requests one user or session leaves pending, merges identical requests (an
   approver who approves two lets the call run twice) or counts the callers waiting at once. The
   rate limits and budgets of Phase 8 are where those belong.
-- A session is saved whole when a call ends. A long wait that overlaps a call which changes the
-  session's flags would write back the older copy. Nothing changes the flags yet; the stories of
-  Phase 7 must save them without overwriting (docs/progress.md, Found).
+- A session was saved whole when a call ended, so a long wait that overlapped a call which changed
+  the session's flags would have written back the older copy. Fixed by KS-791: sessions change by
+  merging, and a call that waited reads its session again before it is checked a second time
+  (ADR-0015).
 
 ## Revisit when
 
