@@ -79,7 +79,7 @@ async def test_upstream_down_fails_fast(
     # The other upstream carries on.
     assert not other.is_error
     record = app.audit.records[-2]  # the refused call, before the mail call
-    assert (record["tool"], record["outcome"], record["dispatched"]) == (
+    assert (record["tool_name"], record["outcome"], record["dispatched"]) == (
         "bank__get_balance",
         "error",
         False,

@@ -57,7 +57,7 @@ async def test_call_through_gateway(
     for other in ("files", "bank", "echo"):
         assert demo_upstreams.state(other)["calls"] == []
     [record] = keystone_app.audit.records
-    assert (record["tool"], record["outcome"], record["dispatched"]) == (
+    assert (record["tool_name"], record["outcome"], record["dispatched"]) == (
         "mail__read_email",
         "ok",
         True,
@@ -80,7 +80,7 @@ async def test_unknown_tool_returns_not_found(
         assert block.text.startswith("[keystone:KS_TOOL_NOT_FOUND] call ")
         assert block.meta is not None
         assert block.meta["keystone/code"] == "KS_TOOL_NOT_FOUND"
-    codes = [(r["tool"], r["outcome"], r["reject_code"]) for r in keystone_app.audit.records]
+    codes = [(r["tool_name"], r["outcome"], r["reject_code"]) for r in keystone_app.audit.records]
     assert codes == [
         ("mail__nope", "rejected", "KS_TOOL_NOT_FOUND"),
         ("read_email", "rejected", "KS_TOOL_NOT_FOUND"),

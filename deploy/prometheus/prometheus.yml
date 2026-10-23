@@ -5,3 +5,10 @@ scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
+
+  # Keystone's own metrics (KS-505). The dev stack scrapes often so a smoke sees a call within seconds.
+  - job_name: keystone
+    metrics_path: /metrics
+    scrape_interval: 5s
+    static_configs:
+      - targets: ["keystone:8080"]

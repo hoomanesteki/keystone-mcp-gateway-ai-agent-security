@@ -10,6 +10,7 @@ from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, ToolResult
 from keystone.gateway.scrub import scrub_result
 from keystone.gateway.upstreams import UpstreamPool
+from keystone.telemetry.tracing import trace_context_meta
 
 log = structlog.get_logger()
 
@@ -30,10 +31,18 @@ class UpstreamDispatcher:
             ctx.dispatched = False
             raise Reject(Code.UPSTREAM_ERROR, f"upstream {upstream_id} is down")
         try:
+            # The trace context of the running span (the upstream call) goes to the upstream in the
+            # request's `_meta`, so its spans can join the trace. Nothing is sent without a span.
+            meta = trace_context_meta()
             async with self.pool.lease(upstream_id, ctx.upstream_headers) as client:
-                result = await client.call_tool(
-                    ctx.tool.upstream_tool_name, ctx.arguments, ctx.tool.timeout_s
-                )
+                if meta:
+                    result = await client.call_tool(
+                        ctx.tool.upstream_tool_name, ctx.arguments, ctx.tool.timeout_s, meta=meta
+                    )
+                else:
+                    result = await client.call_tool(
+                        ctx.tool.upstream_tool_name, ctx.arguments, ctx.tool.timeout_s
+                    )
             # An upstream that echoes the credential it received must not pass it to the agent.
             # This runs before the result leaves dispatch, while the injected values are still
             # on the context (KS-392).

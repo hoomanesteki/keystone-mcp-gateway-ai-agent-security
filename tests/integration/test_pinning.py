@@ -285,7 +285,7 @@ async def test_quarantined_hidden_and_rejected(
     assert not others.is_error
     # The refused call never reached the upstream, and it left its one audit record.
     assert demo_upstreams.state("echo")["calls"] == ["sleep"]
-    record = next(r for r in app.audit.records if r["tool"] == "echo__echo")
+    record = next(r for r in app.audit.records if r["tool_name"] == "echo__echo")
     assert (record["outcome"], record["reject_code"], record["dispatched"]) == (
         "rejected",
         "KS_QUARANTINED",

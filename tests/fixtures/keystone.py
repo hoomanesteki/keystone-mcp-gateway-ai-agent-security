@@ -20,7 +20,6 @@ from pydantic import SecretStr
 from redis.asyncio import Redis
 
 from keystone.app import create_app
-from keystone.audit.sink import InMemoryAuditSink
 from keystone.registry.config import ToolOverride, UpstreamConfig
 from keystone.settings import (
     AgentConfig,
@@ -33,6 +32,7 @@ from keystone.settings import (
 
 # Re-exported so tests/conftest.py can name one module: tests/unit/test_phase_plugin.py copies the
 # conftest and strips its single `pytest_plugins` line, so that line must stay on one line.
+from tests.fixtures.audit import AuditView
 from tests.fixtures.fake_idp import FakeIdp, fake_idp  # noqa: F401
 from tests.fixtures.policies import POLICY_ROOT, ROOT
 from tests.fixtures.redis import redis, test_redis_url  # noqa: F401
@@ -105,6 +105,7 @@ def credentialed_upstreams(upstreams: DemoUpstreams, tenant: str = "acme") -> li
 class KeystoneApp:
     app: FastAPI
     thread: ServerThread
+    database_url: str
 
     @property
     def url(self) -> str:
@@ -116,10 +117,9 @@ class KeystoneApp:
         return self.thread.url
 
     @property
-    def audit(self) -> InMemoryAuditSink:
-        sink = self.app.state.audit
-        assert isinstance(sink, InMemoryAuditSink)
-        return sink
+    def audit(self) -> AuditView:
+        """The audit rows this app has written, read from Postgres."""
+        return AuditView(self.app.state.audit, self.database_url)
 
 
 @pytest.fixture
@@ -129,6 +129,7 @@ def keystone_app_factory(
     fake_idp: FakeIdp,  # noqa: F811
     clean_env: None,
     test_database_url: str,
+    app_database_url: str,
     clean_db: None,
     test_redis_url: str,  # noqa: F811 - the re-exported fixtures above
     redis: Redis,  # noqa: F811
@@ -173,7 +174,7 @@ def keystone_app_factory(
         options: dict[str, Any] = {
             "env": "test",
             "registry": registry or RegistrySettings(),
-            "database_url": SecretStr(test_database_url),
+            "database_url": SecretStr(app_database_url),
             "redis_url": SecretStr(test_redis_url),
             "tenants": tenants,
             "allow_private_upstreams": True,
@@ -184,7 +185,7 @@ def keystone_app_factory(
         }
         options.update(settings or {})
         app = create_app(Settings(**options), **app_options)
-        running = KeystoneApp(app, ServerThread(app).start())
+        running = KeystoneApp(app, ServerThread(app).start(), test_database_url)
         started.append(running)
         return running
 
@@ -203,6 +204,7 @@ def start_keystone(
     fake_idp: FakeIdp,  # noqa: F811
     clean_env: None,
     test_database_url: str,
+    app_database_url: str,
     clean_db: None,
     test_redis_url: str,  # noqa: F811
     redis: Redis,  # noqa: F811
@@ -220,7 +222,7 @@ def start_keystone(
     ) -> KeystoneApp:
         settings = Settings(
             env="test",
-            database_url=SecretStr(test_database_url),
+            database_url=SecretStr(app_database_url),
             redis_url=SecretStr(test_redis_url),
             tenants=[TenantConfig(id="acme", name="Acme Corp")],
             allow_private_upstreams=True,
@@ -231,7 +233,7 @@ def start_keystone(
             **auth_options(fake_idp),
         )
         app = create_app(settings, **app_options)
-        running = KeystoneApp(app, ServerThread(app).start())
+        running = KeystoneApp(app, ServerThread(app).start(), test_database_url)
         started.append(running)
         return running
 
@@ -254,7 +256,8 @@ def mcp_client(fake_idp: FakeIdp) -> McpConnect:  # noqa: F811
 
     `user` and `agent` choose another demo user (a test that calls a high-risk tool uses
     `user="olivia"`, an operator). `token` sends that exact token instead, and `token=""` sends
-    none. Other keyword arguments go to the MCP client.
+    none. `headers` are sent on every request besides the token (a `traceparent`, for example).
+    Other keyword arguments go to the MCP client.
     """
 
     @asynccontextmanager
@@ -264,11 +267,13 @@ def mcp_client(fake_idp: FakeIdp) -> McpConnect:  # noqa: F811
         token: str | None = None,
         user: str = "alice",
         agent: str | None = None,
+        headers: Mapping[str, str] | None = None,
         **client_options: Any,
     ) -> AsyncIterator[Client]:
         bearer = fake_idp.token_for(user, agent) if token is None else token
-        headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
-        async with httpx2.AsyncClient(headers=headers, timeout=httpx2.Timeout(15)) as http:
+        sent = {"Authorization": f"Bearer {bearer}"} if bearer else {}
+        sent.update(headers or {})
+        async with httpx2.AsyncClient(headers=sent, timeout=httpx2.Timeout(15)) as http:
             transport = streamable_http_client(app.url, http_client=http)
             async with Client(transport, **client_options) as client:
                 yield client

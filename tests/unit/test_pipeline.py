@@ -81,11 +81,27 @@ class BrokenAudit:
     ) -> None:
         raise ConnectionError("audit database is down")
 
+    def healthy(self) -> bool:
+        return True
+
+
+class UnhealthyAudit(InMemoryAuditSink):
+    """A sink that still takes records but says it may lose them."""
+
+    def healthy(self) -> bool:
+        return False
+
+
+class CrashingHealth(InMemoryAuditSink):
+    def healthy(self) -> bool:
+        raise RuntimeError("cannot tell")
+
 
 def build(
     events: list[str] | None = None,
     dispatcher: Any = None,
     audit: Any = None,
+    fail_closed: bool = False,
     **recorder_options: dict[str, Any],
 ) -> tuple[Pipeline, list[str], InMemoryAuditSink]:
     events = [] if events is None else events
@@ -94,7 +110,11 @@ def build(
         Recorder(name, events, **recorder_options.get(name, {})) for name in ORDER + AFTER
     ]
     pipeline = Pipeline(
-        interceptors, dispatcher or SpyDispatcher(events), audit or sink, NoopTracer()
+        interceptors,
+        dispatcher or SpyDispatcher(events),
+        audit or sink,
+        NoopTracer(),
+        fail_closed=fail_closed,
     )
     return pipeline, events, sink
 
@@ -404,4 +424,55 @@ async def test_an_allow_or_an_approved_decision_dispatches(policy: Decides) -> N
 
     assert not result.is_error
     assert dispatcher.events == ["dispatch"]
+    assert [r["outcome"] for r in sink.records] == ["ok"]
+
+
+@pytest.mark.phase(5)
+async def test_a_pipeline_that_fails_closed_refuses_before_anything_runs() -> None:
+    sink = UnhealthyAudit()
+    pipeline, events, _ = build(audit=sink, fail_closed=True)
+    ctx = make_ctx()
+
+    result = await pipeline.run(ctx)
+
+    assert result.is_error
+    assert text_of(result).startswith(f"[keystone:KS_DENIED] call {ctx.call_id} denied: ")
+    assert result.content[0]["_meta"]["keystone/reason"] == "audit-unavailable"
+    assert events == []  # no interceptor ran and nothing was dispatched
+    assert ctx.dispatched is False and ctx.decision is None
+    # The refusal is still audited, with the reason where a search of the log finds it.
+    [record] = sink.records
+    assert (record["outcome"], record["reject_code"]) == ("rejected", "KS_DENIED")
+
+
+@pytest.mark.phase(5)
+async def test_a_pipeline_that_fails_open_runs_the_call_and_still_audits_it() -> None:
+    sink = UnhealthyAudit()
+    pipeline, events, _ = build(audit=sink, fail_closed=False)
+
+    result = await pipeline.run(make_ctx())
+
+    assert not result.is_error
+    assert "dispatch" in events
+    assert [r["outcome"] for r in sink.records] == ["ok"]
+
+
+@pytest.mark.phase(5)
+async def test_a_health_check_that_raises_counts_as_unhealthy() -> None:
+    pipeline, events, _ = build(audit=CrashingHealth(), fail_closed=True)
+
+    with capture_logs() as logs:
+        result = await pipeline.run(make_ctx())
+
+    assert result.is_error and events == []
+    assert any(entry["event"] == "audit_health_check_failed" for entry in logs)
+
+
+@pytest.mark.phase(5)
+async def test_a_healthy_sink_changes_nothing_when_the_pipeline_fails_closed() -> None:
+    pipeline, events, sink = build(fail_closed=True)
+
+    result = await pipeline.run(make_ctx())
+
+    assert not result.is_error and "dispatch" in events
     assert [r["outcome"] for r in sink.records] == ["ok"]

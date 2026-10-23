@@ -59,7 +59,7 @@ async def test_denied_call_returns_reasons(
     assert demo_upstreams.state("bank")["calls"] == []
     assert demo_upstreams.state("bank")["transfers"] == []
     [record] = keystone_app.audit.records
-    assert (record["decision"], record["reasons"], record["decision_source"]) == (
+    assert (record["effect"], record["reasons"], record["decision_source"]) == (
         "deny",
         ["default-deny"],
         "policy",
@@ -81,7 +81,7 @@ async def test_an_operator_is_allowed_and_the_audit_names_the_policy(
     assert not result.is_error
     assert len(demo_upstreams.state("bank")["transfers"]) == 1  # type: ignore[arg-type]
     [record] = keystone_app.audit.records
-    assert (record["decision"], record["reasons"], record["decision_source"]) == (
+    assert (record["effect"], record["reasons"], record["decision_source"]) == (
         "allow",
         ["operators-high"],
         "policy",

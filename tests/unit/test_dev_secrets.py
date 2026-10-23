@@ -125,3 +125,22 @@ def test_every_credential_the_compose_config_takes_from_the_environment_lines_up
         # for either files server), so the check is on the value, which is the same expression.
         value = services["keystone"]["environment"][variable]
         assert value in services[host]["environment"].values(), f"{host} lacks {variable}"
+
+
+@pytest.mark.phase(5)
+def test_the_app_role_password_is_the_same_in_the_code_the_migration_and_env_example() -> None:
+    from keystone.db.roles import APP_ROLE, DEV_APP_PASSWORD
+
+    migration = (ROOT / "src/keystone/db/migrations/versions/0006_app_role.py").read_text()
+    in_migration = re.search(r'^DEV_PASSWORD = "([^"]+)"', migration, re.MULTILINE)
+    role_in_migration = re.search(r'^ROLE = "([^"]+)"', migration, re.MULTILINE)
+
+    assert in_migration is not None and role_in_migration is not None
+    assert in_migration.group(1) == DEV_APP_PASSWORD == env_example()["KEYSTONE_APP_DB_PASSWORD"]
+    assert role_in_migration.group(1) == APP_ROLE
+    # The compose default is checked against .env.example by the test above. Keystone runs as the
+    # app role and migrates as the owner.
+    environment = COMPOSE["services"]["keystone"]["environment"]
+    assert environment["KEYSTONE_DATABASE_URL"].startswith(f"postgresql+asyncpg://{APP_ROLE}:")
+    assert environment["KEYSTONE_MIGRATE_DATABASE_URL"].startswith("postgresql+asyncpg://keystone:")
+    assert environment["KEYSTONE_APP_DB_PASSWORD"].startswith("${KEYSTONE_APP_DB_PASSWORD:-")

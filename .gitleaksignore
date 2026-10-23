@@ -1,0 +1,6 @@
+# Findings in history that are not secrets: the redaction test's fixtures, as first committed.
+# Each is a made-up private key block and a made-up bearer token, put there to be masked. The
+# test now builds the block at run time, so no later commit repeats them. Fingerprint format:
+# commit:file:rule:line.
+06ae64455b2215e0ab7e3c8babf983135a00f5b3:tests/unit/test_redact.py:private-key:21
+06ae64455b2215e0ab7e3c8babf983135a00f5b3:tests/unit/test_redact.py:curl-auth-header:35

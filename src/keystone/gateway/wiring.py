@@ -19,6 +19,7 @@ from keystone.gateway.stubs import (
 from keystone.gateway.stubs import PolicyInterceptor as StubPolicyInterceptor
 from keystone.policy.engine import PolicyEngine
 from keystone.settings import Settings
+from keystone.telemetry.metrics import Metrics
 from keystone.telemetry.tracing import NoopTracer, Tracer
 
 # Plan section 3.4. The order never changes; a phase replaces the class in a slot.
@@ -40,6 +41,8 @@ class PipelineDeps:
     dispatcher: Dispatcher
     audit: AuditSink
     tracer: Tracer = field(default_factory=NoopTracer)
+    # Where the pipeline counts calls and times stages. Without one it counts nothing.
+    metrics: Metrics | None = None
     # Where the pinning slot reads a tool's current status. Without one it trusts the tool it was
     # handed, which is what the unit tests want.
     tool_states: ToolStateLookup | None = None
@@ -73,4 +76,11 @@ def build_pipeline(
         "metering": MeteringInterceptor(),
     }
     interceptors = [overrides.get(slot, stubs[slot]) for slot in INTERCEPTOR_ORDER]
-    return Pipeline(interceptors, deps.dispatcher, deps.audit, deps.tracer)
+    return Pipeline(
+        interceptors,
+        deps.dispatcher,
+        deps.audit,
+        deps.tracer,
+        fail_closed=settings.audit_fail_closed,
+        metrics=deps.metrics,
+    )

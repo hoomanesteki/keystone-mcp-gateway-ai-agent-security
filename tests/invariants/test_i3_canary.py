@@ -9,8 +9,8 @@ holds the request headers, the way a careless HTTP library's can. Everything an 
 read is then searched for the canary: Keystone's logs (structlog and the standard library), the
 audit records, and every result and rejection the agent received.
 
-Spans are not searched: the pipeline has no tracer but the no-op one until Phase 5, which extends
-this test.
+Since KS-504 the spans are searched too: the app runs with a tracer that keeps its spans in memory,
+and every name, attribute, event and status in them is part of what an observer could read.
 """
 
 import io
@@ -30,6 +30,7 @@ from keystone.registry.config import ToolOverride, UpstreamConfig
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.reflecting_upstream import reflecting_upstream
 from tests.fixtures.servers import ServerThread
+from tests.fixtures.tracing import dump, traced
 from tests.fixtures.upstreams import DemoUpstreams
 
 pytestmark = [pytest.mark.phase(3), pytest.mark.services]
@@ -136,12 +137,15 @@ async def run_session(app: KeystoneApp, mcp_client: McpConnect) -> list[str]:
     return received
 
 
-def started(factory: Factory, keyed: DemoUpstreams, reflector: ServerThread) -> KeystoneApp:
+def started(
+    factory: Factory, keyed: DemoUpstreams, reflector: ServerThread, **options: Any
+) -> KeystoneApp:
     return factory(
         keyed=True,
         settings={"upstreams": [echo_upstream(keyed), reflect_upstream(reflector)]},
         interceptors={"policy": Policy()},
         wrap_dispatcher=LeakyDispatcher,
+        **options,
     )
 
 
@@ -154,7 +158,8 @@ async def test_i3(
     log_buffer: io.StringIO,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    app = started(keystone_app_factory, keyed_upstreams, reflector)
+    tracer, exporter = traced()
+    app = started(keystone_app_factory, keyed_upstreams, reflector, tracer=tracer)
     # The startup stored and read the credential. Forget everything the scrubber learned from it,
     # so that what protects the session below is the vault registering each secret it decrypts.
     SECRETS.clear()
@@ -167,10 +172,11 @@ async def test_i3(
         "standard library logs": caplog.text,
         "audit records": json.dumps(app.audit.records, default=str),
         "results and rejections": "\n".join(received),
+        "spans": dump(exporter.get_finished_spans()),
     }
     # The search is only worth something if the session really happened and really logged.
     assert keyed_upstreams.state("echo")["api_key_received"] is True  # the canary was sent
-    assert [(r["tool"], r["outcome"]) for r in app.audit.records] == [
+    assert [(r["tool_name"], r["outcome"]) for r in app.audit.records] == [
         ("echo__echo", "ok"),
         ("reflect__show_key", "ok"),
         ("reflect__shout", "ok"),
@@ -194,6 +200,9 @@ async def test_i3(
         "KS_UPSTREAM_ERROR",
     ]
     assert "startup_sync" in logs and "dispatch_failed" in logs
+    assert (
+        "keystone.tool_call" in observed["spans"] and "keystone.upstream.call" in observed["spans"]
+    )
     assert "[redacted]" in logs  # the exception that held the headers was masked, not absent
     # The reflecting upstream did return the key; what the agent got in its place is the marker.
     for shown in received[2:4]:
@@ -251,3 +260,17 @@ async def test_the_result_search_can_fail(
     assert result.structured_content is not None
     assert result.structured_content["received"] == canary_secret
     assert canary_secret in result.model_dump_json(by_alias=True)
+
+
+@pytest.mark.phase(5)
+def test_the_span_search_can_fail(canary_secret: str) -> None:
+    # A span that does hold the canary, in an attribute or in an exception recorded on it, is found.
+    tracer, exporter = traced()
+
+    with tracer.span("keystone.upstream.call", {"keystone.upstream": canary_secret}):
+        pass
+    with pytest.raises(RuntimeError), tracer._tracer.start_as_current_span("leaky"):
+        raise RuntimeError(f"the upstream refused {canary_secret}")
+
+    found = dump(exporter.get_finished_spans())
+    assert found.count(canary_secret) >= 2  # the attribute, and the exception's text

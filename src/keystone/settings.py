@@ -87,6 +87,20 @@ class PolicySettings(BaseModel):
     list_cache_ttl_s: float = Field(default=60.0, ge=0)
 
 
+class AuditSettings(BaseModel):
+    """What the gateway does when the audit log cannot be written (KS-501)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # True: while the audit writer is unhealthy, every call is refused before it runs, because an
+    # action with no record is what an audit log exists to prevent. Unset means true, except when
+    # env is dev, where a stopped Postgres should not stop the demo.
+    fail_closed: bool | None = None
+    # Argument keys whose values are replaced in the log, besides the ones that look like secrets
+    # (secret, token, password, api key, authorization). Compared whole, without regard to case.
+    redact_keys: list[str] = Field(default_factory=list)
+
+
 class HealthSettings(BaseModel):
     """How the gateway watches its upstreams (KS-209)."""
 
@@ -131,6 +145,10 @@ class Settings(BaseSettings):
 
     env: Literal["dev", "test", "prod"] = "dev"
     database_url: SecretStr = SecretStr(DEFAULT_DATABASE_URL)
+    # Where migrations connect, when that is not `database_url`. The application runs as a role
+    # that may only add audit records (KS-503), and creating tables takes the role that owns them.
+    # Without it, migrations use `database_url`.
+    migrate_database_url: SecretStr | None = None
     redis_url: SecretStr = SecretStr(DEFAULT_REDIS_URL)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     config_path: Path | None = Field(default=None, validation_alias=CONFIG_ENV_VAR)
@@ -141,6 +159,7 @@ class Settings(BaseSettings):
     allow_private_upstreams: bool = False
     registry: RegistrySettings = Field(default_factory=RegistrySettings)
     health: HealthSettings = Field(default_factory=HealthSettings)
+    audit: AuditSettings = Field(default_factory=AuditSettings)
     policy: PolicySettings = Field(default_factory=PolicySettings)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
     auth: AuthSettings = Field(default_factory=AuthSettings)
@@ -151,6 +170,12 @@ class Settings(BaseSettings):
     oidc_issuer: str | None = None
     oidc_audience: str = "keystone"
     oidc_discovery_url: str | None = None
+    # The one origin a browser may call the admin API from (the console, KS-605). CORS refuses any
+    # other.
+    console_origin: str = "http://localhost:5173"
+    # Where traces go: an OTLP/HTTP endpoint such as http://jaeger:4318 (KS-504). Without it no
+    # spans are made, and audit rows carry no trace id.
+    otlp_endpoint: str | None = None
     # The address clients use to reach Keystone, for the sign-in metadata (RFC 9728). Without it
     # the address of the request is used.
     public_base_url: str | None = None
@@ -161,6 +186,13 @@ class Settings(BaseSettings):
     # Who every caller is when `auth.mode` is `none`. It exists only then.
     dev_principal: Principal | None = None
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))
+
+    @property
+    def audit_fail_closed(self) -> bool:
+        """Whether an unhealthy audit writer stops calls: `audit.fail_closed`, or true unless env
+        is dev."""
+        configured = self.audit.fail_closed
+        return configured if configured is not None else self.env != "dev"
 
     @model_validator(mode="after")
     def _dev_principal_only_without_authentication(self) -> "Settings":
@@ -173,7 +205,7 @@ class Settings(BaseSettings):
             raise ValueError("dev_principal needs auth.mode none")
         return self
 
-    @field_validator("oidc_issuer", "oidc_discovery_url", "public_base_url")
+    @field_validator("oidc_issuer", "oidc_discovery_url", "public_base_url", "otlp_endpoint")
     @classmethod
     def _http_url(cls, value: str | None, info: ValidationInfo) -> str | None:
         if not value:
@@ -182,6 +214,17 @@ class Settings(BaseSettings):
         if parts.scheme not in ("http", "https") or not parts.netloc:
             raise ValueError(f"{info.field_name} must be an http or https URL")
         return value.rstrip("/") if info.field_name == "public_base_url" else value
+
+    @field_validator("console_origin")
+    @classmethod
+    def _an_origin(cls, value: str) -> str:
+        """scheme://host[:port] and nothing after it: that is what a browser sends as Origin."""
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.netloc or parts.path not in ("", "/"):
+            raise ValueError("console_origin must look like http://localhost:5173")
+        if parts.query or parts.fragment or parts.username or parts.password:
+            raise ValueError("console_origin must look like http://localhost:5173")
+        return f"{parts.scheme}://{parts.netloc}"
 
     @field_validator("log_level", mode="before")
     @classmethod

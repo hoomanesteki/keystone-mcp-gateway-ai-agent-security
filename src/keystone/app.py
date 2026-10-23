@@ -1,18 +1,19 @@
 import os
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Any
 
 import anyio
 import structlog
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from redis.asyncio import Redis
 
 from keystone import __version__
-from keystone.admin.api import create_admin_router
-from keystone.admin.auth import AdminAuth, AdminRefused, admin_refused_handler
-from keystone.audit.sink import InMemoryAuditSink
+from keystone.admin.api import PREFIX, AdminDeps, create_admin_app
+from keystone.admin.auth import AdminAuth
+from keystone.admin.tools import ToolAdmin
+from keystone.audit.redact import RedactionConfig
+from keystone.audit.sink import PostgresAuditSink
 from keystone.db.session import create_engine, make_sessionmaker
 from keystone.db.tenants import upsert_tenants
 from keystone.gateway.dispatch import UpstreamDispatcher
@@ -21,7 +22,12 @@ from keystone.gateway.interceptors.policy import MemoryListCache, PolicyToolFilt
 from keystone.gateway.pipeline import AuditSink, Dispatcher, Interceptor
 from keystone.gateway.server import Gateway, mount_mcp
 from keystone.gateway.session_repo import SessionRepo
-from keystone.gateway.sessions import InMemorySessionStore, RedisSessionStore, SessionStore
+from keystone.gateway.sessions import (
+    InMemorySessionStore,
+    RedisSessionStore,
+    SessionDirectory,
+    SessionStore,
+)
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
 from keystone.gateway.wiring import PipelineDeps, build_pipeline
 from keystone.health import check_dependencies, upstream_statuses
@@ -29,7 +35,7 @@ from keystone.identity.credential_repo import vault_from_settings
 from keystone.identity.metadata import add_metadata_route
 from keystone.identity.middleware import Authenticator
 from keystone.identity.vault import VaultError
-from keystone.policy.engine import CedarPolicyEngine
+from keystone.policy.engine import CedarPolicyEngine, ObservedEngine
 from keystone.policy.schema_info import args_fields
 from keystone.policy.store import PolicyStore, reload_on_sighup
 from keystone.policy.versions import PolicyVersionRepo
@@ -43,8 +49,12 @@ from keystone.registry.repo import ToolRepo, UpstreamRepo
 from keystone.registry.service import RegistryService
 from keystone.registry.sync import RegistrySyncer
 from keystone.settings import Settings
+from keystone.telemetry.metrics import CONTENT_TYPE_LATEST, Metrics
+from keystone.telemetry.tracing import Tracer, build_tracer
 
 log = structlog.get_logger()
+
+TRACER_SHUTDOWN_S = 10.0
 
 
 def create_app(
@@ -54,11 +64,16 @@ def create_app(
     interceptors: dict[str, Interceptor] | None = None,
     wrap_dispatcher: Callable[[Dispatcher], Dispatcher] | None = None,
     environ: Mapping[str, str] | None = None,
+    tracer: Tracer | None = None,
 ) -> FastAPI:
     """Build the app. The keyword arguments are seams for tests: a different audit sink, a
-    real interceptor in one slot, a spy around the dispatcher, or the environment that upstream
-    credentials are read from (the process environment by default)."""
+    real interceptor in one slot, a spy around the dispatcher, the environment that upstream
+    credentials are read from (the process environment by default), or a tracer that keeps its
+    spans in memory."""
     settings = settings or Settings()
+    metrics = Metrics(
+        tenants=[t.id for t in settings.tenants], upstreams=[u.id for u in settings.upstreams]
+    )
     # Refuses to build an app whose authentication cannot work, instead of one that answers 401
     # to everybody.
     authenticator = Authenticator(settings)
@@ -98,7 +113,9 @@ def create_app(
         environments=stdio_environments(settings.upstreams),
         service_headers=service_headers,
     )
-    registry = RegistryService(syncer, cache_ttl_s=settings.registry.cache_ttl_s)
+    registry = RegistryService(
+        syncer, cache_ttl_s=settings.registry.cache_ttl_s, on_load=metrics.tools_loaded
+    )
     health = UpstreamHealth(
         pool,
         syncer.upstreams,
@@ -109,14 +126,25 @@ def create_app(
         down_after=settings.health.down_after,
         service_headers=service_headers,
     )
-    audit = audit or InMemoryAuditSink()
+    tracer = tracer or build_tracer(settings.otlp_endpoint)
+    audit = audit or PostgresAuditSink(
+        sessions, metrics=metrics, redaction=RedactionConfig.of(settings.audit.redact_keys)
+    )
     dispatcher: Dispatcher = UpstreamDispatcher(pool, health)
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
-    policy_engine = CedarPolicyEngine(policies)
+    policy_engine = ObservedEngine(CedarPolicyEngine(policies), metrics.policy_evaluated)
     pipeline = build_pipeline(
         settings,
-        PipelineDeps(dispatcher, audit, tool_states=registry, vault=vault, policy=policy_engine),
+        PipelineDeps(
+            dispatcher,
+            audit,
+            tracer=tracer,
+            metrics=metrics,
+            tool_states=registry,
+            vault=vault,
+            policy=policy_engine,
+        ),
         interceptors,
     )
     # An empty KEYSTONE_REDIS_URL keeps session state in this process, for a single-process setup.
@@ -159,6 +187,10 @@ def create_app(
             # One task enters and leaves the pool, the sync loop and the session manager, as
             # the SDK's cancel scopes require (engineering note 1).
             async with AsyncExitStack() as stack:
+                # Entered first, so it is left last: the writer flushes what the calls that were
+                # still running when the server stopped have queued.
+                if isinstance(audit, PostgresAuditSink):
+                    await stack.enter_async_context(audit)
                 await stack.enter_async_context(pool)
                 # An upstream that is down now gets an error in its report and in `last_error`,
                 # and the periodic sync tries it again. It does not stop startup.
@@ -173,8 +205,21 @@ def create_app(
             if redis is not None:
                 await redis.aclose()
             await engine.dispose()
+            # Spans leave in batches; send the last ones, but never wait long for a collector that
+            # is not there.
+            with anyio.CancelScope(shield=True), anyio.move_on_after(TRACER_SHUTDOWN_S):
+                await anyio.to_thread.run_sync(tracer.shutdown)
 
-    app = FastAPI(title="Keystone", version=__version__, lifespan=lifespan)
+    # No schema or docs for the app as a whole: the admin API serves its own at
+    # /admin/api/v1/openapi.json, and the rest is not described to strangers.
+    app = FastAPI(
+        title="Keystone",
+        version=__version__,
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.state.settings = settings
     app.state.engine = engine
     app.state.sessionmaker = sessions
@@ -182,36 +227,32 @@ def create_app(
     app.state.health = health
     app.state.gateway = gateway
     app.state.audit = audit
+    app.state.metrics = metrics
     app.state.authenticator = authenticator
     app.state.vault = vault
     app.state.policies = policies
-    app.add_exception_handler(AdminRefused, admin_refused_handler)
-    app.include_router(create_admin_router(AdminAuth(authenticator), policies))
+    # The admin API is an app of its own under a prefix: its own schema, errors and CORS rule.
+    admin_api = create_admin_app(
+        AdminDeps(
+            auth=AdminAuth(authenticator),
+            sessions=sessions,
+            tools=ToolAdmin(sessions, on_change=registry.invalidate),
+            policies=policies,
+            console_origin=settings.console_origin,
+            session_directory=session_store
+            if isinstance(session_store, SessionDirectory)
+            else None,
+        )
+    )
+    app.mount(PREFIX, admin_api)
     manager = mount_mcp(app, gateway, authenticator)
     add_metadata_route(app, settings)
 
-    if settings.env != "prod" and isinstance(audit, InMemoryAuditSink):
-        sink = audit
-
-        @app.get("/_dev/audit")
-        async def dev_audit() -> dict[str, Any]:
-            """How many calls the in-memory audit sink holds, and the last 50 with the policy's
-            decision and reasons, for the demo and the smoke scripts. The admin API replaces it in
-            Phase 5. It is not mounted in prod."""
-            recent = sink.records[-50:]
-            return {
-                "count": len(sink.records),
-                "recent": [
-                    {
-                        "call_id": r["call_id"],
-                        "tool": r["tool"],
-                        "outcome": r["outcome"],
-                        "effect": r["decision"],
-                        "reasons": r["reasons"],
-                    }
-                    for r in recent
-                ],
-            }
+    @app.get("/metrics", include_in_schema=False)
+    async def prometheus() -> Response:
+        """The Prometheus text format. It needs no token, as a scrape sends none, and it holds
+        no user, session or argument: keep it off the public network."""
+        return Response(metrics.render(), media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

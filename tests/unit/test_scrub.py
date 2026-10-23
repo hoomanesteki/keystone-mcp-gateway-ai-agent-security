@@ -191,7 +191,13 @@ class EchoingClient:
     def __init__(self, headers: Mapping[str, SecretStr]) -> None:
         self.seen = {name: value.get_secret_value() for name, value in headers.items()}
 
-    async def call_tool(self, name: str, args: dict[str, Any], timeout_s: float) -> ToolResult:
+    async def call_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        timeout_s: float,
+        meta: Mapping[str, str] | None = None,
+    ) -> ToolResult:
         shown = ", ".join(f"{name}: {value}" for name, value in self.seen.items())
         return ToolResult(
             content=[{"type": "text", "text": f"request headers were {shown}"}],

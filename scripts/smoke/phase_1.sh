@@ -12,7 +12,6 @@ cd "$(dirname "$0")/../.."
 [ -f .env ] && set -a && . ./.env && set +a
 
 URL=${KEYSTONE_URL:-http://localhost:${KEYSTONE_PORT:-8080}/mcp}
-BASE=${URL%/mcp}
 SCRIPT=examples/agents/scripts/demo_p1.yaml
 failed=0
 
@@ -29,21 +28,20 @@ for port in "${MAIL_PORT:-8101}" "${FILES_PORT:-8102}" "${BANK_PORT:-8103}" "${E
     || { echo "cannot reset the upstream on :${port}. Is the stack up (make up)?" >&2; exit 1; }
 done
 
-# The in-memory audit sink counts every call since Keystone started, so compare before and after.
-audit_count() {
-  curl -fsS --max-time 5 "${BASE}/_dev/audit" | sed -E 's/.*"count":([0-9]+).*/\1/'
-}
-before=$(audit_count) || { echo "cannot read ${BASE}/_dev/audit" >&2; exit 1; }
+# The audit log holds every call since the database was created, so count what is new.
+# shellcheck source=scripts/smoke/audit_lib.sh
+. scripts/smoke/audit_lib.sh
+before=$(audit_last_seq) || { echo "cannot read the audit log. Is the stack up (make up)?" >&2; exit 1; }
 
 transcript=$(uv run python -m examples.agents.scripted_agent \
   --url "$URL" --script "$SCRIPT" --format text 2>&1)
 agent_status=$?
 echo "$transcript"
 
-after=$(audit_count) || { echo "cannot read ${BASE}/_dev/audit" >&2; exit 1; }
-audited=$((after - before))
 calls=$(grep -cE '^[0-9]+\. ok   [a-z_]+__' <<<"$transcript")
 steps=$(grep -cE '^[0-9]+\. ok  ' <<<"$transcript")
+audit_wait_for_added "$before" "$calls" 10
+audited=$(audit_added_since "$before") || { echo "cannot read the audit log" >&2; exit 1; }
 
 [ "$agent_status" -eq 0 ] || fail "the scripted agent exited with ${agent_status}"
 grep -qE '^[0-9]+\. FAIL' <<<"$transcript" && fail "a step failed"

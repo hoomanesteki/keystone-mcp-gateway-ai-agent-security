@@ -294,3 +294,81 @@ def test_master_keys_are_a_secret_that_settings_never_print(
     assert settings.master_keys is not None
     assert settings.master_keys.get_secret_value() == f"{key},another"
     assert key not in repr(settings) and key not in settings.model_dump_json()
+
+
+@pytest.mark.phase(5)
+@pytest.mark.parametrize(
+    ("env", "configured", "expected"),
+    [
+        ("dev", None, False),
+        ("test", None, True),
+        ("prod", None, True),
+        ("dev", True, True),
+        ("prod", False, False),
+    ],
+)
+def test_the_audit_log_fails_closed_unless_env_is_dev(
+    env: str, configured: bool | None, expected: bool
+) -> None:
+    from keystone.settings import AuditSettings
+
+    settings = Settings(env=env, audit=AuditSettings(fail_closed=configured))  # type: ignore[arg-type]
+
+    assert settings.audit_fail_closed is expected
+
+
+@pytest.mark.phase(5)
+def test_audit_fail_closed_comes_from_the_environment_and_the_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "keystone.yaml"
+    config.write_text("audit:\n  fail_closed: false\n")
+
+    assert Settings(env="prod", config_path=config).audit_fail_closed is False
+
+    monkeypatch.setenv("KEYSTONE_AUDIT__FAIL_CLOSED", "true")
+    assert Settings(env="dev", config_path=config).audit_fail_closed is True
+
+
+@pytest.mark.phase(5)
+def test_the_otlp_endpoint_is_off_by_default_and_must_be_a_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert Settings().otlp_endpoint is None
+    monkeypatch.setenv("KEYSTONE_OTLP_ENDPOINT", "http://jaeger:4318")
+    assert Settings().otlp_endpoint == "http://jaeger:4318"
+    monkeypatch.setenv("KEYSTONE_OTLP_ENDPOINT", "jaeger:4318")
+    with pytest.raises(ValueError, match="otlp_endpoint"):
+        Settings()
+
+
+@pytest.mark.phase(5)
+def test_the_console_origin_defaults_to_the_dev_console_and_is_cleaned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert Settings().console_origin == "http://localhost:5173"
+    monkeypatch.setenv("KEYSTONE_CONSOLE_ORIGIN", "https://console.example/")
+    assert Settings().console_origin == "https://console.example"
+    monkeypatch.setenv("KEYSTONE_CONSOLE_ORIGIN", "https://console.example:8443")
+    assert Settings().console_origin == "https://console.example:8443"
+
+
+@pytest.mark.phase(5)
+@pytest.mark.parametrize(
+    "value",
+    [
+        "localhost:5173",
+        "ftp://console.example",
+        "https://console.example/app",
+        "https://user:pw@console.example",
+        "https://console.example?x=1",
+        "https://console.example#top",
+        "*",
+        "",
+    ],
+)
+def test_the_console_origin_must_be_an_origin(value: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KEYSTONE_CONSOLE_ORIGIN", value)
+
+    with pytest.raises(ValueError, match="console_origin"):
+        Settings()

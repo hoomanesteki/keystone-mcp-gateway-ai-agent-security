@@ -1,0 +1,151 @@
+"""What the audit log keeps of a call's arguments (KS-502, ADR-0009).
+
+The log must be safe to read and still work as evidence. So the arguments are stored masked, and
+next to them a digest of the original that lets anyone who holds the original prove what was sent.
+
+- A key that looks like a secret (the log scrubber's rule) or that the operator lists has its value
+  replaced by "[redacted]", whatever the value is.
+- A string has these patterns masked: payment card numbers, US social security numbers, bearer
+  tokens, AWS access key ids and private key blocks.
+- A string over 2,048 characters is cut to its first 256 characters and the sha256 of the whole.
+- The result is capped in size, so a call cannot make a row as large as its arguments.
+
+Masking runs on the whole string before it is cut, so a card number across the cut is masked, not
+half kept.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from keystone.audit.normalize import stable_json
+from keystone.core.canonical import canonical_json, sha256_hex
+from keystone.logging import REDACTED, SENSITIVE_KEY
+
+MAX_STRING = 2048
+KEPT_OF_LONG_STRING = 256
+MAX_DEPTH = 32
+MAX_KEY = 256
+# What one row may hold of the arguments, as canonical JSON. A call's arguments can be 1 MiB.
+MAX_REDACTED_BYTES = 16 * 1024
+TRUNCATED = "[truncated]"
+
+# Thirteen to nineteen digits, with single spaces or dashes between them, not part of a longer run
+# of digits. Luhn decides whether it is a card number.
+CARD = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
+SSN = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")
+BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
+AWS_KEY_ID = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
+PRIVATE_KEY = re.compile(
+    r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----.*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|\Z)",
+    re.DOTALL,
+)
+
+
+@dataclass(frozen=True)
+class RedactionConfig:
+    """Keys to mask besides the ones that look like secrets. Compared whole and without regard to
+    case: "SSN" masks the value of a key called "ssn", not of "ssn_checked"."""
+
+    keys: frozenset[str] = frozenset()
+
+    @classmethod
+    def of(cls, keys: Iterable[str]) -> RedactionConfig:
+        return cls(frozenset(key.casefold() for key in keys))
+
+
+def luhn_valid(digits: str) -> bool:
+    total = 0
+    for index, char in enumerate(reversed(digits)):
+        number = int(char)
+        if index % 2 == 1:
+            number *= 2
+            if number > 9:
+                number -= 9
+        total += number
+    return total % 10 == 0
+
+
+def _mask_card(match: re.Match[str]) -> str:
+    digits = re.sub(r"\D", "", match.group())
+    if 13 <= len(digits) <= 19 and luhn_valid(digits):
+        return "[redacted:card]"
+    return match.group()
+
+
+def mask_patterns(text: str) -> str:
+    """The string with every secret-looking pattern replaced. A private key goes first, because
+    its body can hold anything the other patterns look for."""
+    text = PRIVATE_KEY.sub("[redacted:private-key]", text)
+    text = BEARER.sub("Bearer [redacted]", text)
+    text = AWS_KEY_ID.sub("[redacted:aws-key-id]", text)
+    text = SSN.sub("[redacted:ssn]", text)
+    return CARD.sub(_mask_card, text)
+
+
+def redact_string(text: str) -> str:
+    masked = mask_patterns(text)
+    if len(text) <= MAX_STRING:
+        return masked
+    whole = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+    return f"{masked[:KEPT_OF_LONG_STRING]}...[sha256:{whole}]"
+
+
+def _is_secret_key(key: str, config: RedactionConfig) -> bool:
+    return bool(SENSITIVE_KEY.search(key)) or key.casefold() in config.keys
+
+
+def _redact(value: Any, config: RedactionConfig, depth: int) -> Any:
+    if depth > MAX_DEPTH:
+        return TRUNCATED
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        return redact_string(value)
+    if isinstance(value, Mapping):
+        out: dict[str, Any] = {}
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            shown = key if len(key) <= MAX_KEY else key[:MAX_KEY] + TRUNCATED
+            out[shown] = (
+                REDACTED if _is_secret_key(key, config) else _redact(item, config, depth + 1)
+            )
+        return out
+    if isinstance(value, list | tuple):
+        return [_redact(item, config, depth + 1) for item in value]
+    return redact_string(str(value))
+
+
+def redact(arguments: Mapping[str, Any], config: RedactionConfig | None = None) -> dict[str, Any]:
+    """The arguments with secrets masked and long strings cut. Numbers, booleans and null stay."""
+    result = _redact(arguments, config or RedactionConfig(), 0)
+    return result if isinstance(result, dict) else {}
+
+
+def args_digest(arguments: Mapping[str, Any]) -> str | None:
+    """sha256 of the canonical JSON of the arguments as they arrived, hex. None for arguments that
+    are not JSON (the pipeline refuses those, and the record is still written)."""
+    try:
+        return sha256_hex(canonical_json(arguments))
+    except Exception:
+        return None
+
+
+def audit_arguments(
+    arguments: Mapping[str, Any], config: RedactionConfig | None = None
+) -> tuple[dict[str, Any], str | None]:
+    """What a record stores of a call's arguments: the redacted form, in the shape jsonb returns
+    unchanged and no larger than MAX_REDACTED_BYTES, and the digest of the original."""
+    digest = args_digest(arguments)
+    try:
+        shown = stable_json(redact(arguments, config))
+        size = len(canonical_json(shown))
+    except Exception:
+        return {TRUNCATED: "the arguments could not be shown"}, digest
+    if size > MAX_REDACTED_BYTES:
+        return {TRUNCATED: f"{size} bytes after redaction"}, digest
+    return shown, digest
