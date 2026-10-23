@@ -1,6 +1,12 @@
 import { describe, expect, test } from "vitest";
 import { tool } from "../test/fixtures";
-import { describeReason, describeScreening, groupByUpstream, sentences } from "./tools";
+import {
+  describeReason,
+  describeScan,
+  describeScreening,
+  groupByUpstream,
+  sentences,
+} from "./tools";
 
 describe("why a tool is held", () => {
   test.each([
@@ -8,6 +14,10 @@ describe("why a tool is held", () => {
     ["description_changed,schema_changed", "The description changed and the input schema changed"],
     [
       "suspicious_description:hidden_unicode",
+      "A new tool whose description matched a screening rule",
+    ],
+    [
+      "suspicious_description:role_spoof,tool_directive score=0.70 in=input_schema.properties.note",
       "A new tool whose description matched a screening rule",
     ],
     ["removed_from_upstream", "The upstream no longer lists it"],
@@ -26,6 +36,31 @@ describe("why a tool is held", () => {
       "hidden characters",
       "mystery",
     ]);
+    expect(describeScreening(["role_spoof", "tool_directive"])).toEqual([
+      "text that poses as the system or the assistant",
+      "an instruction to call a tool or to send something to an address",
+    ]);
+  });
+
+  test("the scanner's score and place are read from the reason", () => {
+    expect(
+      describeScan(
+        "suspicious_description:role_spoof,tool_directive score=0.70 in=input_schema.properties.note",
+      ),
+    ).toEqual({ score: "0.70", where: "input_schema.properties.note" });
+    expect(describeScan("suspicious_description:oversized score=0.00 in=description")).toEqual({
+      score: "0.00",
+      where: "description",
+    });
+  });
+
+  test.each([
+    null,
+    "suspicious_description:hidden_unicode",
+    "description_changed",
+    "description_changed score=0.70 in=description",
+  ])("%s has no score to read", (reason) => {
+    expect(describeScan(reason)).toBeNull();
   });
 });
 

@@ -165,6 +165,25 @@ test("explains a tool that is held without a changed definition", async () => {
   ).toBeGreaterThan(0);
 });
 
+test("tells the reviewer what the scanner scored and where", async () => {
+  const api = toolsApi([
+    tool({
+      name: "crm__lookup",
+      upstream: "crm",
+      status: "quarantined",
+      reason:
+        "suspicious_description:role_spoof,tool_directive score=0.70 in=input_schema.properties.note",
+    }),
+  ]);
+  renderApp({ path: "/tools", session: PEOPLE.root, api });
+
+  await userEvent.click(await screen.findByRole("button", { name: "Review change" }));
+
+  expect(await screen.findByText(/The scanner scored it/)).toBeVisible();
+  expect(screen.getByText("0.70")).toBeVisible();
+  expect(screen.getByText("input_schema.properties.note")).toBeVisible();
+});
+
 test("groups the tools by upstream with risk, tags, status and cost", async () => {
   renderApp({ path: "/tools", session: PEOPLE.root, api: held() });
 

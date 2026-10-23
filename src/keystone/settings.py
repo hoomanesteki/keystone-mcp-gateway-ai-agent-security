@@ -211,6 +211,10 @@ class ScannerSettings(BaseModel):
     # the scan says it was cut. Python regular expressions hold the interpreter while they run, so
     # the size of a scan is also the time the gateway is busy with it.
     max_scan_chars: int = Field(default=200_000, ge=1_000, le=50_000_000)
+    # A new tool whose description, or the description of a field of its input schema, scores this
+    # much or more with the rules is held until a person has read it (KS-706). It is apart from the
+    # thresholds above: a person reads a description once, and an output is read on every call.
+    description_threshold: float = Field(default=0.5, gt=0, le=1)
 
     @field_validator("allowed_domains")
     @classmethod
