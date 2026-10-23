@@ -43,6 +43,11 @@ class SessionDirectory(Protocol):
 
     async def list_for_tenant(self, tenant_id: str, limit: int) -> list[SessionState]: ...
 
+    async def peek(self, session_id: str) -> SessionState | None:
+        """One session as it is, without restarting its clock. An approver looking at a request
+        must not keep the agent's session alive."""
+        ...
+
 
 class SessionRows(Protocol):
     """The durable row behind a session (`SessionRepo`)."""
@@ -84,6 +89,9 @@ class InMemorySessionStore:
         self._sessions.move_to_end(state.session_id)
         while len(self._sessions) > self._max:
             self._sessions.popitem(last=False)
+
+    async def peek(self, session_id: str) -> SessionState | None:
+        return self._sessions.get(session_id)
 
     async def list_for_tenant(self, tenant_id: str, limit: int) -> list[SessionState]:
         """The tenant's sessions, the most recently used first."""
@@ -151,6 +159,15 @@ class RedisSessionStore:
             # Not ours or damaged. Treat it as a session we have not seen: the caller creates a
             # new one over it.
             log.error("session_state_unreadable", session=session_id)
+            return None
+
+    async def peek(self, session_id: str) -> SessionState | None:
+        raw = await self._redis.get(session_key(session_id))
+        if raw is None:
+            return None
+        try:
+            return SessionState.model_validate_json(raw)
+        except ValidationError:
             return None
 
     async def list_for_tenant(self, tenant_id: str, limit: int) -> list[SessionState]:

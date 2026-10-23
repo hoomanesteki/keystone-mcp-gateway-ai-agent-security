@@ -254,6 +254,18 @@ class Endpoint(Protocol):
     def url(self) -> str: ...
 
 
+PATIENCE_S = 15.0
+
+
+def hold_time(app: object) -> float:
+    """The longest the app under test holds a call that needs approval, so that the client does
+    not give up before it does: an HTTP read timeout shorter than the hold ends the connection,
+    not the request. Zero for anything that is not a Keystone app."""
+    settings = getattr(getattr(getattr(app, "app", None), "state", None), "settings", None)
+    approvals = getattr(settings, "approvals", None)
+    return float(approvals.wait_seconds) if approvals is not None else 0.0
+
+
 McpConnect = Callable[..., AbstractAsyncContextManager[Client]]
 
 
@@ -264,6 +276,8 @@ def mcp_client(fake_idp: FakeIdp) -> McpConnect:  # noqa: F811
     `user` and `agent` choose another demo user (a test that calls a high-risk tool uses
     `user="olivia"`, an operator). `token` sends that exact token instead, and `token=""` sends
     none. `headers` are sent on every request besides the token (a `traceparent`, for example).
+    `patience` is how many seconds the client waits for an answer: 15 more than the longest the
+    app holds a call for approval, unless a test says otherwise (an await can wait up to 120).
     Other keyword arguments go to the MCP client.
     """
 
@@ -275,12 +289,14 @@ def mcp_client(fake_idp: FakeIdp) -> McpConnect:  # noqa: F811
         user: str = "alice",
         agent: str | None = None,
         headers: Mapping[str, str] | None = None,
+        patience: float | None = None,
         **client_options: Any,
     ) -> AsyncIterator[Client]:
         bearer = fake_idp.token_for(user, agent) if token is None else token
         sent = {"Authorization": f"Bearer {bearer}"} if bearer else {}
         sent.update(headers or {})
-        async with httpx2.AsyncClient(headers=sent, timeout=httpx2.Timeout(15)) as http:
+        wait = PATIENCE_S + hold_time(app) if patience is None else patience
+        async with httpx2.AsyncClient(headers=sent, timeout=httpx2.Timeout(wait)) as http:
             transport = streamable_http_client(app.url, http_client=http)
             async with Client(transport, **client_options) as client:
                 yield client

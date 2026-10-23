@@ -50,3 +50,17 @@ async def test_the_sessions_of_one_tenant_are_listed_newest_first() -> None:
     assert [s.session_id for s in theirs] == ["x"]
     assert [s.session_id for s in few] == ["a", "c"]
     assert await store.list_for_tenant("nobody", 10) == []
+
+
+@pytest.mark.phase(6)
+async def test_peek_reads_a_session_without_making_it_the_most_recent() -> None:
+    store = InMemorySessionStore(max_sessions=2)
+    await store.create("a", OLIVIA)
+    await store.create("b", OLIVIA)
+
+    peeked = await store.peek("a")  # an approver looks; a stays the oldest
+    await store.create("c", OLIVIA)
+
+    assert peeked is not None and peeked.session_id == "a"
+    assert await store.peek("a") is None  # dropped as the least recently used
+    assert await store.peek("missing") is None
