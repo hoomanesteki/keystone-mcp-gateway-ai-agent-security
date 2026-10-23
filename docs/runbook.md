@@ -999,8 +999,8 @@ being up.
 
 Tool output is untrusted text: an email, a web page or a file can carry an instruction for the
 agent that reads it. The scanner reads the output of a tool and says how much it looks like such an
-instruction (ADR-0011). It is a library today (`keystone.defense`): the pipeline starts to use it
-in KS-704, and until then no output is scanned.
+instruction (ADR-0011). The pipeline runs it on the output of every tool of an upstream
+(`scanner.enabled`, on by default), before the agent sees the output.
 
 The rules are in `src/keystone/defense/rules.py`, seven of them, each with a weight. A text that
 breaks several gets `1 - (1 - w1) * (1 - w2) * ...`, the chance that at least one hit is real.
@@ -1046,6 +1046,40 @@ an output that was flagged, the output is withheld. Each one counts in
 `scanner_classifier_failed`, `scanner_rules_failed` or `scanner_action_failed` with the name of the
 exception and never the text that was being read.
 
+### Flags, taint and the audit record
+
+Two slots of the pipeline use the scan, in this order (KS-704, ADR-0011):
+
+| Slot | What it does after a call | Where you see it |
+|---|---|---|
+| `output_scan` | Scans the output, applies the action for the tool's risk, and writes the scan on the call. An output that scores `injection` (0.85 and up) **taints the session**, whatever the action did to it and whatever the tool's tags are | the audit record's `scan_score` and `scan_action`; `keystone_scan_score`; `keystone_sessions_tainted_total` |
+| `session_flags` | Adds the tags `reads_untrusted` and `reads_sensitive` of the tool to the session's flags and counts the call | `keystone__whoami`; the session's Redis hash; the approval card; `context.session_flags` in a policy |
+
+What gets left out:
+
+- Keystone's own tools (`keystone__whoami`, `keystone__await_approval`) are neither scanned nor counted.
+- An error result from an upstream is scanned, because the text of an error can quote what an
+  attacker wrote, and it can taint. It adds no flag and is not counted: a call that returned nothing
+  read nothing.
+- `external_effect` and `code_exec` are not recorded as flags. The Rule of Two reads those off the
+  tool being called.
+- With `scanner.enabled: false` nothing is scanned and the audit record has no scan (`scan_score`
+  and `scan_action` are empty, which is not the same as `pass`). Flags and the call count still
+  work.
+
+`scan_action` in the audit record is one of `pass`, `annotate`, `redact`, `block` or `error`.
+`error` is a scan that could not be made: the output went through as the upstream sent it, and
+`keystone_scan_errors_total{stage="rules"}` went up. Read `scan_score` with the label thresholds
+in mind: 0.5 is `suspicious`, 0.85 is `injection`.
+
+The taint and the flags are recorded with the session store's own atomic changes, so a call held
+for approval cannot write an old copy of the session over what another call recorded (ADR-0015).
+A call sees them from the next call on. A call that is already past the policy slot when the
+taint lands is not stopped by it. A client that opens a new MCP session starts with a clean one.
+If the session store cannot record a taint or a flag, the output is withheld (`KS_OUTPUT_BLOCKED`,
+audit outcome `error`): an output that was found to be an injection and could not be recorded as
+one does not reach the agent.
+
 ### The classifier
 
 Behind the rules there is a model, `protectai/deberta-v3-base-prompt-injection-v2` by default
@@ -1068,6 +1102,11 @@ still loading, leaves the rules' score, and the result says `model: "timeout"`. 
 reads about 3,500 characters on a laptop, so raise the timeout for longer outputs and measure it
 (`scripts/bench_scanner.py --classifier`, `docs/spikes/scanner.md`). The image sets
 `HF_HUB_OFFLINE=1`: the model is in it, and the container never goes to the network for it.
+
+The gateway loads the model in the background when it starts (`scanner_classifier_ready` in the
+log when it is done, `scanner_classifier_not_ready` when it cannot), so only the first seconds of a
+run are scored by the rules alone. An app under test (`env=test`) does not, and loads it at its
+first scan.
 
 `prompt-guard-2-86m` (Llama Prompt Guard 2) is gated on Hugging Face: accept its license with an
 account, and give the gateway a token. Its labels are not verified here (ADR-0011).
@@ -1212,6 +1251,9 @@ Edit the file, not the UI: the provisioned dashboard is read-only.
 | `keystone_policy_eval_seconds` | none | A histogram of the time the policy engine took, for calls and for tool lists |
 | `keystone_audit_queue_depth` | none | Audit records accepted and not yet written |
 | `keystone_audit_failures_total` | `reason` | `flush_failed`, `record_dropped`, `queue_full`, `shutdown_dropped`, `not_running` (see Audit) |
+| `keystone_scan_score` | `tenant` | A histogram of the score of each output the scanner read, in tenths from 0.1 to 1.0. A scan that failed has no score and is not in it |
+| `keystone_sessions_tainted_total` | `tenant` | Outputs that scored as an injection in a session that was not tainted yet (see Scanner) |
+| `keystone_scan_errors_total` | `stage` | A scan that failed and was worked around: `classifier`, `rules` or `action` (see Scanner) |
 
 The labels are bounded on purpose. There is no label for a user, a session or an argument: a label
 whose values come from callers would give Prometheus a series for each of them, and metrics are
@@ -1222,11 +1264,9 @@ whatever name the caller made up.
 `keystone_approvals_pending{tenant}` counts the approval requests waiting for a decision. The
 approval service sets it when it starts and after each request, decision and sweep.
 
-The metrics of Phases 7 and 8 are declared and nothing sets them yet, so the last row of the
-dashboard shows "no data" for them until then: `keystone_sessions_tainted_total`,
-`keystone_scan_score`, `keystone_rate_limited_total`, `keystone_budget_spent_usd` and
-`keystone_llm_tokens_total`. `keystone_scan_errors_total{stage}` is declared with them (the scanner
-counts a scan that failed and was worked around; see Scanner), and has no panel yet.
+The metrics of Phase 8 are declared and nothing sets them yet, so the last row of the dashboard
+shows "no data" for those panels until then: `keystone_rate_limited_total`,
+`keystone_budget_spent_usd` and `keystone_llm_tokens_total`.
 
 The dashboard has five rows: Traffic (calls per second by effect, outcome and tool, rejections by
 code), Latency (p50 and p95 of the total, p95 by stage, policy evaluation), Upstreams (errors,
