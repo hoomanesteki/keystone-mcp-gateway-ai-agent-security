@@ -1154,6 +1154,56 @@ instead of making it (it can score high). Python regular expressions hold the in
 they run, so a scan of 200,000 characters (the limit) keeps the gateway busy for about 20 ms.
 `scripts/bench_scanner.py` measures it, and `docs/spikes/scanner.md` has the numbers.
 
+### Measuring the detector
+
+`eval/detector/` measures how well the scanner tells an injection from a harmless text (KS-707). It
+runs on a dataset that is fixed and checked by hash, and what it measures goes to
+[results.md](results.md) with its date and commit. `eval/DATASETS.md` says where every part of the
+data comes from and under what license.
+
+```bash
+uv sync --extra scanner --extra eval                  # the model, and pyarrow for the public data
+uv run python -m eval.detector.datasets build         # build the dataset and check it
+uv run python -m eval.detector.run --config rules --split dev --summary     # the rules: seconds
+uv run python -m eval.detector.run --config combined --split dev            # with the model
+uv run python -m eval.detector.tune --config combined --scores /tmp/dev.jsonl   # thresholds, on dev
+uv run python -m eval.detector.report --note "why"    # all of test; writes the report
+uv run python -m eval.detector.report --render eval/results/detector-<date>.json   # the words again
+```
+
+- **The data** is 1,892 texts: 662 public prompts (`deepset/prompt-injections`), 1,080 documents
+  (360 carriers, each once as it is and twice with an attack put in it, a quarter of the attacks
+  hidden) and 150 hard negatives, harmless texts that sound like orders. They are split in two by
+  carrier: `dev` is 919 texts and `test` is 973. The public parts are downloaded at a pinned
+  revision and kept in `eval/data/`, which is not committed. When the download fails, or pyarrow is
+  not installed, the build is without them and says so in its first lines, in the JSON and in the
+  report.
+- **The manifest** (`eval/detector/manifest.json`) has the sha256 of every text. A text that
+  differs stops the run with `DatasetChanged`, naming the first five. A change of a template, a
+  sentence bank or the seed changes texts: `python -m eval.detector.datasets manifest` writes the
+  new manifest, and after that every earlier number is about other data, so tune on dev again and
+  run the report again.
+- **The test split** is for the numbers that are published. Thresholds are tuned on dev only
+  (`tune.py` refuses another split). Every run that scores test, `run --split test` or `report`,
+  adds a line to `eval/results/test-runs.jsonl` with the time, the commit, whether the tree had
+  uncommitted changes, the number of texts and the headline numbers, and the report lists those
+  lines. Say why with `--note`.
+- **Run the report on a clean tree and a quiet machine.** It records the commit and whether the
+  tree was clean, and it times one text at a time, so another job on the machine shows up in the
+  timings. It took 3 min 40 s and 4 min 42 s on a 10-CPU Mac with nothing else running; the model is
+  nearly all of it, and the two runs gave the same classification numbers and timings that differed
+  by 20 to 45 percent.
+- **Nightly**, the workflow scores 200 texts of dev with the rules alone and no model. It fails when
+  the data differs from the manifest or when the ROC AUC of that sample is under 0.7, which is a
+  guard against a scanner that stopped working and not a result.
+- **The slow tests** (`tests/integration/test_detector_real.py`, run by `make gate`) download the
+  datasets for real, build again from the cache with the network refused, and score a few texts with
+  the real model.
+
+What the numbers do not say is the last section of `docs/results.md`. The attacks of the documents
+are the templates of this repository, written alongside the rules, so the public prompts are the
+independent check.
+
 ## Audit
 
 Every tool call leaves one row in the `audit_events` table: who (tenant, user, agent, session),

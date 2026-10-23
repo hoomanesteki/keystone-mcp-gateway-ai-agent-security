@@ -59,3 +59,25 @@ jobs:
       - name: stop the stack
         if: always()
         run: make down
+
+  # The detector evaluation (KS-707) on a sample of 200 texts of the dev split, scored by the rules
+  # alone: no model is installed or downloaded in CI. The public datasets are downloaded when the
+  # runner can reach them (the run says so when it cannot, and goes on with the synthetic texts).
+  # It fails when the data differs from eval/detector/manifest.json, and when the rules rank the
+  # sample worse than the guard below. It reads dev and never the test split, which is for the
+  # numbers that are published and is looked at when the thresholds change.
+  detector:
+    name: detector
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.1
+        with:
+          enable-cache: true
+      - run: uv sync --extra eval
+      - name: evaluate the rules on 200 samples
+        run: |
+          set -o pipefail
+          uv run python -m eval.detector.run --config rules --split dev --limit 200 \
+            --fail-under-auc 0.7 --summary | tee -a "$GITHUB_STEP_SUMMARY"

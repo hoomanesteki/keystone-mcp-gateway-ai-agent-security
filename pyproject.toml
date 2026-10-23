@@ -39,6 +39,9 @@ scanner = [
     "torch>=2.14.1",
     "transformers>=5.20.2",
 ]
+eval = [
+    "pyarrow>=26.0.0",
+]
 
 [project.scripts]
 keystone = "keystone.admin.cli:app"
@@ -90,7 +93,7 @@ check_untyped_defs = true
 warn_redundant_casts = true
 mypy_path = "src:scripts"
 explicit_package_bases = true
-files = ["src", "tests", "scripts", "examples"]
+files = ["src", "tests", "scripts", "examples", "eval"]
 
 # mypy cannot set `strict` per module, so these are the flags that `strict = true` turns on.
 [[tool.mypy.overrides]]
@@ -131,5 +134,5 @@ addopts = "--strict-markers"
 
 # Third-party packages that ship no type information.
 [[tool.mypy.overrides]]
-module = ["asyncpg", "asyncpg.*"]
+module = ["asyncpg", "asyncpg.*", "pyarrow", "pyarrow.*"]
 ignore_missing_imports = true

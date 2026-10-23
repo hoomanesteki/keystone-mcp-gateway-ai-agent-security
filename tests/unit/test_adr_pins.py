@@ -118,3 +118,15 @@ def test_every_scanner_extra_package_is_listed_with_its_locked_version() -> None
 
     assert set(rows) - {"Package"} == extra
     assert {name: {rows[name]} for name in extra} == {name: locked[name] for name in extra}
+
+
+@pytest.mark.phase(7)
+def test_every_eval_extra_package_is_listed_with_its_locked_version() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    lock = tomllib.loads((ROOT / "uv.lock").read_text())
+    extra = {normalise(d) for d in pyproject["project"]["optional-dependencies"]["eval"]}
+    locked = {package["name"]: package["version"] for package in lock["package"]}
+    rows = adr_rows("Python packages: the eval extra")
+
+    assert set(rows) - {"Package"} == extra
+    assert {name: rows[name] for name in extra} == {name: locked[name] for name in extra}
