@@ -16,8 +16,9 @@ import unicodedata
 MAX_DESCRIPTION_CHARS = 2000
 
 # Characters that render as nothing, or that reorder the text around them. Tag characters can
-# spell a message that no editor shows.
-_HIDDEN = re.compile(
+# spell a message that no editor shows. The scanner's `hidden_unicode` rule looks for the same
+# ranges (KS-701).
+HIDDEN_CHARACTERS = re.compile(
     "[\U000e0000-\U000e007f"  # tag characters
     "​-‏"  # zero-width space and joiners, direction marks
     "⁠-⁤"  # word joiner, invisible operators
@@ -56,9 +57,9 @@ def check_description(text: str) -> list[str]:
     so a zero-width space inside a word does not hide it.
     """
     hits: list[str] = []
-    if _HIDDEN.search(text):
+    if HIDDEN_CHARACTERS.search(text):
         hits.append("hidden_unicode")
-    plain = unicodedata.normalize("NFKC", _HIDDEN.sub("", text))
+    plain = unicodedata.normalize("NFKC", HIDDEN_CHARACTERS.sub("", text))
     if _INSTRUCTION_OVERRIDE.search(plain):
         hits.append("instruction_override")
     if _PSEUDO_TAG.search(plain):
