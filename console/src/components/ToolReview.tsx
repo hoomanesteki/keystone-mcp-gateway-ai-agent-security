@@ -3,7 +3,7 @@ import { useApproveChange, useToolDetail } from "../api/tools";
 import type { ToolSummary } from "../api/types";
 import { stableStringify } from "../lib/diff";
 import { describeError } from "../lib/errors";
-import { describeReason, describeScreening, sentences } from "../lib/tools";
+import { describeReason, describeScan, describeScreening, sentences } from "../lib/tools";
 import { Button } from "./Button";
 import { Icon } from "./Icon";
 import { SideBySideDiff } from "./SideBySideDiff";
@@ -67,6 +67,7 @@ export function ToolReview({ tool, onDone }: { tool: ToolSummary; onDone: () => 
   }
 
   const tool_ = detail.data;
+  const scan = describeScan(tool.reason);
   const changed = tool_.pending_description !== null && tool_.pending_schema !== null;
   const submit = () => {
     const text = note.trim();
@@ -84,6 +85,13 @@ export function ToolReview({ tool, onDone }: { tool: ToolSummary; onDone: () => 
         <span className="font-medium text-fg">Held because:</span> {describeReason(tool.reason)}.
         Agents cannot see or call this tool until it is approved.
       </p>
+
+      {scan ? (
+        <p className="text-fg-muted">
+          The scanner scored it <span className="font-mono text-fg">{scan.score}</span> in{" "}
+          <span className="font-mono text-fg">{scan.where}</span>.
+        </p>
+      ) : null}
 
       <Screening label="The current description" hits={tool_.description_screening} />
       <Screening label="The pending description" hits={tool_.pending_screening} />

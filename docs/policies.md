@@ -78,9 +78,9 @@ The user id includes the tenant, so one user id in two tenants is two users. Act
 |---|---|---|
 | `agent_id` | String | The agent the caller works through |
 | `agent_trust` | String | `"low"`, `"standard"` or `"high"`, from the agent config |
-| `session_flags` | Set of String | Tool tags the session has touched (Phase 7) |
-| `session_tainted` | Bool | Whether the session read something untrusted (Phase 7) |
-| `call_count` | Long | Calls made in the session |
+| `session_flags` | Set of String | What the session has read: `reads_untrusted` and `reads_sensitive`, added from the tags of a tool after a call that returned without an error |
+| `session_tainted` | Bool | Whether an output the session read scored as an injection (0.85 and up). Once true, it stays true |
+| `call_count` | Long | Calls that returned without an error in the session |
 | `hour_utc` | Long | The hour of the call, 0 to 23 |
 | `args` | record | Facts extracted from the call's arguments: `amount`, `recipient_domain`, `path`, `count`, each optional |
 
@@ -190,6 +190,36 @@ risk tools of their own tenant.
 
 A forbid in `default/access/base.cedar`. No caller uses a tool of another tenant, whatever else
 allows it. A forbid beats every permit, so this holds for the rules a tenant adds as well.
+
+### rule-of-two
+
+A rule of the approval set in `default/approval/rule_of_two.cedar`. An agent session should not
+combine three things without a person in the loop: it processes untrusted input, it has access to
+sensitive data, and it changes state or sends data out. The first two are what the session has
+read, the flags `reads_untrusted` and `reads_sensitive`, which the gateway adds from the tags of
+the tools it called. The third is the tool being called, with the tag `external_effect`. When the
+session has both flags and the tool has the tag, the call needs a person's approval. It applies at
+every risk level, to every tenant, and it does not look at the arguments: an internal mail sent
+after the agent read an email asks as well. The tag is what counts, so a tool that changes
+something must carry `external_effect` in the upstream's config (the local stack tags
+`mail__send_email` and `bank__transfer`).
+
+### tainted-external-effect
+
+A rule of the approval set in `default/approval/rule_of_two.cedar`. A session is tainted when an
+output it read scored as an injection. A tainted session has been steered once already, so it asks
+before any tool with the tag `external_effect`, even when it never touched sensitive data. This is
+the rule that holds when the agent obeys the injection: the email forwarded to an outside address
+waits for a person.
+
+### deny-critical-when-tainted
+
+A forbid in `default/access/rule_of_two.cedar`. A tainted session never calls a critical tool,
+whoever the caller is and whatever else permits it (`admins-critical`, a rule a tenant added). It
+is a forbid and not an approval, because nothing a person reads on an approval card can make a
+critical action in a steered session safe. A tool listing is not affected, since a listing has no
+session. A call that was approved before the taint is decided again when it runs, and this rule
+refuses it then.
 
 ### approve-transfer-over-500
 

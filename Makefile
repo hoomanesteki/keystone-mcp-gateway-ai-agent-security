@@ -13,7 +13,7 @@ COMPOSE := docker compose -f deploy/docker-compose.yml $(if $(wildcard .env),--e
 # The console has its own package, and console/.nvmrc names the Node version it runs on.
 CONSOLE := pnpm --dir console
 
-.PHONY: help prose commits setup lint fmt type policy test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo github-setup console-types console-check console-e2e
+.PHONY: help prose commits setup lint fmt type policy test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo demo-attack github-setup console-types console-check console-e2e
 
 help:
 	@grep -E '^[a-z0-9-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | column -t -s $$'\t'
@@ -76,6 +76,7 @@ ci-local: up-core ## the same steps as CI, run locally
 
 gate: up ## everything a phase gate runs: make gate PHASE=N
 	@test -n "$(PHASE)" || { echo "usage: make gate PHASE=N" >&2; exit 2; }
+	@if [ $(PHASE) -ge 7 ]; then uv sync --locked --extra scanner --extra eval; fi
 	$(MAKE) lint type
 	@if [ $(PHASE) -ge 4 ]; then $(MAKE) policy; fi
 	$(RUN) pytest --phase $(PHASE) tests/unit tests/integration tests/invariants tests/e2e
@@ -116,6 +117,9 @@ reset: ## stop the stack and remove its volumes
 
 demo: up ## start the stack, reset the upstreams and run the scripted agent
 	bash scripts/smoke/phase_1.sh
+
+demo-attack: up ## the headline demo: an injected email, with and without Keystone
+	bash scripts/demo_attack.sh
 
 github-setup: ## protect main and dev, then import the backlog (needs a signed-in gh)
 	@gh auth status >/dev/null 2>&1 || { \

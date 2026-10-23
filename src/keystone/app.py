@@ -19,6 +19,9 @@ from keystone.audit.redact import RedactionConfig
 from keystone.audit.sink import PostgresAuditSink
 from keystone.db.session import create_engine, make_sessionmaker
 from keystone.db.tenants import upsert_tenants
+from keystone.defense.classifier import Classifier, load_classifier, warm_up
+from keystone.defense.description_check import Screener
+from keystone.defense.scanner import build_scanner_guard
 from keystone.gateway.dispatch import UpstreamDispatcher
 from keystone.gateway.health import UpstreamHealth
 from keystone.gateway.interceptors.policy import MemoryListCache, PolicyToolFilter, RedisListCache
@@ -127,6 +130,9 @@ def create_app(
         recorder=PolicyVersionRepo(sessions),
     )
     policies.start()
+    # What holds a new tool whose description, or the description of a field of its schema, reads
+    # like an instruction (KS-706). The admin API shows what it finds.
+    screener = Screener.from_settings(settings.scanner)
     directory = UpstreamDirectory()
     pool = UpstreamPool(
         directory_client_factory(directory, health_timeout_s=settings.health.timeout_s)
@@ -140,6 +146,7 @@ def create_app(
         timeout_s=settings.registry.sync_timeout_s,
         environments=stdio_environments(settings.upstreams),
         service_headers=service_headers,
+        screener=screener,
     )
     registry = RegistryService(
         syncer, cache_ttl_s=settings.registry.cache_ttl_s, on_load=metrics.tools_loaded
@@ -189,6 +196,20 @@ def create_app(
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
     policy_engine = ObservedEngine(CedarPolicyEngine(policies), metrics.policy_evaluated)
+    session_store: SessionStore = (
+        RedisSessionStore(redis, SessionRepo(sessions)) if redis else InMemorySessionStore()
+    )
+    # The scanner reads every output (KS-704). Its model is not loaded here: the lifespan starts
+    # that in the background, and until it is ready a scan is answered by the rules alone.
+    classifier = load_classifier(settings.scanner) if settings.scanner.enabled else None
+    # Not in env=test: the tests start hundreds of apps and none of them wants a 700 MB model
+    # loaded on its behalf. In a test the model loads at the first scan, if the test scans at all.
+    warmed = classifier if settings.env != "test" else None
+    scanner = (
+        build_scanner_guard(settings.scanner, classifier, on_error=metrics.scan_failed)
+        if settings.scanner.enabled
+        else None
+    )
     pipeline = build_pipeline(
         settings,
         PipelineDeps(
@@ -200,13 +221,12 @@ def create_app(
             vault=vault,
             policy=policy_engine,
             approvals=approvals,
+            sessions=session_store,
+            scanner=scanner,
         ),
         interceptors,
     )
-    virtual.bind(pipeline)
-    session_store: SessionStore = (
-        RedisSessionStore(redis, SessionRepo(sessions)) if redis else InMemorySessionStore()
-    )
+    virtual.bind(pipeline, session_store)
     tool_filter = PolicyToolFilter(
         policy_engine,
         RedisListCache(redis) if redis else MemoryListCache(),
@@ -248,7 +268,9 @@ def create_app(
                 for report in await registry.sync_all():
                     log.info("startup_sync", **report.model_dump())
                 await stack.enter_async_context(
-                    background_tasks(registry, health, settings, policies, approvals, notifier)
+                    background_tasks(
+                        registry, health, settings, policies, approvals, notifier, warmed
+                    )
                 )
                 await stack.enter_async_context(manager.run())
                 yield
@@ -289,6 +311,7 @@ def create_app(
             auth=AdminAuth(authenticator),
             sessions=sessions,
             tools=ToolAdmin(sessions, on_change=registry.invalidate),
+            screener=screener,
             policies=policies,
             console_origin=settings.console_origin,
             session_directory=session_store
@@ -345,14 +368,17 @@ async def background_tasks(
     policies: PolicyStore,
     approvals: ApprovalService | None = None,
     notifier: ApprovalNotifier | None = None,
+    classifier: Classifier | None = None,
 ) -> AsyncIterator[None]:
     """Run the periodic sync (unless its interval is 0), the watch for changes made by other
     processes, the health probes (unless their interval is 0), the policy reload on SIGHUP, the
-    sweep of expired approvals and the delivery of their webhooks while the body of the `with`
-    runs."""
+    sweep of expired approvals, the delivery of their webhooks and the loading of the scanner's
+    model while the body of the `with` runs."""
     async with anyio.create_task_group() as group:
         group.start_soon(registry.run_watch)
         group.start_soon(reload_on_sighup, policies)
+        if classifier is not None:
+            group.start_soon(warm_up, classifier)
         if approvals is not None:
             group.start_soon(approvals.run_sweeper)
         if notifier is not None:

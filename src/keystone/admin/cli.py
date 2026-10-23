@@ -24,7 +24,7 @@ from keystone.audit.verify import Verdict, export_records, verify_chain
 from keystone.core.types import ToolStatus
 from keystone.db.models import Tool, Upstream
 from keystone.db.session import create_engine, make_sessionmaker
-from keystone.defense.description_check import check_description
+from keystone.defense.description_check import Screener, Screening
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
 from keystone.identity.credential_repo import CredentialRepo, vault_from_settings
 from keystone.identity.middleware import AuthConfigError
@@ -437,7 +437,18 @@ async def find_tool(
     return rows[0]
 
 
-def render_tool(tool: Tool) -> str:
+def screening_lines(found: Screening) -> list[str]:
+    """What the screening found in a definition, for a reviewer: the rules, and with the scanner the
+    highest score and where it is. Nothing when nothing held the tool."""
+    if not found.flagged:
+        return []
+    lines = [f"  screening: {', '.join(found.hits)}"]
+    if found.score is not None:
+        lines.append(f"  scanner score: {found.score:.2f} in {found.where}")
+    return lines
+
+
+def render_tool(tool: Tool, screener: Screener | None = None) -> str:
     lines = [
         f"{tool.name}  (upstream {tool.upstream_id}, tenant {tool.tenant_id})",
         f"status:   {tool.status}"
@@ -452,12 +463,11 @@ def render_tool(tool: Tool) -> str:
         command = f"keystone tool approve-change {tool.name} --expect {fingerprint[:12]}"
         lines.append(f"          to accept it: {command}")
     lines += ["", "description (current):", indent(tool.description)]
-    if hits := check_description(tool.description):
-        lines.append(f"  screening: {', '.join(hits)}")
+    screener = screener or Screener()
+    lines += screening_lines(screener.screen(tool.description, tool.input_schema))
     if tool.pending_description is not None and tool.pending_schema is not None:
         lines += ["", "description (pending):", indent(tool.pending_description)]
-        if hits := check_description(tool.pending_description):
-            lines.append(f"  screening: {', '.join(hits)}")
+        lines += screening_lines(screener.screen(tool.pending_description, tool.pending_schema))
         description_diff = unified_diff(tool.description, tool.pending_description, "description")
         schema_diff = unified_diff(
             schema_text(tool.input_schema), schema_text(tool.pending_schema), "schema"
@@ -538,7 +548,8 @@ def tool_show(
     """Print a tool's current definition and, if it is held, the pending one with a diff."""
 
     async def action(settings: Settings, sessions: Sessionmaker) -> str:
-        return render_tool(await find_tool(settings, sessions, name, tenant))
+        found = await find_tool(settings, sessions, name, tenant)
+        return render_tool(found, Screener.from_settings(settings.scanner))
 
     typer.echo(run_with_database(action))
 

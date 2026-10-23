@@ -6,7 +6,11 @@ How to run the local stack and what each part listens on. This file grows with t
 
 `make up` builds and starts Postgres, Redis, Keycloak, Jaeger, Prometheus, Grafana, the four demo
 upstreams and Keystone, and waits until every container reports healthy. Cold start takes about
-30 seconds on a laptop with warm images. The first build of the two local images takes longer.
+30 seconds on a laptop with warm images. The first build of the two local images takes longer: the
+Keystone image holds torch and a 738 MB model (the classifier, below), and its first build took
+20 minutes on a laptop. The model stays in a build cache after that, so a rebuild after an edit in
+`src` took 54 seconds; `docker builder prune` empties the cache and the next build downloads the
+model again.
 
 | Command | What it does |
 |---|---|
@@ -43,9 +47,8 @@ Tests never use these ports. They start their own services on free ports.
 | OTLP gRPC / HTTP | 4317 / 4318 | sent to Jaeger |
 | Prometheus | 9090 | |
 | Grafana | 3000 | login `admin` / `admin`, Prometheus and Jaeger provisioned |
-| Mail, files, bank, echo | 8101, 8102, 8103, 8104 | demo upstreams, services `mail-mcp`, `files-mcp`, `bank-mcp`, `echo-mcp` |
+| Mail, files, bank, echo, web | 8101, 8102, 8103, 8104, 8105 | demo upstreams, services `mail-mcp`, `files-mcp`, `bank-mcp`, `echo-mcp`, `web-mcp` |
 | Files for globex | 8112 | the globex tenant's own drive, service `files-globex-mcp` |
-| Web | 8105 | later phase |
 | Fake LLM | 8199 | later phase |
 | Console | 5173 | the Vite dev server (`pnpm dev` in `console/`), which `make console-e2e` also starts. The port is fixed because the Keycloak client `console` allows `http://localhost:5173/*` only |
 
@@ -54,7 +57,7 @@ beyond the machine.
 
 ## Demo upstreams
 
-Four small MCP servers give the gateway something to proxy and give tests state to inspect. They
+Five small MCP servers give the gateway something to proxy and give tests state to inspect. They
 share one image (`deploy/Dockerfile.upstreams`), and `make up` starts them.
 
 | Server | Port | Tools |
@@ -63,11 +66,12 @@ share one image (`deploy/Dockerfile.upstreams`), and `make up` starts them.
 | files | 8102 | `list_files`, `read_file`, `write_file` (confined to one workspace) |
 | bank | 8103 | `get_balance`, `list_transactions`, `transfer` (3 seeded accounts) |
 | echo | 8104 | `echo`, `sleep`, `fail` |
+| web | 8105 | `fetch(url)`, which returns a stored page and never reaches the network (`examples/fixtures/web/pages.json`) |
 | files (globex) | 8112 | the tools of `files`, on another drive (`examples/fixtures/files-globex`), for the globex tenant |
 
 Each also serves plain HTTP routes next to `/mcp` that are not tools, so an agent cannot call them:
 `GET /healthz`, `POST /_reset` (back to the seed) and `GET /_state` (sent mail, transfers, written
-files and the names of the tools called). The echo server adds `POST /_mutate`, which rewrites the
+files, the urls asked of the web server, and the names of the tools called). The echo server adds `POST /_mutate`, which rewrites the
 `echo` description, and `ECHO_POISONED=1`, which adds a tool with an injected description.
 
 Run one outside compose: `uv run python -m examples.upstreams.mail_server --port 8101`. Add
@@ -78,8 +82,51 @@ Run one outside compose: `uv run python -m examples.upstreams.mail_server --port
 | `MAIL_DB`, `BANK_DB`, `FILES_DB` | SQLite file for the server's state. Default: a temp file. Every start re-seeds it. |
 | `FILES_WORKSPACE` | Directory the files server confines itself to. Default: a temp directory. |
 | `FILES_SEED` | Directory the files server starts from and returns to on reset. Default: `examples/fixtures/files`. |
-| `MAIL_API_KEY`, `FILES_API_KEY`, `BANK_API_KEY`, `ECHO_API_KEY` | When set, `/mcp` requires a matching `X-Api-Key` header, and `/_state` reports `api_key_received`. Compose sets them (the defaults are in `.env.example`); Keystone takes them from its own environment and stores them in the vault. |
+| `MAIL_API_KEY`, `FILES_API_KEY`, `BANK_API_KEY`, `ECHO_API_KEY`, `WEB_API_KEY` | When set, `/mcp` requires a matching `X-Api-Key` header, and `/_state` reports `api_key_received`. Compose sets them (the defaults are in `.env.example`); Keystone takes them from its own environment and stores them in the vault. |
 | `ECHO_POISONED` | `1` adds the poisoned tool. |
+| `MAIL_POISONED` | `1` adds three unread emails (m13 to m15) that carry an instruction for the agent that reads them. Compose sets it. Without it the mailbox is the 12 emails of the seed. |
+| `FILES_POISONED` | `1` adds two files (`notes/vendor-onboarding.md`, `reports/q3-vendor-spend.csv`) that carry an instruction. Compose sets it for the acme drive and not for globex's. |
+
+### Injection fixtures and the naive agent
+
+The injection defense is tested against planted attacks (KS-708). `examples/fixtures/injections/templates.yaml`
+has 12 attack texts (`ignore_previous`, `important_instructions`, `fake_system`, `tool_knowledge`,
+`hidden_unicode`, `markdown_exfil`, `urgent_secrecy`, `fake_error_recovery`, `translated`, `base64`,
+`delimiter_escape`, `role_override`) and 5 goals (forward the latest invoice to `attacker@evil.test`,
+a transfer, a leak, a file write, a request to an attacker's address). Everything in the fixtures
+is invented, on `.test` addresses, in English except the `translated` template.
+
+Each text carries a marker, `<!--ks-do:{"args":{...},"tool":"mail__send_email"}-->`, which is the same goal
+as a tool call. The marker is for the naive agent only. A detector is never measured on a text that
+still has one: `re.sub(r'<!--ks-do:(\{.*?\})-->', '', text, flags=re.DOTALL)` removes it, and
+`examples/injections.py` (`strip_markers`) does the same.
+
+`examples/agents/naive_agent.py` runs a task script like the scripted agent, and whenever a result holds a
+marker it calls that tool with those arguments at once. It stands in for a model that has been fully
+taken over, so a gateway that stops it does not depend on how a model behaves. After a
+`KS_APPROVAL_PENDING` it calls `keystone__await_approval` once.
+
+    # the attack lands: the agent talks to the mail server directly, whose mailbox is poisoned in compose
+    uv run python -m examples.agents.naive_agent --url http://localhost:8101/mcp \
+        --header "X-Api-Key: dev-mail-key-3f9a1c7d" \
+        --script examples/agents/scripts/summarize_unread.yaml --format text
+    curl -s localhost:8101/_state     # "sent" holds the mail to attacker@evil.test
+
+    # the same task through Keystone, signed in as olivia
+    KEYSTONE_TOKEN=$(scripts/get_token.sh olivia ops-agent) uv run python -m examples.agents.naive_agent \
+        --url http://localhost:8080/mcp --script examples/agents/scripts/summarize_unread.yaml --format text
+
+`summarize_unread_benign.yaml` is the same task over mail with no instruction. Reset the mail
+server between runs: `curl -s -X POST localhost:8101/_reset`.
+
+Through Keystone the agent still reads the poisoned email and still tries to forward the invoice.
+The forward is held for a person (`rule-of-two`, `tainted-external-effect` and acme's
+`external-email-needs-approval` are its reasons), and nobody approves it. `make demo-attack` runs
+both scenarios and prints them side by side, with `examples/agents/auto_reject.py` standing in for
+the person: lena through the admin API, rejecting whatever reaches the queue. It prints one line of
+JSON for each request, with what a person would see on the card (tool, reasons, taint, flags,
+arguments). `scripts/smoke/phase_7.sh` runs the same two scenarios and a harmless summary with
+assertions, and `scripts/smoke/attack_lib.sh` is what both share.
 
 ## Identity (Keycloak)
 
@@ -236,6 +283,15 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_APPROVALS_WEBHOOK_SECRET` | unset | The key that signs the webhook, at least 16 characters. Read from the environment only, never from the YAML. Not a nested setting: one underscore. |
 | `KEYSTONE_APPROVALS__SLACK_WEBHOOK_URL` | unset | A Slack incoming webhook that gets a plain message for each request. A secret. |
 | `KEYSTONE_APPROVALS__WEBHOOK_BACKOFF_S` | `[1, 2, 4]` | JSON list of the seconds before each retry of a webhook delivery. |
+| `KEYSTONE_SCANNER__ENABLED` | `true` | Whether tool output is scanned. See Scanner. |
+| `KEYSTONE_SCANNER__CLASSIFIER` | `protectai-deberta-v2` | The model behind the rules: `protectai-deberta-v2`, `prompt-guard-2-86m` or `none`. Needs the extra `keystone[scanner]`. |
+| `KEYSTONE_SCANNER_CLASSIFIER` | unset | The same setting under a shorter name (one underscore). It wins when both are set. `KEYSTONE_SCANNER_CLASSIFIER=none` turns the model off. |
+| `KEYSTONE_SCANNER__CLASSIFIER_TIMEOUT_MS` | `300` | How long a scan waits for the model. After that the scan goes on with the rules alone and its `model` says `timeout`. 1 to 10,000. |
+| `KEYSTONE_SCANNER__THRESHOLDS__SUSPICIOUS` | `0.5` | A score from here up is `suspicious`. |
+| `KEYSTONE_SCANNER__THRESHOLDS__INJECTION` | `0.85` | A score from here up is an `injection`. Not below `SUSPICIOUS`. |
+| `KEYSTONE_SCANNER__ALLOWED_DOMAINS` | `[]` | JSON list of hosts a markdown image may point to without a mark against it. A name covers its subdomains. |
+| `KEYSTONE_SCANNER__MAX_SCAN_CHARS` | `200000` | The most text one scan reads. A longer text is read at both ends, half of this at each. |
+| `KEYSTONE_SCANNER__DESCRIPTION_THRESHOLD` | `0.5` | A new tool is held when the rules score its description, or the description of a field of its input schema, at or above this. Above 0, at most 1. See Upstreams. |
 
 Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
 
@@ -419,6 +475,19 @@ decision can be read back from the log (see Audit).
 | | `deny-cross-tenant` | No one uses another tenant's tool, whatever else allows it |
 | `demo/approval/bank.cedar` | `approve-transfer-over-500` | A transfer over 500, or one whose amount could not be read, needs approval |
 | `acme/approval/mail.cedar` | `external-email-needs-approval` | A message to anyone outside `acme.test`, or to a recipient that is not one plain address, needs approval |
+| `default/access/rule_of_two.cedar` | `deny-critical-when-tainted` | A session that read an injection never calls a critical tool |
+| `default/approval/rule_of_two.cedar` | `rule-of-two` | A session that has read untrusted and sensitive data asks before it calls a tool with an external effect |
+| | `tainted-external-effect` | A tainted session asks before it calls a tool with an external effect |
+
+The Rule of Two (plan section 3.5) is the last three rows. A session should not combine all of
+these without a person: it processes untrusted input, it has access to sensitive data, and it
+changes state or sends data out. The first two are the session's flags (`reads_untrusted` and
+`reads_sensitive`, from the tags of the tools it called) and the third is the tag `external_effect`
+on the tool being called. So an operator who reads an email and then sends one in the same session
+is asked about the second, whoever the mail goes to, and one whose session read an injection is
+asked before any external effect and cannot call a critical tool. Both are ordinary Cedar, so a
+tenant reads and tightens them like the rest. A new MCP session starts clean. A script that reads
+mail and then sends it should send first, or use a session of its own for each step.
 
 Risk comes from the upstream config, so in the local stack `mail__send_email` and
 `bank__transfer` are high risk: support (alice) is refused both with `default-deny`, and an
@@ -870,16 +939,30 @@ change back, the tool is released by the next sync. A newer offer replaces an ol
 | `keystone tool approve-change NAME [--expect FP] [--note TEXT]` | Make the pending definition the pinned one, recompute the hashes and set the tool `active`. With `--expect`, refuses if the pending definition is no longer the one with that fingerprint. The note goes in the log. |
 | `keystone tool disable NAME` / `enable NAME` | Take a tool out of service by hand. Sync never re-enables a tool you disabled. `disable` and `enable` both refuse a quarantined tool (review it and approve it instead), and `enable` refuses one the upstream stopped listing. |
 
-A tool seen for the first time is screened too (`keystone.defense.description_check`). Five
-rules look for characters a reader cannot see (tag characters, zero-width and bidirectional
-controls), phrases such as "ignore all previous instructions" or "do not tell the user", the pseudo
-tags `<important>` and `<system>`, "before using this tool" together with read, send or call, and a
-description longer than 2,000 characters. A tool that trips any of them is created `quarantined`
-with the reason `suspicious_description:<rule ids>`, and has no pending definition. The agent is
+A tool seen for the first time is screened too (`keystone.defense.description_check`), in two
+passes over its description and over the `description` of every field of its input schema, at any
+depth. The first pass is five rules from Phase 2: characters a reader cannot see (tag characters,
+zero-width and bidirectional controls), phrases such as "ignore all previous instructions" or "do
+not tell the user", the pseudo tags `<important>` and `<system>`, "before using this tool"
+together with read, send or call, and a text longer than 2,000 characters. The second pass is the
+scanner's rules, the ones that read tool output (see Scanner), and it holds the tool when the
+highest score is at or above `scanner.description_threshold` (0.5). The classifier is not used: it
+scored two harmless descriptions of the demo tools ("Return the payload unchanged.") at 0.998, and a
+tool must not be held or not depending on whether a model has loaded.
+
+A tool that trips either pass is created `quarantined` with the reason
+`suspicious_description:<rule ids> score=<score> in=<place>`, for example
+`suspicious_description:role_spoof,tool_directive score=0.70 in=input_schema.properties.note`. It
+has no pending definition. The first pass's rules come first, then the scanner's, each once; the
+score is the highest of the texts that held the tool, and the place is where it was. With
+`scanner.enabled: false` only the first pass runs, on the description alone, and the reason is the
+rule ids as before. A schema with more than 1,000 descriptions is held as `oversized` and the rest
+is not read. Other strings of a schema (`title`, `default`, `enum`, `examples`, property names)
+are not read. `keystone tool show` and the tools page print the rules and the score. The agent is
 told the category only, not which rule fired. `approve-change` releases it as it is after you have
-read it. This is a short list of crude patterns and a determined author will get past it. It is
-meant to stop the careless cases and to make a person look; Phase 7 replaces it with a scanner.
-Try it: `ECHO_POISONED=1` makes the demo echo server list a tool that is held at first sight.
+read it. These are patterns and a determined author will get past them; they stop the careless and
+make a person look. Try it: `ECHO_POISONED=1` makes the demo echo server list a tool that is held
+at first sight.
 
 Review with `tool show`, then approve with the fingerprint it printed:
 `keystone tool approve-change echo__echo --expect 1a2b3c4d5e6f`. Without `--expect`, a server
@@ -915,11 +998,23 @@ several.
 
 ## Sessions
 
-Each MCP session has a state object (flags, taint, call count, spend) stored as JSON in Redis
-under `ks:sess:{session id}`. The key lives 24 hours from its last use: both reading and writing
-a session restart the clock. Postgres holds one `sessions` row per session, written when the
-session opens, as the durable reference that audit records will point at. The row's
-`last_seen_at`, flags and taint are updated at most once a minute per session.
+Each MCP session has a state (flags, taint, call count, spend) stored as a Redis hash under
+`ks:sess:{session id}`. `redis-cli HGETALL ks:sess:<id>` shows it: `session_id`, `principal` (JSON)
+and `created_at`, then `flag:<tag>` for each flag, `tainted`, `call_count` and `spent_usd` once
+they are set. The key lives 24 hours from its last use: reading a session and every change to it
+restart the clock. Postgres holds one `sessions` row per session, written when the session opens,
+as the durable reference that audit records will point at.
+
+A session changes by merging (ADR-0015). Flags are only added, the taint is only set, and the
+counters only go up, so a call that was held for approval cannot write an old copy over what a
+call in the meantime recorded. Deleting the key is the only way to clear a taint, and the next
+call of that MCP session then starts with a clean state. A key in the format of v0.6.0 (a JSON
+string) is not read: Keystone makes a new session over it.
+
+The row's `final_flags` and `tainted` are merged too (union, and never back to false). A flag or
+the taint that is new is written to the row at once, and `last_seen_at` at most once a minute per
+session. A write to the row that takes longer than 2 seconds is given up and logged as
+`session_row_not_touched`; the next write brings the row up to date.
 
 If Redis cannot be reached, a call is refused with `KS_DENIED` ("session state is unavailable") and
 audited, because a call must not run without the flags and taint of its session. If Postgres
@@ -936,6 +1031,178 @@ decided on the groups of its own token. A session id Keystone has no binding for
 makes a client start a new session; it is never adopted by whoever names it first. The binding
 is kept in the gateway process, like the SDK's own sessions, so it does not depend on Redis
 being up.
+
+## Scanner
+
+Tool output is untrusted text: an email, a web page or a file can carry an instruction for the
+agent that reads it. The scanner reads the output of a tool and says how much it looks like such an
+instruction (ADR-0011). The pipeline runs it on the output of every tool of an upstream
+(`scanner.enabled`, on by default), before the agent sees the output.
+
+The rules are in `src/keystone/defense/rules.py`, seven of them, each with a weight. A text that
+breaks several gets `1 - (1 - w1) * (1 - w2) * ...`, the chance that at least one hit is real.
+
+| Rule | What it looks for | Weight |
+|---|---|---|
+| `instruction_override` | "ignore all previous instructions", also in Spanish, French, German, Portuguese and Italian | 0.6 |
+| `role_spoof` | a line that starts `system:` or `assistant:`, a `### System` heading, chat template tokens, `<system>` and `[SYSTEM NOTICE]` | 0.5 |
+| `hidden_unicode` | tag characters, bidirectional overrides, word joiners, and zero-width characters between letters of the same script | 0.9 |
+| `tool_directive` | "call the send_email tool", "send ... to someone@host", "transfer ... to account" | 0.4 |
+| `secrecy` | "do not tell the user", "secretly", "without telling", "do not ask for confirmation" | 0.5 |
+| `markdown_exfil` | a markdown image or link whose address has a query longer than 32 characters, or an image on a host that is not allowed | 0.7 |
+| `encoded_payload` | a base64 run of more than 200 characters (0.2), and 0.5 more when it decodes to text that breaks another rule | 0.2 |
+
+A score under `scanner.thresholds.suspicious` (0.5) is `benign`, from `injection` (0.85) up it is an
+`injection`, and in between it is `suspicious`. One weak rule on its own stays benign, which is
+why the weights of `tool_directive` (0.4) and `encoded_payload` (0.2) are what they are.
+
+What the scan does to the text first: invisible characters are taken out and the rest is
+normalized (NFKC), so a zero-width space inside a word or fullwidth letters do not hide a phrase.
+A tool result that is JSON is read as the strings in it, because there a line break or a quote is
+written with a backslash and a reader undoes that. Images are not read; they are counted.
+
+### What happens to a flagged output
+
+An output that scores `suspicious` or `injection` is handled by the risk of the tool that made it
+(`scanner.actions`, one value for each of `low`, `medium`, `high` and `critical`):
+
+| Action | Default for | What the agent gets |
+|---|---|---|
+| `annotate` | low, medium | A warning block in front, then `<<<untrusted>>>`, the upstream's blocks as they were, then `<<<end untrusted>>>` |
+| `redact` | high | The same, with the invisible characters and the leaking images and links cut out of every text, resource and structured value first |
+| `block` | critical | Only `[keystone:KS_OUTPUT_BLOCKED] output withheld (score 0.93, rules: ...). Call id <id>.`, as an error |
+| `pass` | none | The output as it was. The score is still recorded |
+
+A benign output is never changed: the agent gets what the upstream sent, byte for byte.
+
+The scanner cannot crash a call. If the classifier raises, the rules alone decide and the result
+says `model: "error"`. If the rules raise, the output goes through as it is, the scan says
+`action: "error"` (the audit row's `scan_action`), and nothing is flagged. If an action raises on
+an output that was flagged, the output is withheld. Each one counts in
+`keystone_scan_errors_total{stage}` (`classifier`, `rules` or `action`) and logs
+`scanner_classifier_failed`, `scanner_rules_failed` or `scanner_action_failed` with the name of the
+exception and never the text that was being read.
+
+### Flags, taint and the audit record
+
+Two slots of the pipeline use the scan, in this order (KS-704, ADR-0011):
+
+| Slot | What it does after a call | Where you see it |
+|---|---|---|
+| `output_scan` | Scans the output, applies the action for the tool's risk, and writes the scan on the call. An output that scores `injection` (0.85 and up) **taints the session**, whatever the action did to it and whatever the tool's tags are | the audit record's `scan_score` and `scan_action`; `keystone_scan_score`; `keystone_sessions_tainted_total` |
+| `session_flags` | Adds the tags `reads_untrusted` and `reads_sensitive` of the tool to the session's flags and counts the call | `keystone__whoami`; the session's Redis hash; the approval card; `context.session_flags` in a policy |
+
+What gets left out:
+
+- Keystone's own tools (`keystone__whoami`, `keystone__await_approval`) are neither scanned nor counted.
+- An error result from an upstream is scanned, because the text of an error can quote what an
+  attacker wrote, and it can taint. It adds no flag and is not counted: a call that returned nothing
+  read nothing.
+- `external_effect` and `code_exec` are not recorded as flags. The Rule of Two reads those off the
+  tool being called.
+- With `scanner.enabled: false` nothing is scanned and the audit record has no scan (`scan_score`
+  and `scan_action` are empty, which is not the same as `pass`). Flags and the call count still
+  work.
+
+`scan_action` in the audit record is one of `pass`, `annotate`, `redact`, `block` or `error`.
+`error` is a scan that could not be made: the output went through as the upstream sent it, and
+`keystone_scan_errors_total{stage="rules"}` went up. Read `scan_score` with the label thresholds
+in mind: 0.5 is `suspicious`, 0.85 is `injection`.
+
+The taint and the flags are recorded with the session store's own atomic changes, so a call held
+for approval cannot write an old copy of the session over what another call recorded (ADR-0015).
+A call sees them from the next call on. A call that is already past the policy slot when the
+taint lands is not stopped by it. A client that opens a new MCP session starts with a clean one.
+If the session store cannot record a taint or a flag, the output is withheld (`KS_OUTPUT_BLOCKED`,
+audit outcome `error`): an output that was found to be an injection and could not be recorded as
+one does not reach the agent.
+
+### The classifier
+
+Behind the rules there is a model, `protectai/deberta-v3-base-prompt-injection-v2` by default
+(Apache-2.0, English only), which scores the same text between 0 and 1. The final score is the
+higher of the two. It is the optional extra `keystone[scanner]` (torch for the CPU and
+transformers), and the compose image has it:
+
+```bash
+uv sync --extra scanner                  # in a checkout; the first use downloads about 740 MB
+uv run python -m keystone.defense.classifier fetch    # or fetch the model now
+docker build --build-arg WITH_SCANNER=1 .             # an image with the extra and the model in it
+KEYSTONE_SCANNER_CLASSIFIER=none make up              # compose without the model
+uv run pytest tests/integration/test_classifier_real.py   # the one test that loads the real model
+```
+
+Without the extra the gateway still starts and the scanner runs on its rules alone; it logs
+`scanner_classifier_unavailable` once at start, naming what is missing. A scan waits at most
+`scanner.classifier_timeout_ms` (300) for the model. A model that has not answered by then, or is
+still loading, leaves the rules' score, and the result says `model: "timeout"`. At 300 ms the model
+reads about 3,500 characters on a laptop, so raise the timeout for longer outputs and measure it
+(`scripts/bench_scanner.py --classifier`, `docs/spikes/scanner.md`). The image sets
+`HF_HUB_OFFLINE=1`: the model is in it, and the container never goes to the network for it.
+
+The gateway loads the model in the background when it starts (`scanner_classifier_ready` in the
+log when it is done, `scanner_classifier_not_ready` when it cannot), so only the first seconds of a
+run are scored by the rules alone. An app under test (`env=test`) does not, and loads it at its
+first scan.
+
+`prompt-guard-2-86m` (Llama Prompt Guard 2) is gated on Hugging Face: accept its license with an
+account, and give the gateway a token. Its labels are not verified here (ADR-0011).
+
+What it does not do. The rules are patterns and understand nothing: a phrase nobody listed, or a
+language the list lacks, is not seen, and the same holds for a text that explains an attack
+instead of making it (it can score high). Python regular expressions hold the interpreter while
+they run, so a scan of 200,000 characters (the limit) keeps the gateway busy for about 20 ms.
+`scripts/bench_scanner.py` measures it, and `docs/spikes/scanner.md` has the numbers.
+
+### Measuring the detector
+
+`eval/detector/` measures how well the scanner tells an injection from a harmless text (KS-707). It
+runs on a dataset that is fixed and checked by hash, and what it measures goes to
+[results.md](results.md) with its date and commit. `eval/DATASETS.md` says where every part of the
+data comes from and under what license.
+
+```bash
+uv sync --extra scanner --extra eval                  # the model, and pyarrow for the public data
+uv run python -m eval.detector.datasets build         # build the dataset and check it
+uv run python -m eval.detector.run --config rules --split dev --summary     # the rules: seconds
+uv run python -m eval.detector.run --config combined --split dev            # with the model
+uv run python -m eval.detector.tune --config combined --scores /tmp/dev.jsonl   # thresholds, on dev
+uv run python -m eval.detector.report --note "why"    # all of test; writes the report
+uv run python -m eval.detector.report --render eval/results/detector-<date>.json   # the words again
+```
+
+- **The data** is 1,892 texts: 662 public prompts (`deepset/prompt-injections`), 1,080 documents
+  (360 carriers, each once as it is and twice with an attack put in it, a quarter of the attacks
+  hidden) and 150 hard negatives, harmless texts that sound like orders. They are split in two by
+  carrier: `dev` is 919 texts and `test` is 973. The public parts are downloaded at a pinned
+  revision and kept in `eval/data/`, which is not committed. When the download fails, or pyarrow is
+  not installed, the build is without them and says so in its first lines, in the JSON and in the
+  report.
+- **The manifest** (`eval/detector/manifest.json`) has the sha256 of every text. A text that
+  differs stops the run with `DatasetChanged`, naming the first five. A change of a template, a
+  sentence bank or the seed changes texts: `python -m eval.detector.datasets manifest` writes the
+  new manifest, and after that every earlier number is about other data, so tune on dev again and
+  run the report again.
+- **The test split** is for the numbers that are published. Thresholds are tuned on dev only
+  (`tune.py` refuses another split). Every run that scores test, `run --split test` or `report`,
+  adds a line to `eval/results/test-runs.jsonl` with the time, the commit, whether the tree had
+  uncommitted changes, the number of texts and the headline numbers, and the report lists those
+  lines. Say why with `--note`.
+- **Run the report on a clean tree and a quiet machine.** It records the commit and whether the
+  tree was clean, and it times one text at a time, so another job on the machine shows up in the
+  timings. It took 3 min 40 s and 4 min 42 s on a 10-CPU Mac with nothing else running; the model is
+  nearly all of it, and the two runs gave the same classification numbers and timings that differed
+  by 20 to 45 percent.
+- **Nightly**, the workflow scores 200 texts of dev with the rules alone and no model. It fails when
+  the data differs from the manifest or when the ROC AUC of that sample is under 0.7, which is a
+  guard against a scanner that stopped working and not a result.
+- **The slow tests** (`tests/integration/test_detector_real.py`, run by `make gate`) download the
+  datasets for real, build again from the cache with the network refused, and score a few texts with
+  the real model.
+
+What the numbers do not say is the last section of `docs/results.md`. The attacks of the documents
+are the templates of this repository, written alongside the rules, so the public prompts are the
+independent check.
 
 ## Audit
 
@@ -1071,6 +1338,9 @@ Edit the file, not the UI: the provisioned dashboard is read-only.
 | `keystone_policy_eval_seconds` | none | A histogram of the time the policy engine took, for calls and for tool lists |
 | `keystone_audit_queue_depth` | none | Audit records accepted and not yet written |
 | `keystone_audit_failures_total` | `reason` | `flush_failed`, `record_dropped`, `queue_full`, `shutdown_dropped`, `not_running` (see Audit) |
+| `keystone_scan_score` | `tenant` | A histogram of the score of each output the scanner read, in tenths from 0.1 to 1.0. A scan that failed has no score and is not in it |
+| `keystone_sessions_tainted_total` | `tenant` | Outputs that scored as an injection in a session that was not tainted yet (see Scanner) |
+| `keystone_scan_errors_total` | `stage` | A scan that failed and was worked around: `classifier`, `rules` or `action` (see Scanner) |
 
 The labels are bounded on purpose. There is no label for a user, a session or an argument: a label
 whose values come from callers would give Prometheus a series for each of them, and metrics are
@@ -1081,10 +1351,9 @@ whatever name the caller made up.
 `keystone_approvals_pending{tenant}` counts the approval requests waiting for a decision. The
 approval service sets it when it starts and after each request, decision and sweep.
 
-The metrics of Phases 7 and 8 are declared and nothing sets them yet, so the last row of the
-dashboard shows "no data" for them until then: `keystone_sessions_tainted_total`,
-`keystone_scan_score`, `keystone_rate_limited_total`, `keystone_budget_spent_usd` and
-`keystone_llm_tokens_total`.
+The metrics of Phase 8 are declared and nothing sets them yet, so the last row of the dashboard
+shows "no data" for those panels until then: `keystone_rate_limited_total`,
+`keystone_budget_spent_usd` and `keystone_llm_tokens_total`.
 
 The dashboard has five rows: Traffic (calls per second by effect, outcome and tool, rejections by
 code), Latency (p50 and p95 of the total, p95 by stage, policy evaluation), Upstreams (errors,
@@ -1212,7 +1481,8 @@ seconds. The Approvals entry in the menu shows how many are waiting, from any pa
 - the session's flags, and the time left in minutes and seconds, counted from the server's figure
   and not the browser's clock;
 - the last calls of the session, loaded when the card's list is opened and read again every 5
-  seconds while it is.
+  seconds while it is. Each row has the scan of its output (`0.88 annotate`: the score and what
+  Keystone did to the output), so the call that brought an injection in is the one marked.
 
 Approve takes an optional note. Reject needs one, because the agent is told it. The card leaves the
 list at once and comes back if the decision cannot be sent. A 409 (someone else decided it, or it

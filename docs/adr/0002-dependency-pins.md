@@ -74,6 +74,36 @@ is newer than the plan: see "Console: where a pin differs" below.
 | typer | 0.27.3 | admin CLI |
 | uvicorn | 0.54.0 | ASGI server |
 
+## Python packages: the scanner extra
+
+The optional extra `keystone[scanner]` (KS-702, ADR-0011) holds the model behind the scanner's
+rules. CI never installs it. The compose build does, and so does `make gate` from Phase 7, which
+runs the one test that loads the real model.
+
+| Package | Version | Used for |
+|---|---|---|
+| torch | 2.14.1 | CPU inference of the classifier. Linux gets the CPU wheel (`2.14.1+cpu`) from `download.pytorch.org/whl/cpu`, so no CUDA library is installed; macOS and Windows get the ordinary wheel |
+| transformers | 5.20.2 | loads the model and its tokenizer; brings `huggingface-hub`, `tokenizers` and `safetensors` |
+
+## Python packages: the eval extra
+
+The optional extra `keystone[eval]` (KS-707) reads the public datasets of the detector evaluation.
+CI installs it for the nightly detector job and for nothing else, and `make gate` installs it from
+Phase 7. Without it the evaluation builds its synthetic texts only and says so.
+
+| Package | Version | Used for |
+|---|---|---|
+| pyarrow | 26.0.0 | reads the parquet files of `deepset/prompt-injections` and `Salesforce/wikitext` at a pinned revision. Imported inside one function of `eval/detector/datasets.py`, so nothing else needs it. The datasets server of Hugging Face answers 429 after a few dozen requests, which 60 articles cannot stay under; the files do not |
+
+## Models
+
+A model is pinned to a revision, which `keystone.defense.classifier.SPECS` holds and a test checks.
+
+| Model | Revision | License | Used for |
+|---|---|---|---|
+| protectai/deberta-v3-base-prompt-injection-v2 | 90c9989b1a342275dd0d1a95aad283c04e075671 | Apache-2.0 | the default classifier (ADR-0011) |
+| meta-llama/Llama-Prompt-Guard-2-86M | a8ded8e697ce7c355e395a0df51f94adb4a2fd27 | Llama community license, gated | the optional classifier; not downloaded unless chosen |
+
 ## Python packages: direct development dependencies
 
 | Package | Version | Used for |

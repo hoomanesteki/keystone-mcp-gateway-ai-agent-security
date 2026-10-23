@@ -32,6 +32,17 @@ dependencies = [
     "uvicorn>=0.54.0",
 ]
 
+[project.optional-dependencies]
+# The classifier behind the scanner's rules (KS-702, ADR-0011). Without it the scanner runs on its
+# rules alone. CI never installs it.
+scanner = [
+    "torch>=2.14.1",
+    "transformers>=5.20.2",
+]
+eval = [
+    "pyarrow>=26.0.0",
+]
+
 [project.scripts]
 keystone = "keystone.admin.cli:app"
 
@@ -53,6 +64,16 @@ dev = [
     "types-pyyaml>=6.0.12.20260906",
 ]
 
+[tool.uv.sources]
+# CPU wheels on Linux. The default wheel on PyPI brings the CUDA libraries with it, a few
+# gigabytes that a gateway with no GPU never uses. macOS and Windows get the ordinary wheel.
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
@@ -72,7 +93,7 @@ check_untyped_defs = true
 warn_redundant_casts = true
 mypy_path = "src:scripts"
 explicit_package_bases = true
-files = ["src", "tests", "scripts", "examples"]
+files = ["src", "tests", "scripts", "examples", "eval"]
 
 # mypy cannot set `strict` per module, so these are the flags that `strict = true` turns on.
 [[tool.mypy.overrides]]
@@ -87,6 +108,8 @@ module = [
     "keystone.audit.*",
     "keystone.approvals",
     "keystone.approvals.*",
+    "keystone.defense",
+    "keystone.defense.*",
 ]
 disallow_any_generics = true
 disallow_subclassing_any = true
@@ -111,5 +134,5 @@ addopts = "--strict-markers"
 
 # Third-party packages that ship no type information.
 [[tool.mypy.overrides]]
-module = ["asyncpg", "asyncpg.*"]
+module = ["asyncpg", "asyncpg.*", "pyarrow", "pyarrow.*"]
 ignore_missing_imports = true

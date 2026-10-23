@@ -38,6 +38,13 @@ upstreams:
       # The amount in cents: `int` would cut 500.99 down to 500 and let it past a limit of 500.
       transfer: {risk: high, tags: [external_effect], extract: {amount: "$.amount | cents"}}
   - {id: echo, tenant: acme, transport: http, url: "http://localhost:8104/mcp"}
+  # Fixture pages that some carry an instruction for the agent that reads them (KS-708).
+  - id: web
+    tenant: acme
+    transport: http
+    url: "http://localhost:8105/mcp"
+    tools:
+      fetch: {risk: low, tags: [reads_untrusted]}
   # Globex's own drive: `python -m examples.upstreams.files_server --port 8112` with
   # FILES_SEED=examples/fixtures/files-globex. Only globex's users see its tools.
   - id: files_globex
@@ -112,3 +119,29 @@ approvals:
   # KEYSTONE_APPROVALS__SLACK_WEBHOOK_URL. Neither delays the call.
   # webhook_url: https://hooks.example.test/keystone
   # slack_webhook_url: https://hooks.slack.com/services/...
+
+# The scanner reads the output of a tool for text that tries to steer the model (ADR-0011). A score
+# under `suspicious` is benign, from `injection` up is an injection, and a score between is
+# suspicious. `allowed_domains` are the hosts a markdown image may point to without a mark against it
+# (a name covers its subdomains). The scan reads at most `max_scan_chars`: a longer text is read at
+# both ends. All of these can be set with KEYSTONE_SCANNER__<NAME>.
+#
+# `classifier` is the model behind the rules: protectai-deberta-v2, prompt-guard-2-86m (needs the
+# Llama license accepted on Hugging Face) or none. It needs the extra keystone[scanner]; without it
+# the scanner runs on its rules alone and says so at start. A scan waits `classifier_timeout_ms` for
+# the model and goes on with the rules when it has not answered. KEYSTONE_SCANNER_CLASSIFIER=none
+# turns the model off.
+scanner:
+  enabled: true
+  classifier: protectai-deberta-v2
+  classifier_timeout_ms: 300
+  thresholds: {suspicious: 0.5, injection: 0.85}
+  # What is done to an output that scored suspicious or injection, by the risk of the tool: pass,
+  # annotate (a warning and markers round it), redact (cut what hides or leaks, then annotate) or
+  # block (withhold it).
+  actions: {low: annotate, medium: annotate, high: redact, critical: block}
+  allowed_domains: []
+  max_scan_chars: 200000
+  # A new tool is held for review when the rules score its description, or the description of a
+  # field of its input schema, at or above this. The model is not used for descriptions.
+  description_threshold: 0.5

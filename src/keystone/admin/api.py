@@ -12,7 +12,7 @@ whole log, and it says nothing of what any record holds.
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated
 from urllib.parse import urlsplit, urlunsplit
@@ -59,7 +59,7 @@ from keystone.audit.redact import is_masked
 from keystone.audit.verify import export_record, verify_chain
 from keystone.core.types import Principal, SessionState
 from keystone.db.models import AuditEvent, Tool, Upstream
-from keystone.defense.description_check import check_description
+from keystone.defense.description_check import Screener
 from keystone.gateway.sessions import SessionDirectory
 from keystone.policy.store import PolicyStore
 from keystone.registry.pinning import pending_fingerprint, schema_text, unified_diff
@@ -86,6 +86,9 @@ class AdminDeps:
     session_directory: SessionDirectory | None = None
     # The approval service. Without one (no master keys) the approvals routes answer 503.
     approvals: ApprovalService | None = None
+    # What reads the descriptions of a tool for the screening a reviewer is shown (KS-706). The
+    # default is the first check alone, which is what the gateway does with the scanner off.
+    screener: Screener = field(default_factory=Screener)
 
 
 class ApprovalsUnavailable(Exception):
@@ -141,7 +144,7 @@ def _summary(row: Tool) -> ToolSummary:
     )
 
 
-def _detail(row: Tool) -> ToolDetail:
+def _detail(row: Tool, screener: Screener) -> ToolDetail:
     held_description, held_schema = row.pending_description, row.pending_schema
     diff = fingerprint = None
     if held_description is not None and held_schema is not None:
@@ -156,11 +159,13 @@ def _detail(row: Tool) -> ToolDetail:
         **_summary(row).model_dump(),
         description=row.description,
         input_schema=row.input_schema,
-        description_screening=check_description(row.description),
+        description_screening=list(screener.screen(row.description, row.input_schema).hits),
         pending_description=row.pending_description,
         pending_schema=row.pending_schema,
         pending_screening=(
-            check_description(row.pending_description) if row.pending_description else []
+            list(screener.screen(row.pending_description, row.pending_schema).hits)
+            if row.pending_description
+            else []
         ),
         fingerprint=fingerprint,
         diff=diff,
@@ -364,7 +369,7 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
         "/tools/{name}", tags=["tools"], summary="A tool, with its pending definition and diff"
     )
     async def get_tool(principal: admin, name: str) -> ToolDetail:
-        return _detail(await deps.tools.get(principal.tenant_id, name))
+        return _detail(await deps.tools.get(principal.tenant_id, name), deps.screener)
 
     @app.post(
         "/tools/{name}/approve-change",

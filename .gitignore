@@ -231,3 +231,6 @@ console/openapi.json
 console/playwright-report/
 console/test-results/
 *.tsbuildinfo
+
+# The detector evaluation downloads public data here (KS-707). Nothing in it is committed.
+eval/data/

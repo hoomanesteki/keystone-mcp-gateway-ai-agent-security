@@ -23,9 +23,13 @@ def triggers() -> dict[str, Any]:
     return on
 
 
-def commands() -> list[str]:
-    [job] = workflow()["jobs"].values()
-    return [step["run"] for step in job["steps"] if "run" in step]
+def jobs() -> dict[str, Any]:
+    found: dict[str, Any] = workflow()["jobs"]
+    return found
+
+
+def commands(job: str = "e2e") -> list[str]:
+    return [step["run"] for step in jobs()[job]["steps"] if "run" in step]
 
 
 @pytest.mark.phase(3)
@@ -58,13 +62,14 @@ def test_every_make_target_it_uses_exists() -> None:
 @pytest.mark.phase(3)
 def test_it_has_least_privilege_and_a_time_limit_and_stops_the_stack() -> None:
     document = workflow()
-    [job] = document["jobs"].values()
+    job = jobs()["e2e"]
 
     assert document["permissions"] == {"contents": "read"}
     assert job["timeout-minutes"] <= 60
     assert any(
         step.get("if") == "always()" and step.get("run") == "make down" for step in job["steps"]
     )
+    assert all(each["timeout-minutes"] <= 60 for each in jobs().values())
 
 
 @pytest.mark.phase(3)
@@ -73,8 +78,7 @@ def test_it_uses_the_pinned_actions_of_the_ci_workflow() -> None:
     ci_actions = {
         step["uses"] for job in ci["jobs"].values() for step in job["steps"] if "uses" in step
     }
-    [job] = workflow()["jobs"].values()
-    used = {step["uses"] for step in job["steps"] if "uses" in step}
+    used = {step["uses"] for job in jobs().values() for step in job["steps"] if "uses" in step}
 
     assert used and used <= ci_actions
 
@@ -85,3 +89,31 @@ def test_it_drives_the_console_in_a_browser_once_the_stack_is_up() -> None:
 
     assert steps.index("make up") < steps.index("make console-e2e")
     assert any("playwright install --with-deps chromium" in step for step in steps)
+
+
+@pytest.mark.phase(7)
+def test_the_detector_job_scores_200_samples_with_the_rules_and_no_model() -> None:
+    steps = commands("detector")
+    evaluation = [step for step in steps if "eval.detector.run" in step]
+    text = "\n".join(steps)
+
+    assert set(jobs()) == {"e2e", "detector"}
+    assert len(evaluation) == 1
+    for flag in ("--config rules", "--split dev", "--limit 200"):
+        assert flag in evaluation[0], flag
+    # No model in CI: the scanner extra is not installed, and nothing downloads weights.
+    assert "scanner" not in text and "huggingface" not in text.lower()
+    assert "uv sync --extra eval" in steps
+    # The test split is for the published numbers: a nightly run reads dev.
+    assert "--split test" not in text
+
+
+@pytest.mark.phase(7)
+def test_the_detector_job_fails_when_the_rules_rank_worse_than_the_guard() -> None:
+    [evaluation] = [step for step in commands("detector") if "eval.detector.run" in step]
+
+    match = re.search(r"--fail-under-auc (\d\.\d+)", evaluation)
+
+    assert match is not None
+    assert 0.5 < float(match.group(1)) < 0.9
+    assert "set -o pipefail" in evaluation  # the pipe to the summary must not hide a failure

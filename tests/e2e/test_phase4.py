@@ -30,7 +30,7 @@ def test_phase_4_smoke(stack: None) -> None:
     out = result.stdout
     assert "denied by policy: default-deny" in out
     assert "audit: deny default-deny" in out
-    assert "tools: 15" in out
+    assert "tools: 16" in out
     assert "audit: require_approval approve-transfer-over-500" in out
     assert "lena rejects: 200" in out and "code=KS_APPROVAL_REJECTED" in out  # held, then rejected
     assert "audit: allow operators-high" in out

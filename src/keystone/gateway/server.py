@@ -188,7 +188,7 @@ class Gateway:
             )
         else:
             result = await self.pipeline.run(call)
-            await self._save(session)
+            await self._touch(session)
         return to_call_tool_result(result, call.call_id)
 
     def _remember(self, ctx: Context, tenant_id: str) -> None:
@@ -219,14 +219,17 @@ class Gateway:
             for session_id, session in targets:
                 group.start_soon(tell, session_id, session)
 
-    async def _save(self, session: SessionState) -> None:
-        """Write the session back after a call. A failure is logged and does not undo the call."""
+    async def _touch(self, session: SessionState) -> None:
+        """Restart the session's clock after a call. The copy this call read at its start is not
+        written back: another call may have recorded a flag or a taint since, and a call that was
+        held for approval is minutes behind (KS-791, ADR-0015). Whatever a call learns, its slots
+        record with the store's own changes. A failure is logged and does not undo the call."""
         if session.session_id.startswith(UNBOUND_PREFIX):
             return
         try:
-            await self.sessions.save(session)
+            await self.sessions.touch(session.session_id)
         except Exception as exc:
-            log.error("session_not_saved", error=type(exc).__name__)
+            log.error("session_not_touched", error=type(exc).__name__)
 
     async def _session(self, ctx: Context, principal: Principal) -> SessionState:
         # ctx.request is typed Any in the SDK. On HTTP it is the Starlette request.

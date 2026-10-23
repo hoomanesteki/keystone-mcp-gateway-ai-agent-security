@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -151,6 +152,81 @@ class ApprovalSettings(BaseModel):
         return value
 
 
+class ScannerThresholds(BaseModel):
+    """Where a score becomes `suspicious` and where it becomes `injection`. A score on a threshold
+    takes the higher label."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    suspicious: float = Field(default=0.5, ge=0, le=1)
+    injection: float = Field(default=0.85, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _in_order(self) -> "ScannerThresholds":
+        if self.suspicious > self.injection:
+            raise ValueError("thresholds.suspicious must not be above thresholds.injection")
+        return self
+
+
+HOST = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
+
+
+Classifier = Literal["protectai-deberta-v2", "prompt-guard-2-86m", "none"]
+ScanAction = Literal["pass", "annotate", "redact", "block"]
+
+
+class ScannerActions(BaseModel):
+    """What is done to an output that scored `suspicious` or `injection`, by the risk of the tool
+    that made it (KS-703). `pass` leaves it alone and still records the score."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    low: ScanAction = "annotate"
+    medium: ScanAction = "annotate"
+    high: ScanAction = "redact"
+    critical: ScanAction = "block"
+
+
+class ScannerSettings(BaseModel):
+    """How tool output is checked for instructions aimed at the model (KS-701, KS-702)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    # The model behind the rules, or `none`. It needs the extra `keystone[scanner]`; without it the
+    # scanner runs on its rules alone and logs that once at start. `prompt-guard-2-86m` needs the
+    # Llama license accepted on Hugging Face.
+    classifier: Classifier = "protectai-deberta-v2"
+    # The longest a scan waits for the model. A model that has not answered by then is left out
+    # of that scan, which is then scored by the rules alone (`model` says "timeout").
+    classifier_timeout_ms: int = Field(default=300, ge=1, le=10_000)
+    thresholds: ScannerThresholds = Field(default_factory=ScannerThresholds)
+    actions: ScannerActions = Field(default_factory=ScannerActions)
+    # Hosts a markdown image may point to without a mark against it. An image anywhere else, or any
+    # markdown link or image with a long query string, is how a conversation leaves in a URL.
+    allowed_domains: list[str] = Field(default_factory=list)
+    # The most text one scan reads. A longer text is read at both ends, half of this at each, and
+    # the scan says it was cut. Python regular expressions hold the interpreter while they run, so
+    # the size of a scan is also the time the gateway is busy with it.
+    max_scan_chars: int = Field(default=200_000, ge=1_000, le=50_000_000)
+    # A new tool whose description, or the description of a field of its input schema, scores this
+    # much or more with the rules is held until a person has read it (KS-706). It is apart from the
+    # thresholds above: a person reads a description once, and an output is read on every call.
+    description_threshold: float = Field(default=0.5, gt=0, le=1)
+
+    @field_validator("allowed_domains")
+    @classmethod
+    def _bare_hosts(cls, value: list[str]) -> list[str]:
+        """Host names only, in lower case, with no scheme, port or path: `cdn.acme.test`. A name
+        also covers its subdomains. A leading dot is allowed and dropped."""
+        hosts = [item.strip().lower().removeprefix(".") for item in value]
+        if not all(HOST.match(host) for host in hosts):
+            raise ValueError("allowed_domains takes host names such as cdn.acme.test")
+        return hosts
+
+
 class HealthSettings(BaseModel):
     """How the gateway watches its upstreams (KS-209)."""
 
@@ -215,6 +291,11 @@ class Settings(BaseSettings):
     health: HealthSettings = Field(default_factory=HealthSettings)
     audit: AuditSettings = Field(default_factory=AuditSettings)
     approvals: ApprovalSettings = Field(default_factory=ApprovalSettings)
+    scanner: ScannerSettings = Field(default_factory=ScannerSettings)
+    # A short name for `scanner.classifier`, so that KEYSTONE_SCANNER_CLASSIFIER=none turns the
+    # model off without the nested spelling (KEYSTONE_SCANNER__CLASSIFIER). It wins when both are
+    # set, because it is the one a person types to change a running stack.
+    scanner_classifier: Classifier | None = None
     policy: PolicySettings = Field(default_factory=PolicySettings)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
     auth: AuthSettings = Field(default_factory=AuthSettings)
@@ -248,6 +329,12 @@ class Settings(BaseSettings):
         is dev."""
         configured = self.audit.fail_closed
         return configured if configured is not None else self.env != "dev"
+
+    @model_validator(mode="after")
+    def _the_short_name_of_the_classifier(self) -> "Settings":
+        if self.scanner_classifier is not None:
+            self.scanner = self.scanner.model_copy(update={"classifier": self.scanner_classifier})
+        return self
 
     @model_validator(mode="after")
     def _dev_principal_only_without_authentication(self) -> "Settings":

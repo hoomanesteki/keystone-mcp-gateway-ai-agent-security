@@ -60,6 +60,17 @@ export function formatLatency(ms: string | null): string {
   return value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${Math.round(value)} ms`;
 }
 
+/** What the scanner made of a call's output, as the audit log keeps it: the score to two places
+ * and the action taken, `0.88 annotate`. Null when the output was not scanned (a rejected call, a
+ * tool of Keystone's own, a scanner that is switched off). A score that is not a number is shown as
+ * it came. */
+export function formatScan(score: string | null, action: string | null): string | null {
+  if (score === null && action === null) return null;
+  const value = score === null ? null : Number(score);
+  const shown = value !== null && Number.isFinite(value) ? value.toFixed(2) : (score ?? "none");
+  return `${shown} ${action ?? "no action"}`;
+}
+
 /** A cost as the audit log stores it (a decimal string of US dollars): `$0.0024`, `free`. */
 export function formatCost(usd: string): string {
   const value = Number(usd);

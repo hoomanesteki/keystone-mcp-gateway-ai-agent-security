@@ -10,8 +10,14 @@ const REASONS: Record<string, string> = {
   disabled_by_operator: "Disabled by an operator",
 };
 
+/** The screening a new tool is held for starts `suspicious_description:`. What follows is one
+ * finding: the rules, then (with the scanner) `score=0.70 in=description`. It has commas of its
+ * own, so it is read as a whole and not as several reasons. */
+const SCREENED = "suspicious_description:";
+
 export function describeReason(reason: string | null): string {
   if (reason === null) return "";
+  if (reason.startsWith(SCREENED)) return REASONS["suspicious_description"] ?? reason;
   const parts = reason
     .split(",")
     .map((part) => part.split(":")[0] ?? part)
@@ -28,7 +34,28 @@ const SCREENING: Record<string, string> = {
   pseudo_tag: "a made-up tag such as <important>",
   cross_tool_reference: "a reference to another tool",
   oversized: "an unusually long text",
+  // The rules of the scanner (ADR-0011), which read the descriptions of a schema too (KS-706).
+  role_spoof: "text that poses as the system or the assistant",
+  tool_directive: "an instruction to call a tool or to send something to an address",
+  secrecy: "an instruction to keep something from the user",
+  markdown_exfil: "an image or link that carries data out in its address",
+  encoded_payload: "a long block of encoded text",
 };
+
+export interface ScanFinding {
+  score: string;
+  where: string;
+}
+
+/** The scanner's score and where it found it, from a screening reason such as
+ * `suspicious_description:role_spoof,tool_directive score=0.70 in=input_schema.properties.note`.
+ * Null for a reason without a score: the first check alone held the tool, or it was not held for
+ * screening. */
+export function describeScan(reason: string | null): ScanFinding | null {
+  if (!reason?.startsWith(SCREENED)) return null;
+  const found = /\sscore=(\d+(?:\.\d+)?)\sin=(\S+)$/.exec(reason);
+  return found ? { score: found[1] ?? "", where: found[2] ?? "" } : null;
+}
 
 export function describeScreening(hits: readonly string[]): string[] {
   return hits.map((hit) => SCREENING[hit] ?? hit);
