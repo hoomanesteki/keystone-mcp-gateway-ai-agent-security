@@ -8,6 +8,7 @@ reason is `default-deny`, not `policy-error`: an empty set is a valid set, and i
 """
 
 import itertools
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -23,8 +24,11 @@ from keystone.core.types import (
 from keystone.policy.engine import DEFAULT_DENY, CedarPolicyEngine
 from keystone.policy.entities import Action, build_context
 from keystone.policy.store import PolicyStore
+from keystone.settings import PolicySettings
 from tests.fixtures.calls import make_ctx, make_tool
+from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.policies import permit, write_policies
+from tests.fixtures.upstreams import NAMES, DemoUpstreams
 
 TENANTS = ("acme", "globex")
 PRINCIPALS = [
@@ -118,3 +122,45 @@ def test_i6(tmp_path: Path) -> None:
     assert asked == 3 * len(PRINCIPALS) * len(tools()) * len(ACTIONS) * len(ARGUMENTS) * len(
         SESSIONS
     )
+
+
+CALLS: list[tuple[str, dict[str, object]]] = [
+    ("echo__echo", {"payload": "x"}),
+    ("mail__list_emails", {"folder": "inbox"}),
+    ("mail__send_email", {"to": "x@acme.test", "subject": "s", "body": "b"}),
+    ("files__read_file", {"path": "README.txt"}),
+    ("bank__get_balance", {"account": "CHK-001"}),
+    ("bank__transfer", {"from_account": "CHK-001", "to": "SAV-002", "amount": 5}),
+]
+
+
+@pytest.mark.services
+@pytest.mark.phase(4)
+async def test_i6_through_the_gateway(
+    keystone_app_factory: Callable[..., KeystoneApp],
+    mcp_client: McpConnect,
+    demo_upstreams: DemoUpstreams,
+    tmp_path: Path,
+) -> None:
+    """The same thing end to end: with no rule that allows anything, an operator and an admin get
+    no tools and no call reaches an upstream."""
+    root = write_policies(tmp_path / "empty")
+    (root / "default" / "access").mkdir(parents=True)
+    app = keystone_app_factory(settings={"policy": PolicySettings(root=root)})
+
+    for user in ("alice", "olivia", "root"):
+        async with mcp_client(app, user=user) as client:
+            assert (await client.list_tools()).tools == []
+            for name, arguments in CALLS:
+                result = await client.call_tool(name, arguments)
+                assert result.is_error, f"{user} called {name}"
+                assert result.meta is not None
+                assert result.meta["keystone/code"] == "KS_DENIED", f"{user} called {name}"
+                assert result.meta["keystone/reasons"] == [DEFAULT_DENY]
+
+    assert all(demo_upstreams.state(name)["calls"] == [] for name in NAMES)
+    records = app.audit.records
+    assert len(records) == 3 * len(CALLS)
+    assert {(r["decision"], r["dispatched"], r["reject_code"]) for r in records} == {
+        ("deny", False, "KS_DENIED")
+    }

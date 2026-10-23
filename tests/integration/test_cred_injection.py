@@ -51,7 +51,7 @@ async def test_upstream_receives_header(
     keyed_upstreams.reset()
     assert keyed_upstreams.state("mail")["api_key_received"] is False
 
-    async with mcp_client(app) as client:
+    async with mcp_client(app, user="olivia") as client:  # an operator lists all twelve tools
         listed = await client.list_tools()
         read = await client.call_tool("mail__list_emails", {"folder": "inbox"})
 
@@ -154,7 +154,7 @@ async def test_sync_and_health_probes_use_the_upstreams_own_credential(
     assert {name: health.status(name) for name in names} == dict.fromkeys(names, "up")
     statuses = httpx2.get(f"{app.base}/readyz", timeout=10).json()["upstreams"]
     assert statuses == dict.fromkeys(names, "up")
-    async with mcp_client(app) as client:
+    async with mcp_client(app, user="olivia") as client:
         assert len((await client.list_tools()).tools) == 12
 
 

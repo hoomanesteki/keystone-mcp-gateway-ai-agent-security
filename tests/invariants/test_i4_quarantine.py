@@ -73,7 +73,7 @@ async def test_i4(
     would, after the gateway has listed the tools and holds them in its cache. The calls follow
     at once, with no wait: the cache expiring must not be what stops them."""
     app = keystone_app_factory(registry=RegistrySettings(cache_ttl_s=0.3))
-    async with mcp_client(app) as client:
+    async with mcp_client(app, user="olivia") as client:  # an operator lists all twelve tools
         assert len((await client.list_tools()).tools) == 12
 
         for way in WAYS:

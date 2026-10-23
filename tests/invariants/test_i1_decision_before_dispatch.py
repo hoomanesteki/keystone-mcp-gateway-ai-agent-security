@@ -92,6 +92,9 @@ async def test_i1(
     assert spy is not None
     assert spy.tools == ["echo__echo", "bank__get_balance"]
     assert [d.effect if d else None for d in spy.decisions] == [Effect.ALLOW, Effect.ALLOW]
+    # The decision comes from the policy engine and not from a stub (KS-406).
+    assert [d.source if d else None for d in spy.decisions] == ["policy", "policy"]
+    assert all(d and d.policy_version and d.reasons for d in spy.decisions)
     assert [r["dispatched"] for r in app.audit.records] == [True, True, False, False]
 
 
