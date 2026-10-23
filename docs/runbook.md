@@ -19,6 +19,7 @@ upstreams and Keystone, and waits until every container reports healthy. Cold st
 | `make test-e2e` | The end-to-end tests against the running stack. The nightly workflow runs `make up` and then this |
 | `make console-check` | The console's lint (ESLint with type information, Prettier), unit tests and production build. `make check` runs it |
 | `make console-types` | Write the admin API's schema (`scripts/dump_openapi.py`) and generate `console/src/api/schema.d.ts` from it |
+| `make console-e2e` | The browser test of the approval loop (see Console). It starts the stack if it is not running; `make gate PHASE=6` and the nightly run it |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit log (read through the admin API) does not hold one new record for each call |
 | `bash scripts/smoke/phase_6.sh` | Three agents run as olivia and lena decides through the admin API: a transfer of 900 is held, approved and completed (a second decision is 409 and olivia's own is 403); one of 700 is rejected with a note that the agent gets; one of 600 times out as `KS_APPROVAL_PENDING`, is approved late and is awaited. Then the audit log and `keystone_approvals_pending` are checked. About 20 seconds: the third request waits out the 10 s hold. |
@@ -1247,6 +1248,35 @@ screening rule the pending description trips. "Approve change" needs a note and 
 fingerprint of the definition that was read, so one that changed again after the person opened it
 is refused (409) and not approved unseen. "Disable" and "Enable" switch an active tool and one an
 operator disabled; the API refuses the rest and the console shows what it said.
+
+### The browser test
+
+`make console-e2e` runs `console/e2e/approval.spec.ts` in headless chromium (Playwright, chromium
+only). It runs at every phase gate from phase 6 (`make gate PHASE=6`) and in the nightly workflow.
+It needs the compose stack and starts it (`docker compose up --build --wait`) when Keystone,
+Keycloak and the bank are not answering; a warm run takes about 14 seconds, and one that has to
+start the stack takes about 75.
+
+1. `globalSetup` puts the bank at its seed state and starts olivia's scripted agent in the
+   background with `examples/agents/scripts/approval_demo.yaml`: a transfer of 900, then
+   `keystone__await_approval`. Keystone holds the transfer for 10 seconds
+   (`approvals.wait_seconds` in `deploy/keystone.compose.yaml`) and then answers
+   `KS_APPROVAL_PENDING`, so the agent is waiting when the test starts. Playwright's `webServer`
+   starts the Vite dev server unless one is already running on port 5173 (outside CI).
+2. The test signs in as lena on Keycloak's own page (her password is in `.env.example`) and checks
+   that the menu holds Approvals only. It finds the card for `bank__transfer` and `invoice 4471`,
+   checks the risk, the requester, the amount and the link of the reason, and opens the session's
+   recent calls. It waits until a call with `KS_APPROVAL_PENDING` is listed there. That wait is the
+   point: an approval inside the first 10 seconds would finish the first call and leave the await
+   tool nothing to do.
+3. It approves with a note, sees the card go and the toast, and reads the agent's transcript
+   (`console/test-results/approval-agent.txt`): the transfer succeeded, after
+   `answered KS_APPROVAL_PENDING; waited for approval <the card's id>`, with the status
+   `completed`. Then it reads `/_state` of the bank: one transfer, 900 from CHK-001 to SAV-002.
+
+A stopped stack, a missing `uv` or a bank that does not reset stops the run before the browser
+opens, with the reason. Requests of earlier runs that nobody decided stay in the queue until they
+expire (15 minutes); the test takes the newest card.
 
 ### Settings
 
