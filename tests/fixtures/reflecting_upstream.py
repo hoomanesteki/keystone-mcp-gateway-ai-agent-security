@@ -39,6 +39,11 @@ def create_server(extra: str = "") -> MCPServer:
         return f"{note}: the key I was sent is {received(ctx)}"
 
     @server.tool()
+    def show_meta(ctx: Context) -> dict[str, Any]:
+        """Return the `_meta` of this request: the trace context Keystone sends (KS-504)."""
+        return {"meta": dict(ctx.request_context.meta or {})}
+
+    @server.tool()
     def show_extra() -> dict[str, str]:
         """Return the second value this server knows."""
         return {"extra": extra}

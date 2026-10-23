@@ -256,7 +256,8 @@ def mcp_client(fake_idp: FakeIdp) -> McpConnect:  # noqa: F811
 
     `user` and `agent` choose another demo user (a test that calls a high-risk tool uses
     `user="olivia"`, an operator). `token` sends that exact token instead, and `token=""` sends
-    none. Other keyword arguments go to the MCP client.
+    none. `headers` are sent on every request besides the token (a `traceparent`, for example).
+    Other keyword arguments go to the MCP client.
     """
 
     @asynccontextmanager
@@ -266,11 +267,13 @@ def mcp_client(fake_idp: FakeIdp) -> McpConnect:  # noqa: F811
         token: str | None = None,
         user: str = "alice",
         agent: str | None = None,
+        headers: Mapping[str, str] | None = None,
         **client_options: Any,
     ) -> AsyncIterator[Client]:
         bearer = fake_idp.token_for(user, agent) if token is None else token
-        headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
-        async with httpx2.AsyncClient(headers=headers, timeout=httpx2.Timeout(15)) as http:
+        sent = {"Authorization": f"Bearer {bearer}"} if bearer else {}
+        sent.update(headers or {})
+        async with httpx2.AsyncClient(headers=sent, timeout=httpx2.Timeout(15)) as http:
             transport = streamable_http_client(app.url, http_client=http)
             async with Client(transport, **client_options) as client:
                 yield client

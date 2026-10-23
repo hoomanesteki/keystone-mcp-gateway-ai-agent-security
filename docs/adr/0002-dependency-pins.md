@@ -55,6 +55,9 @@ file or listed with a different version.
 | fastapi | 0.159.1 | HTTP app and dependency injection |
 | jsonschema | 4.26.0 | Draft 2020-12 validation of tool arguments in the pipeline |
 | mcp | 2.3.0 | MCP server and client SDK (ADR-0003); a new major version, see `docs/spikes/mcp-proxy.md` |
+| opentelemetry-api | 1.45.1 | the tracing API: spans, the current span, W3C trace context propagation (KS-504) |
+| opentelemetry-exporter-otlp-proto-http | 1.45.1 | sends spans to Jaeger over OTLP/HTTP (KS-504) |
+| opentelemetry-sdk | 1.45.1 | the tracer provider and the in-memory exporter the tests use (KS-504) |
 | prometheus-client | 0.26.0 | metrics registry and the `/metrics` text format (KS-501, KS-505); no dependencies of its own |
 | pydantic-settings | 2.16.1 | typed settings from env and YAML |
 | pyjwt | 2.15.1 | JWT validation against the IdP's keys (KS-303), with the `crypto` extra for RS256 and ES256; it was already installed through the MCP SDK |
@@ -100,6 +103,7 @@ file or listed with a different version.
 | defusedxml | 0.7.1 |
 | distlib | 0.4.4 |
 | filelock | 4.2.4 |
+| googleapis-common-protos | 1.76.0 |
 | greenlet | 3.5.6 |
 | h11 | 0.16.0 |
 | httpcore | 1.0.9 |
@@ -120,7 +124,11 @@ file or listed with a different version.
 | msgpack | 1.2.3 |
 | mypy-extensions | 1.1.0 |
 | nodeenv | 1.11.0 |
-| opentelemetry-api | 1.45.1 |
+| opentelemetry-exporter-http-transport | 0.66b1 |
+| opentelemetry-exporter-otlp-common | 0.66b1 |
+| opentelemetry-exporter-otlp-proto-common | 1.45.1 |
+| opentelemetry-proto | 1.45.1 |
+| opentelemetry-semantic-conventions | 0.66b1 |
 | packageurl-python | 0.17.6 |
 | packaging | 26.3 |
 | pathspec | 1.1.1 |
@@ -129,6 +137,7 @@ file or listed with a different version.
 | pip-requirements-parser | 32.0.1 |
 | platformdirs | 4.13.5 |
 | pluggy | 1.7.0 |
+| protobuf | 7.36.2 |
 | py-serializable | 2.1.0 |
 | pycparser | 3.11 |
 | pydantic | 2.14.1 |

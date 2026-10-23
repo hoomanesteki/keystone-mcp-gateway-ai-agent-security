@@ -229,6 +229,18 @@ In the modern era change notifications travel only on a `subscriptions/listen` s
 gateway does not serve (it refuses that era, ADR-0003). The test is
 `tests/integration/test_aggregate.py::test_open_sessions_hear_that_the_tool_list_changed`.
 
+## 7. Trace context to the upstream (KS-504)
+
+KS-504 asked whether the client can set the `_meta` of a request, to pass a W3C `traceparent` to
+an upstream. It can: `Client.call_tool(name, arguments, ..., meta=...)` takes a `RequestParamsMeta`,
+an open map, and it lands in the `_meta` of the `tools/call` params. On the other side an
+`MCPServer` tool that takes `ctx: Context` reads it as `ctx.request_context.meta`. Keystone sends
+`traceparent` and, when there is one, `tracestate`, with the upstream call span as the parent.
+`tests/integration/test_tracing.py::test_the_trace_context_reaches_the_upstream_in_meta` checks the
+trace id and the span id at the upstream. The traceparent flags the SDK writes can be `03` and not
+`01` (sampled plus the random-trace-id flag of trace context level 2), so a reader must test the
+sampled bit and not compare the string.
+
 ## What I did not test
 
 - Resumability with an event store, and SSE streaming of progress.

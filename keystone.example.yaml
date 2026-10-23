@@ -80,6 +80,10 @@ health:
   degraded_after: 1
   down_after: 3
 
+# Where traces go: an OTLP/HTTP endpoint (Jaeger takes it on :4318). Without it no spans are made and
+# audit rows carry no trace id. Also KEYSTONE_OTLP_ENDPOINT.
+# otlp_endpoint: http://localhost:4318
+
 # The audit log (every call leaves a hash-chained row in Postgres). With fail_closed on, a call is
 # refused before it runs while the audit writer is unhealthy (its queue over 90% full, or a flush
 # failed less than 5 s ago), because an action with no record is what the log exists to prevent.

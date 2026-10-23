@@ -27,7 +27,7 @@ from jsonschema.exceptions import best_match
 from keystone.core.canonical import canonical_json
 from keystone.core.errors import Code, Reject, to_tool_result
 from keystone.core.types import CallContext, Effect, ToolResult
-from keystone.telemetry.tracing import Tracer
+from keystone.telemetry.tracing import SpanHandle, Tracer
 
 log = structlog.get_logger()
 
@@ -37,6 +37,10 @@ MAX_VALIDATION_MESSAGE = 300
 CRASH_MESSAGE = "the gateway could not finish checking this call"
 NO_DECISION = "no-decision"
 AUDIT_UNAVAILABLE = "audit-unavailable"
+# What a failed span says. It is fixed text: an exception's own would be sent to the collector.
+INTERCEPTOR_FAILED = "the interceptor failed"
+UPSTREAM_FAILED = "the upstream call failed"
+CALL_FAILED = "the call failed"
 
 Outcome = Literal["ok", "rejected", "error"]
 
@@ -135,7 +139,7 @@ class Pipeline:
         reject: Reject | None = None
         # A cancelled call (the client went away) never reaches a line that sets the outcome.
         outcome: Outcome = "error"
-        with self.tracer.span("pipeline.run", call_id=ctx.call_id, tool=ctx.tool.name):
+        with self.tracer.tool_call(ctx) as span:
             try:
                 try:
                     self._require_audit(ctx)
@@ -158,17 +162,35 @@ class Pipeline:
                     outcome = "error" if is_failure(r) else "rejected"
                 return ctx.result
             finally:
+                self._describe(span, ctx, outcome, reject)
                 await self._audit(ctx, outcome, reject)
 
     async def reject(self, ctx: CallContext, reject: Reject) -> ToolResult:
         """Refuse a call that cannot enter the pipeline (a tool that does not exist). The
         refusal is still audited, so every call leaves one record (invariant I2)."""
-        with self.tracer.span("pipeline.reject", call_id=ctx.call_id, code=reject.code.value):
+        with self.tracer.tool_call(ctx) as span:
             try:
                 ctx.result = to_tool_result(reject, ctx.call_id)
                 return ctx.result
             finally:
+                self._describe(span, ctx, "rejected", reject)
                 await self._audit(ctx, "rejected", reject)
+
+    @staticmethod
+    def _describe(
+        span: SpanHandle, ctx: CallContext, outcome: Outcome, reject: Reject | None
+    ) -> None:
+        """What the root span says of the call once it is over: identifiers and verdicts. The
+        arguments and the user's id are not on a span (KS-504)."""
+        span.set("keystone.outcome", outcome)
+        decision = ctx.decision
+        if decision is not None:
+            span.set("keystone.decision.effect", decision.effect.value)
+            span.set("keystone.decision.reasons", list(decision.reasons))
+        if reject is not None:
+            span.set("keystone.reject_code", reject.code.value)
+        if outcome == "error":
+            span.fail(CALL_FAILED)
 
     def _require_audit(self, ctx: CallContext) -> None:
         """Raise Reject(DENIED) when the pipeline fails closed and the audit sink says it may
@@ -194,8 +216,16 @@ class Pipeline:
     ) -> None:
         started = time.perf_counter()
         try:
-            with self.tracer.span(f"interceptor.{interceptor.name}.{hook.__name__}"):
-                await hook(ctx)
+            with self.tracer.span(
+                f"keystone.interceptor.{interceptor.name}", {"keystone.hook": hook.__name__}
+            ) as span:
+                try:
+                    await hook(ctx)
+                except Reject:
+                    raise
+                except Exception:
+                    span.fail(INTERCEPTOR_FAILED)
+                    raise
         except Reject:
             raise
         except Exception:
@@ -213,8 +243,19 @@ class Pipeline:
     async def _dispatch(self, ctx: CallContext) -> ToolResult:
         started = time.perf_counter()
         try:
-            with self.tracer.span("dispatch", upstream=ctx.tool.upstream_id):
-                return await self.dispatcher.dispatch(ctx)
+            with self.tracer.span(
+                "keystone.upstream.call", {"keystone.upstream": ctx.tool.upstream_id}, kind="client"
+            ) as span:
+                try:
+                    return await self.dispatcher.dispatch(ctx)
+                except Reject as refusal:
+                    span.set("keystone.reject_code", refusal.code.value)
+                    if is_failure(refusal):
+                        span.fail(UPSTREAM_FAILED)
+                    raise
+                except Exception:
+                    span.fail(UPSTREAM_FAILED)
+                    raise
         except Reject:
             raise
         except Exception:

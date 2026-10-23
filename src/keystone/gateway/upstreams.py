@@ -21,7 +21,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from types import TracebackType
-from typing import Any, Literal, Protocol, Self
+from typing import Any, Literal, Protocol, Self, cast
 
 import anyio
 import httpx2
@@ -31,6 +31,7 @@ from mcp import Client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
+from mcp_types import RequestParamsMeta
 from pydantic import BaseModel, SecretStr
 
 from keystone.core.canonical import canonical_json
@@ -87,13 +88,15 @@ class UpstreamTool(BaseModel, frozen=True):
 
 class UpstreamClient(Protocol):
     async def list_tools(self) -> list[UpstreamTool]: ...
-    async def call_tool(self, name: str, args: dict[str, Any], timeout_s: float) -> ToolResult: ...
+    async def call_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        timeout_s: float,
+        meta: Mapping[str, str] | None = None,
+    ) -> ToolResult: ...
     async def health(self) -> bool: ...
     async def aclose(self) -> None: ...
-
-
-def inject_trace_headers(headers: dict[str, str]) -> None:
-    """A no-op until KS-504 adds trace propagation. Headers are fixed per session."""
 
 
 def _session_lost(exc: MCPError) -> bool:
@@ -183,9 +186,17 @@ class _SessionClient:
                 Code.UPSTREAM_TIMEOUT, "the upstream server did not list its tools"
             ) from None
 
-    async def call_tool(self, name: str, args: dict[str, Any], timeout_s: float) -> ToolResult:
+    async def call_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        timeout_s: float,
+        meta: Mapping[str, str] | None = None,
+    ) -> ToolResult:
         async def call(client: Client) -> ToolResult:
-            return convert_result(await client.call_tool(name, args))
+            # `meta` is the request's `_meta`: the trace context of the call (KS-504).
+            sent = cast("RequestParamsMeta | None", dict(meta) if meta else None)
+            return convert_result(await client.call_tool(name, args, meta=sent))
 
         try:
             with anyio.fail_after(timeout_s):
@@ -346,7 +357,6 @@ class HttpUpstreamClient(_SessionClient):
     ) -> None:
         self.url = url
         fixed = dict(headers or {})
-        inject_trace_headers(fixed)
         super().__init__(
             lambda watch: _http_transport(url, fixed, watch),
             task_group,

@@ -146,6 +146,7 @@ def record_fields(
     *,
     now: datetime | None = None,
     redaction: RedactionConfig | None = None,
+    trace_id: str | None = None,
 ) -> dict[str, Any]:
     """Every column of the record except seq, prev_hash and hash, ready to store and to hash.
 
@@ -189,5 +190,5 @@ def record_fields(
         "scan_action": scan.action if scan else None,
         "cost_usd": cost if cost is not None else Decimal(0).quantize(DECIMAL_SCALES["cost_usd"]),
         "latency_ms": to_decimal(elapsed_ms, DECIMAL_SCALES["latency_ms"]),
-        "trace_id": None,
+        "trace_id": clean_text(trace_id) if trace_id else None,
     }

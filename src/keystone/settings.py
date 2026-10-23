@@ -170,6 +170,9 @@ class Settings(BaseSettings):
     oidc_issuer: str | None = None
     oidc_audience: str = "keystone"
     oidc_discovery_url: str | None = None
+    # Where traces go: an OTLP/HTTP endpoint such as http://jaeger:4318 (KS-504). Without it no
+    # spans are made, and audit rows carry no trace id.
+    otlp_endpoint: str | None = None
     # The address clients use to reach Keystone, for the sign-in metadata (RFC 9728). Without it
     # the address of the request is used.
     public_base_url: str | None = None
@@ -199,7 +202,7 @@ class Settings(BaseSettings):
             raise ValueError("dev_principal needs auth.mode none")
         return self
 
-    @field_validator("oidc_issuer", "oidc_discovery_url", "public_base_url")
+    @field_validator("oidc_issuer", "oidc_discovery_url", "public_base_url", "otlp_endpoint")
     @classmethod
     def _http_url(cls, value: str | None, info: ValidationInfo) -> str | None:
         if not value:
