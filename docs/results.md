@@ -30,7 +30,7 @@ The data (`eval/DATASETS.md` has sources and licenses). The counts are those of 
 
 Recall at a fixed false positive rate does not depend on the thresholds, so it is the number to compare configs by. The interval is the Wilson 95% interval of the recall.
 
-The best ROC AUC is that of Rules and model (0.884), but at a false positive rate of 5% or less the rules alone find more attacks (0.59 against 0.35). The combined score is the higher of the two scores, so every harmless text that the model flags is flagged by it too: 11 of 197 harmless documents at 0.5.
+The best ROC AUC is that of Rules and model (0.884), but at a false positive rate of 5% or less the rules alone find more attacks (0.59 against 0.35). The combined score is the higher of the two scores, so every harmless text that the model flags is flagged by it too: at 0.5 the model flags 11 of 197 harmless documents and 18 of 66 hard negatives.
 
 ### At the configured thresholds
 
@@ -98,6 +98,8 @@ The gateway waits 300 ms for the model and then goes on with the rules. This row
 | Config | Recall at a false positive rate of 5% or less | Hard negatives flagged | Scans that fell back |
 |---|---|---|---|
 | Rules and model, 300 ms wait | 0.72 (95% 0.68 to 0.75) at 0.50 | 0.29 (19 of 66, 95% 0.19 to 0.41) | 0.16 (154 of 973, 95% 0.14 to 0.18) |
+
+Recall at a false positive rate of 5% depends on the few harmless texts that score highest. The threshold of the rules and model row sits at 0.96, set by the harmless texts that the model gives a high score, so this row changes with which of those texts happen to be among the scans that fell back to the rules. Read it as what the wait does to this sample and not as a property of the detector.
 
 ### Recall by kind of attack (rules and model, flagged at 0.5)
 

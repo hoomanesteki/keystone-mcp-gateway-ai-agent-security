@@ -341,6 +341,7 @@ def configs_with(
             "roc_auc": area,
             "recall_at_fpr_5pct": {"recall": recall},
             "negatives_by_kind": {"negative": {"count": 11, "of": 197}},
+            "hard_negatives": {"flag": {"count": 18, "of": 66}},
         }
 
     return {
@@ -360,7 +361,10 @@ def test_the_reading_says_when_the_best_ranking_is_not_the_best_at_a_low_false_p
     assert len(lines) == 2 and lines[1] == ""
     assert "The best ROC AUC is that of Rules and model (0.884), but" in lines[0]
     assert "the rules alone find more attacks (0.59 against 0.35)" in lines[0]
-    assert "11 of 197 harmless documents at 0.5" in lines[0]
+    assert (
+        "at 0.5 the model flags 11 of 197 harmless documents and 18 of 66 hard negatives"
+        in lines[0]
+    )
 
 
 def test_the_reading_has_nothing_to_add_when_the_rows_agree() -> None:
@@ -442,3 +446,12 @@ def test_the_committed_results_document_is_what_the_tool_renders_from_the_commit
     # `python -m eval.detector.report --render <report>` writes the document again.
     assert between.strip() == render_section(document).strip()
     assert "Measured on " in between and " at commit `" in between
+
+
+def test_the_row_for_the_wait_is_marked_as_a_weak_number(document: dict[str, Any]) -> None:
+    section = render_section(document)
+    threshold = document["result"]["configs"]["combined"]["recall_at_fpr_5pct"]["threshold"]
+
+    assert "depends on the few harmless texts that score highest" in section
+    assert f"The threshold of the rules and model row sits at {threshold:.2f}" in section
+    assert "not as a property of the detector" in section

@@ -161,16 +161,33 @@ def reading(configs: Mapping[str, Any], shown: Sequence[str], flag: float) -> li
     if top != "rules" and {"rules", "classifier", "combined"} <= configs.keys():
         at_rules = (configs["rules"]["recall_at_fpr_5pct"] or {}).get("recall")
         at_both = (configs["combined"]["recall_at_fpr_5pct"] or {}).get("recall")
-        flagged = configs["classifier"]["negatives_by_kind"]["negative"]
+        documents = configs["classifier"]["negatives_by_kind"]["negative"]
+        hard = configs["classifier"]["hard_negatives"]["flag"]
         if at_rules is not None and at_both is not None and at_both < at_rules:
             sentence = (
                 f"The best ROC AUC is that of {NAMES[top]} ({configs[top]['roc_auc']:.3f}), but "
                 f"at a false positive rate of 5% or less the rules alone find more attacks "
                 f"({at_rules:.2f} against {at_both:.2f}). The combined score is the higher of the "
                 "two scores, so every harmless text that the model flags is flagged by it too: "
-                f"{flagged['count']} of {flagged['of']} harmless documents at {flag}."
+                f"at {flag} the model flags {documents['count']} of {documents['of']} harmless "
+                f"documents and {hard['count']} of {hard['of']} hard negatives."
             )
     return [sentence, ""]
+
+
+def waiting_caution(configs: Mapping[str, Any]) -> list[str]:
+    """Why the row for the 300 ms wait is a weak number, from the threshold of the rows above."""
+    point = (configs.get("combined") or {}).get("recall_at_fpr_5pct") or {}
+    threshold = point.get("threshold")
+    where = "near the top of its range" if threshold is None else f"at {threshold:.2f}"
+    return [
+        "Recall at a false positive rate of 5% depends on the few harmless texts that score "
+        f"highest. The threshold of the rules and model row sits {where}, set by the harmless "
+        "texts that the model gives a high score, so this row changes with which of those texts "
+        "happen to be among the scans that fell back to the rules. Read it as what the wait does "
+        "to this sample and not as a property of the detector.",
+        "",
+    ]
 
 
 def small_groups(configs: Mapping[str, Any], shown: Sequence[str]) -> list[str]:
@@ -394,6 +411,7 @@ def render_section(document: Mapping[str, Any]) -> str:
                 ],
             ),
             "",
+            *waiting_caution(configs),
         ]
     if "combined" in configs:
         out += ["### Recall by kind of attack (rules and model, flagged at " + str(flag) + ")", ""]
