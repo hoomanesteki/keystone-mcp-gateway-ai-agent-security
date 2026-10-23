@@ -214,6 +214,7 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_MASTER_KEYS` | unset | Fernet keys for the credential vault, comma separated. The first encrypts, all decrypt. Needed by `keystone cred ...` and, from KS-306, by the gateway. |
 | `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is when `KEYSTONE_AUTH__MODE=none`. Refused in any other mode. |
 | `KEYSTONE_AUTH__ALLOW_UNKNOWN_AGENTS` | `false` | Let an agent that is not under `agents` in with trust `low`. Also `auth.allow_unknown_agents` in the YAML. |
+| `KEYSTONE_AUDIT__FAIL_CLOSED` | `true`, except `false` when `KEYSTONE_ENV=dev` | While the audit writer is unhealthy (its queue is over 90% full, or a flush failed less than 5 seconds ago), refuse every call with `KS_DENIED` and the reason `audit-unavailable`, before any interceptor runs. See Audit. Also `audit.fail_closed` in the YAML. |
 | `KEYSTONE_POLICY__ROOT` | `policies` | The directory with the schema and the policies (see Policies). A relative path is read from the working directory; the image has its own copy at `/app/policies`, and compose mounts this checkout's at `/etc/keystone/policies`. Also `policy.root` in the YAML. |
 | `KEYSTONE_POLICY__INCLUDE_DEMO` | `false` | Also read `demo/`, the rules that go with the demo upstreams. Compose turns it on. |
 | `KEYSTONE_POLICY__LIST_CACHE_TTL_S` | `60` | How long the answer to "which tools may this caller see" is kept, per caller and policy version. `0` turns the cache off. |
@@ -387,8 +388,8 @@ refuses (an `args` key it does not know), a tenant with no set, and any exceptio
 to the log as `policy_evaluation_failed`, naming the policy by its id, and never to the agent. A
 set with no rule that allows anything denies every call with `default-deny` (invariant I6).
 
-`GET /_dev/audit` shows each recent call's `effect` and `reasons`, so the decision can be read
-without a database.
+Each call's audit record holds the `effect`, the `decision_source` and the `reasons`, so the
+decision can be read back from the log (see Audit).
 
 ### The default pack
 
@@ -678,6 +679,44 @@ makes a client start a new session; it is never adopted by whoever names it firs
 is kept in the gateway process, like the SDK's own sessions, so it does not depend on Redis
 being up.
 
+## Audit
+
+Every tool call leaves one row in the `audit_events` table: who (tenant, user, agent, session),
+what (the tool), what was decided (`effect`, `decision_source`, `reasons`, `policy_version`),
+what happened (`outcome` `ok`, `rejected` or `error`, `reject_code`, `dispatched`), what it cost,
+how long it took, and the hash chain. A call that Keystone refuses before it enters the pipeline
+(a tool that does not exist) has a row too. Rows are only ever added.
+
+Each row holds the hash of the row before it, and its own hash covers that and every other column.
+Changing a row changes its hash, and removing one breaks the link after it. The chain is the same
+across several Keystone processes: each batch takes a Postgres advisory lock, reads the last hash
+and extends it. ADR-0009 has the rules and what the chain does not prove.
+
+The pipeline hands the row to a writer and goes on. The writer takes up to 200 rows or 50
+milliseconds at a time and writes each batch in one transaction. What it does when that fails:
+
+| What went wrong | What the writer does | What you see |
+|---|---|---|
+| The database is down, slow or refuses the connection | Keeps the batch and everything behind it, in order, and tries again after 0.2 s, doubling to 3 s | `audit_flush_failed` in the log, `keystone_audit_failures_total{reason="flush_failed"}` rising |
+| The database refuses one record (a constraint or a type) | Halves the batch until that record is alone, drops it, writes the rest | `audit_record_dropped` with the call id, `reason="record_dropped"` |
+| The queue (10,000 records) is full for 5 seconds | Refuses the new record | `audit_queue_full`, `reason="queue_full"` |
+| Keystone stops | Flushes the queue, for 10 seconds at most | `audit_shutdown_dropped` and `reason="shutdown_dropped"` for whatever is left |
+
+A process that is killed loses the rows it had not written, at most the last 50 ms of calls.
+
+The writer is unhealthy when its queue is over 90% full or a flush failed less than 5 seconds ago.
+With `audit.fail_closed` on, which is the default outside `dev`, an unhealthy writer makes the
+pipeline refuse each call before it runs an interceptor: `KS_DENIED`, "audit unavailable", with
+`keystone/reason: audit-unavailable` in `_meta`, and a row for the refusal once the writer can
+take it. In `dev` the call goes ahead and the failure is counted.
+
+Until the admin API arrives (KS-507) the rows can be read with `psql`:
+
+```bash
+docker compose -f deploy/docker-compose.yml exec postgres psql -U keystone -d keystone \
+  -c "SELECT seq, tool_name, effect, reasons, outcome FROM audit_events ORDER BY seq DESC LIMIT 10"
+```
+
 ## The MCP endpoint
 
 `POST /mcp` on port 8080 speaks MCP over streamable HTTP. Keystone serves the handshake protocol
@@ -702,11 +741,6 @@ without it being written into the client. `/healthz`, `/readyz` and that documen
 With `KEYSTONE_AUTH__MODE=none` (dev and test only) there is no check, and every caller is the dev
 principal. Keep that on localhost.
 
-`GET /_dev/audit` returns how many calls the in-memory audit log holds and the last 50, each with
-its tool, outcome, the policy's decision (`effect`) and the `reasons`. It exists for the demo and
-the smoke scripts, is not mounted when `KEYSTONE_ENV=prod`, and goes away when the admin API
-arrives in Phase 5.
-
 Every result carries `keystone/call_id` in its `_meta`. A call that Keystone refuses (unknown
 tool, invalid arguments) comes back as a normal result with
 `isError` set. Its text starts with `[keystone:<CODE>] call <id>`, and the machine-readable copy
@@ -729,6 +763,7 @@ a 1 second limit each and returns 503 if either is down.
 | `401` with `reason: wrong_issuer` | The token was issued under another address than `KEYSTONE_OIDC_ISSUER`. Get tokens from `http://localhost:8180`, the address in the setting. |
 | `403` with `reason: unknown_agent` | The token's `azp` is not under `agents`. Add it, or run `keystone agent list`. |
 | `503` from `/mcp` | Keystone cannot read the identity provider's keys. Check `KEYSTONE_OIDC_DISCOVERY_URL` and that Keycloak is up; the log says `jwks_fetch_failed` or `oidc_issuer_mismatch`. |
+| Every call gets `KS_DENIED`, "audit unavailable" | The audit writer is unhealthy and `audit.fail_closed` is on. Look for `audit_flush_failed` in the Keystone log: the database is down or refusing the writer. Calls resume within a few seconds of the writer succeeding. |
 | Port already in use | Another process holds the port. Set a different one in `.env`. |
 | `make check` cannot reach Postgres | Run `make up-core`, then `docker compose -f deploy/docker-compose.yml ps`. |
 | `ModuleNotFoundError: keystone` right after `uv sync` (macOS) | A background process flagged `.venv` as hidden, and Python skips hidden `.pth` files. Check with `ls -lO .venv/lib/python3.12/site-packages/keystone.pth`. Set `UV_PROJECT_ENVIRONMENT` to a path outside the repo, for example `$HOME/.cache/keystone-venv`, then run `uv sync`. |

@@ -79,3 +79,10 @@ health:
   timeout_s: 3
   degraded_after: 1
   down_after: 3
+
+# The audit log (every call leaves a hash-chained row in Postgres). With fail_closed on, a call is
+# refused before it runs while the audit writer is unhealthy (its queue over 90% full, or a flush
+# failed less than 5 s ago), because an action with no record is what the log exists to prevent.
+# Left out, it is true unless env is dev. Also KEYSTONE_AUDIT__FAIL_CLOSED.
+audit:
+  fail_closed: true
