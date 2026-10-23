@@ -12,6 +12,7 @@ from redis.asyncio import Redis
 
 from keystone.core.types import Risk
 from keystone.settings import PolicySettings
+from tests.fixtures.approvals import VIRTUAL_TOOLS
 from tests.fixtures.fake_idp import FakeIdp
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.mcp_results import texts
@@ -105,9 +106,10 @@ async def test_list_filtered_by_policy(keystone_app: KeystoneApp, mcp_client: Mc
     async with mcp_client(keystone_app, user="olivia") as olivia:
         olivias = await names(olivia)
 
-    assert HIGH_RISK.isdisjoint(alices) and len(alices) == 10
-    assert olivias >= HIGH_RISK and len(olivias) == 12
-    assert alices < olivias
+    # Keystone's own two tools are offered to both, whatever the policy says (KS-603).
+    assert HIGH_RISK.isdisjoint(alices) and len(alices) == 10 + len(VIRTUAL_TOOLS)
+    assert olivias >= HIGH_RISK and len(olivias) == 12 + len(VIRTUAL_TOOLS)
+    assert alices >= VIRTUAL_TOOLS and alices < olivias
 
 
 async def test_list_cache_invalidated_on_reload(
@@ -136,7 +138,7 @@ async def test_list_cache_invalidated_on_reload(
 
     assert reloaded.status_code == 200 and reloaded.json()["changed"] is True
     assert before >= HIGH_RISK and HIGH_RISK.isdisjoint(after)
-    assert len(before) == 12 and len(after) == 10
+    assert len(before) == 12 + len(VIRTUAL_TOOLS) and len(after) == 10 + len(VIRTUAL_TOOLS)
     # One answer set per policy version: the old one is left to expire, the new one is separate.
     assert len(keys_before) == 1 and len(keys_after) == 2
     versions = {key.rsplit(":", 1)[1] for key in keys_after}
@@ -239,5 +241,5 @@ async def test_a_listing_that_cannot_be_decided_shows_nothing(
         listed = await names(client)
         result = await client.call_tool("echo__echo", {"payload": "x"})  # decided on its own
 
-    assert listed == set()
+    assert listed == VIRTUAL_TOOLS  # no tool of an upstream, and the two of Keystone's own
     assert not result.is_error and texts(result) == ["x"]

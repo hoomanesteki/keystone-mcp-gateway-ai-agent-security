@@ -20,9 +20,9 @@ upstreams and Keystone, and waits until every container reports healthy. Cold st
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit log (read through the admin API) does not hold one new record for each call |
 | `bash scripts/smoke/phase_5.sh` | Runs the demo, finds a Jaeger trace of more than 9 spans with no user or argument in it, reads `keystone_tool_calls_total` from `/metrics` and from Prometheus, finds the dashboard in Grafana, verifies the audit chain, edits a record as the Postgres superuser and checks that `keystone audit verify` exits 2 and names the seq, then puts the record back. About 15 seconds. |
-| `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 13 tools; olivia's transfer of 900 is held for approval (10 s in the local stack) and answered `KS_APPROVAL_PENDING`, the audit shows `require_approval` / `approve-transfer-over-500` and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 30 seconds. |
-| `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), alice's 15 tools, bob's 3 globex tools and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
-| `bash scripts/smoke/phase_2.sh` | Lists the 15 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
+| `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 15 tools (13 of acme's and Keystone's 2); olivia's transfer of 900 is held for approval (10 s in the local stack) and answered `KS_APPROVAL_PENDING`, the audit shows `require_approval` / `approve-transfer-over-500` and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 30 seconds. |
+| `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), olivia's 17 tools, bob's 3 globex tools and Keystone's 2, and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
+| `bash scripts/smoke/phase_2.sh` | Lists the 17 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
 
 ## Host ports
 
@@ -422,7 +422,9 @@ nothing is sent or moved until one approves it. `scripts/smoke/phase_4.sh` runs 
 
 `tools/list` shows a caller only the tools whose `list_tool` the policy allows. In the local stack
 support sees 13 of acme's 15 tools and operators see all 15, because `mail__send_email` and
-`bank__transfer` are high risk and only operators may use them. The list is only a convenience. Every call is decided again when it is
+`bank__transfer` are high risk and only operators may use them. Every caller is also offered the
+two tools that Keystone serves itself (see Approvals), which the policy does not decide. The list
+is only a convenience. Every call is decided again when it is
 made, so a tool that is not listed is still refused if it is called by name. A listing that cannot
 be decided shows nothing.
 
@@ -569,10 +571,53 @@ never reaches the upstream. Invariant I7 (`tests/invariants/test_i7_approvals.py
 combination of an id in each of its six states with arguments, tool, session and user that are the
 approved ones or not: exactly one dispatches.
 
+### Keystone's own tools
+
+Two tools belong to Keystone itself. Their names start with `keystone__`, the id of a pseudo-upstream
+that no configured upstream can have: the config loader, `keystone upstream add` and the registry
+all refuse the id `keystone`, and the gateway does not believe a registry row that claims it. Every
+caller is offered both in `tools/list`, whatever the policy says about the rest. A call to either
+goes through the pipeline like any other. The policy slot gives it `allow` with the decision source
+`virtual` and the reason `virtual-tool`, and does not ask Cedar (an empty policy set still offers
+and answers them: they are the exception to I6, and the await tool runs a call that the policy
+decides again). The pinning and credential slots have nothing to look up for them. Rate limits, the
+audit sink, tracing and metrics apply as they do to every call.
+
+| Tool | Arguments | What it does |
+|---|---|---|
+| `keystone__await_approval` | `approval_id` (from `KS_APPROVAL_PENDING`), `wait_seconds` (0 to 120, 60 by default) | Waits for the request, and when it is approved runs the call that waited |
+| `keystone__whoami` | none | Returns `principal` (`tenant_id`, `user_id`, `groups`, `agent_id`, `agent_trust`, `scopes`, `roles`), `flags`, `tainted`, `call_count` and `spent_usd` |
+
+`keystone__whoami` shows who Keystone thinks the caller is and the state of the session. It never
+returns a token or a credential: the principal holds none.
+
+`keystone__await_approval` answers only for a request made by this user, through this agent, in this
+session. An id that does not exist, one of another tenant, another user or another session gets the
+same `KS_DENIED`, "there is no such approval request for this session". For an id that is the
+caller's it waits up to `wait_seconds`, then:
+
+| The request is | The agent gets |
+|---|---|
+| approved | the result of the original call, which ran just now with the arguments that were approved |
+| rejected | `KS_APPROVAL_REJECTED` with the note |
+| expired, or already used | `KS_APPROVAL_EXPIRED` |
+| still pending | `KS_APPROVAL_PENDING` again, with the same id |
+
+The original call runs through the whole pipeline again, as a call of its own with a new call id.
+The tool must still be active (a quarantine since then refuses it), the policy decides again under
+the rules in force now, and the approval is used against the tool, session, user and arguments it
+was made for. A policy that has been tightened since the approval refuses the call with
+`KS_DENIED`, and the approval is kept: when the rule is lifted the same id completes the call. The
+audit log has a record for the call that was told to wait, one for the call the await ran, and one
+for the await (source `virtual`). A client must not give up on a held call before the hold ends: an
+HTTP read timeout shorter than `approvals.wait_seconds` (or than the `wait_seconds` of an await)
+ends the connection, not the request. The scripted agent waits up to 330 seconds.
+
 ## Upstreams
 
 Each upstream has an `id` (lowercase letters, digits and single underscores, not ending in an
-underscore), a `tenant` that is listed under `tenants` and, for `transport: http`, a `url`. A
+underscore, and not `keystone`, which is reserved for Keystone's own tools), a `tenant` that is
+listed under `tenants` and, for `transport: http`, a `url`. A
 `credential_mode` (`none`, `static` or `per_user`) and per-tool settings are optional. An unknown
 key is an error, so a typo does not pass quietly.
 

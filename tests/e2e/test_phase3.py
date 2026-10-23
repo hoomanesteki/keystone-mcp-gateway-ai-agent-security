@@ -31,7 +31,7 @@ def test_phase_3_smoke(stack: None) -> None:
     assert "alice through support-agent: sub=alice tenant=acme azp=support-agent" in out
     assert "bob through support-agent: sub=bob tenant=globex azp=support-agent" in out
     assert "HTTP/1.1 401" in out
-    assert "tools: 15" in out and "tools: 3" in out
+    assert "tools: 17" in out and "tools: 5" in out
     assert "code=KS_TOOL_NOT_FOUND" in out
     assert "api_key_received=true" in out
     assert "KEYSTONE_MASTER_KEYS: 0 occurrences" in out

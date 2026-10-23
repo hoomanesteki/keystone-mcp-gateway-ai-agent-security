@@ -264,3 +264,16 @@ async def test_session_row_insert_and_touch(sessionmaker: Maker) -> None:
     assert row.last_seen_at == later
     assert row.final_flags == ["reads_untrusted"]
     assert row.tainted is True
+
+
+async def test_the_registry_refuses_the_upstream_id_that_is_keystones_own(
+    sessionmaker: Maker,
+) -> None:
+    await seed(sessionmaker)
+    repo = UpstreamRepo(sessionmaker)
+
+    with pytest.raises(ValueError, match="reserved"):
+        await repo.upsert(spec("keystone"))
+
+    assert await repo.get("keystone") is None
+    assert await repo.list() == []

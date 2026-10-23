@@ -42,6 +42,8 @@ ROOT = Principal(
 )
 POLL_S = 0.1
 FIND_TIMEOUT_S = 15.0
+# What Keystone offers every caller besides the tools of the upstreams (KS-603).
+VIRTUAL_TOOLS = frozenset({"keystone__await_approval", "keystone__whoami"})
 
 
 class Approver:

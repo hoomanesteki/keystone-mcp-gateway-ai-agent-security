@@ -10,6 +10,7 @@ from examples.upstreams import echo_server
 from keystone.registry.config import UpstreamConfig
 from keystone.registry.repo import UpstreamRepo
 from keystone.settings import RegistrySettings
+from tests.fixtures.approvals import VIRTUAL_TOOLS
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.servers import RestartableServer
 from tests.fixtures.upstreams import DemoUpstreams
@@ -48,7 +49,7 @@ async def test_startup_survives_a_dead_upstream_and_the_timer_retries_it(
         )
 
         # The app is up. Mail's tools are there; the dead upstream has an error and no tools.
-        assert await tool_names(mcp_client, app) == {
+        assert await tool_names(mcp_client, app) == VIRTUAL_TOOLS | {
             "mail__list_emails",
             "mail__read_email",
             "mail__send_email",

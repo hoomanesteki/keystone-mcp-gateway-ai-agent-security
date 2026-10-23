@@ -408,3 +408,16 @@ def test_approval_settings_have_defaults_and_come_from_env_or_yaml(
 def test_approval_settings_are_checked(bad: dict[str, float]) -> None:
     with pytest.raises(ValueError, match="approvals"):
         Settings(approvals=bad)  # type: ignore[arg-type]
+
+
+@pytest.mark.phase(6)
+def test_the_config_cannot_define_an_upstream_called_keystone(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="reserved"):
+        Settings(upstreams=[{"id": "keystone", "tenant": "acme"}])  # type: ignore[list-item]
+
+    config = tmp_path / "keystone.yaml"
+    config.write_text(
+        "upstreams:\n  - {id: keystone, tenant: acme, transport: http, url: 'http://x.test/mcp'}\n"
+    )
+    with pytest.raises(ValueError, match="reserved"):
+        Settings(config_path=config)

@@ -14,6 +14,7 @@ the only way to present an id is `keystone__await_approval`.
 """
 
 import itertools
+from collections.abc import Callable
 from typing import Any
 
 import anyio
@@ -27,9 +28,12 @@ from keystone.audit.sink import InMemoryAuditSink
 from keystone.core.ids import new_id
 from keystone.core.types import CallContext, Principal, SessionState
 from keystone.db.models import APPROVALS
-from keystone.settings import Settings
-from tests.fixtures.approvals import LENA, SpyDispatcher, approval_pipeline
+from keystone.identity.vault import Cipher
+from keystone.settings import ApprovalSettings, Settings
+from tests.fixtures.approvals import LENA, Approver, SpyDispatcher, approval_pipeline
 from tests.fixtures.calls import OLIVIA, make_ctx, make_tool
+from tests.fixtures.keystone import TEST_MASTER_KEY, KeystoneApp, McpConnect
+from tests.fixtures.upstreams import DemoUpstreams
 
 pytestmark = [pytest.mark.phase(6), pytest.mark.services]
 
@@ -176,3 +180,92 @@ async def test_i7_a_call_with_no_id_is_held_not_dispatched(
     assert result.is_error and spy.calls == [] and ctx.approval_id is None
     [waiting] = await approval_service.list_for_tenant("acme", "pending")
     assert waiting.args_digest == args_digest(ARGUMENTS)
+
+
+# -- the same, through the MCP endpoint, where an id can only be presented to the await tool
+
+Factory = Callable[..., KeystoneApp]
+AWAIT = "keystone__await_approval"
+TRANSFER_CALL = {"from_account": "CHK-001", "to": "SAV-002", "amount": 900}
+
+
+async def test_i7_through_the_await_tool(
+    keystone_app_factory: Factory,
+    mcp_client: McpConnect,
+    demo_upstreams: DemoUpstreams,
+    approver: Approver,
+    sessionmaker: Sessions,
+) -> None:
+    """An agent has one way to present an approval id: keystone__await_approval. Every bad id it
+    can bring leaves the bank untouched, and the one good id moves 900 once."""
+    app = keystone_app_factory(
+        settings={"approvals": ApprovalSettings(wait_seconds=0, poll_interval_s=0.2)}
+    )
+    cipher = Cipher(TEST_MASTER_KEY)
+    refused: dict[str, str] = {}
+
+    def transfers() -> list[dict[str, Any]]:
+        found: list[dict[str, Any]] = demo_upstreams.state("bank")["transfers"]  # type: ignore[assignment]
+        return found
+
+    async def present(olivia: Any, approval_id: str, name: str) -> Any:
+        result = await olivia.call_tool(AWAIT, {"approval_id": approval_id, "wait_seconds": 0})
+        assert result.is_error, name
+        refused[name] = result.meta["keystone/code"]
+        assert transfers() == [], name
+        return result
+
+    async def asked(olivia: Any, amount: int = 900) -> str:
+        result = await olivia.call_tool("bank__transfer", {**TRANSFER_CALL, "amount": amount})
+        return str(result.meta["keystone/approval_id"])
+
+    async with mcp_client(app, user="olivia") as olivia:
+        await present(olivia, new_id(), "forged")
+
+        waiting = await asked(olivia)
+        await present(olivia, waiting, "pending")
+
+        rejected = await asked(olivia)
+        await approver.service.decide(rejected, LENA, False, "no")
+        await present(olivia, rejected, "rejected")
+
+        stale = await asked(olivia)
+        await approver.service.decide(stale, LENA, True)
+        await expire(sessionmaker, stale)
+        await present(olivia, stale, "expired")
+
+        # Arguments swapped in the table for others, encrypted under the right key: the digest
+        # that was approved is no longer the digest of what would run.
+        swapped = await asked(olivia)
+        await approver.service.decide(swapped, LENA, True)
+        async with sessionmaker() as session, session.begin():
+            await session.execute(
+                update(APPROVALS)
+                .where(APPROVALS.c.id == swapped)
+                .values(args_ciphertext=cipher.encrypt_json({**TRANSFER_CALL, "amount": 90_000}))
+            )
+        await present(olivia, swapped, "changed arguments")
+
+        # The one good id: approved, unexpired, unused, for exactly what was asked.
+        good = await asked(olivia)
+        await approver.service.decide(good, LENA, True)
+        done = await olivia.call_tool(AWAIT, {"approval_id": good, "wait_seconds": 5})
+        assert not done.is_error
+        assert [t["amount"] for t in transfers()] == [900.0]
+        again = await olivia.call_tool(AWAIT, {"approval_id": good, "wait_seconds": 0})
+
+    assert again.is_error and again.meta is not None
+    assert again.meta["keystone/code"] == "KS_APPROVAL_EXPIRED"
+    assert refused == {
+        "forged": "KS_DENIED",
+        "pending": "KS_APPROVAL_PENDING",
+        "rejected": "KS_APPROVAL_REJECTED",
+        "expired": "KS_APPROVAL_EXPIRED",
+        "changed arguments": "KS_DENIED",
+    }
+    # 900 moved once. The rest never reached the bank.
+    assert [t["amount"] for t in transfers()] == [900.0]
+    dispatched = [
+        r for r in app.audit.records if r["tool_name"] == "bank__transfer" and r["dispatched"]
+    ]
+    assert len(dispatched) == 1

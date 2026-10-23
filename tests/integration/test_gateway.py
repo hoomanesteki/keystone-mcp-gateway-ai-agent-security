@@ -7,6 +7,7 @@ from mcp.shared.exceptions import MCPError
 from mcp_types import UNSUPPORTED_PROTOCOL_VERSION
 from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS
 
+from tests.fixtures.approvals import VIRTUAL_TOOLS
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.mcp_results import one, texts
 from tests.fixtures.upstreams import DemoUpstreams
@@ -33,7 +34,7 @@ async def test_tools_list_namespaced(keystone_app: KeystoneApp, mcp_client: McpC
     async with mcp_client(keystone_app, user="olivia") as client:  # support does not see all twelve
         tools = (await client.list_tools()).tools
 
-    assert {t.name for t in tools} == EXPECTED_TOOLS
+    assert {t.name for t in tools} == EXPECTED_TOOLS | VIRTUAL_TOOLS
     assert all(re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", t.name) for t in tools)
     read = next(t for t in tools if t.name == "mail__read_email")
     assert read.input_schema["required"] == ["email_id"]

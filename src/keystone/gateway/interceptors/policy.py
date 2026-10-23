@@ -25,13 +25,16 @@ from redis.asyncio import Redis
 
 from keystone.core.canonical import canonical_json, sha256_hex
 from keystone.core.errors import Code, Reject
-from keystone.core.types import CallContext, Effect, Principal, SessionState, ToolRef
+from keystone.core.types import CallContext, Decision, Effect, Principal, SessionState, ToolRef
 from keystone.policy.engine import PolicyEngine
 from keystone.policy.entities import build_context
 from keystone.policy.extractors import extract
+from keystone.registry.naming import is_virtual
 
 log = structlog.get_logger()
 
+# The reason on the decision of a tool that Keystone serves itself.
+VIRTUAL_REASON = "virtual-tool"
 CACHE_PREFIX = "ks:policy:listcache"
 CACHE_TIMEOUT_S = 1.0
 MEMORY_CACHE_ENTRIES = 1_000
@@ -46,6 +49,12 @@ class PolicyInterceptor:
         self._engine = engine
 
     async def before_call(self, ctx: CallContext) -> None:
+        if is_virtual(ctx.tool):
+            # keystone__whoami and keystone__await_approval are Keystone's own: Cedar has no rule
+            # about them. The await tool runs the call that waited through the pipeline again, and
+            # that call is decided by the policy like any other (KS-603).
+            ctx.decision = Decision(effect=Effect.ALLOW, reasons=[VIRTUAL_REASON], source="virtual")
+            return
         ctx.extracted = extract(ctx.arguments, ctx.tool.extractors)
         context = build_context(ctx, ctx.extracted)
         decision = self._engine.evaluate(ctx.principal, "call_tool", ctx.tool, context)

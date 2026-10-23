@@ -71,6 +71,34 @@ SEND_ARGS = {"to": "x@acme.test", "subject": "s", "body": "b"}
 
 
 @pytest.mark.services
+@pytest.mark.phase(6)
+async def test_i1_a_tool_of_keystones_own_needs_a_decision_too(
+    keystone_app_factory: Any, mcp_client: McpConnect, demo_upstreams: DemoUpstreams
+) -> None:
+    """The policy slot is what gives keystone__whoami its decision. A slot that decides nothing
+    stops it like any other call: being virtual is not a way round the structural check."""
+    spy: SpyDispatcher | None = None
+
+    def wrap(inner: Dispatcher) -> Dispatcher:
+        nonlocal spy
+        spy = SpyDispatcher(inner)
+        return spy
+
+    app: KeystoneApp = keystone_app_factory(
+        wrap_dispatcher=wrap, interceptors={"policy": LeavesDecisionEmpty()}
+    )
+    async with mcp_client(app, user="olivia") as client:
+        result = await client.call_tool("keystone__whoami", {})
+
+    assert result.is_error and result.meta is not None
+    assert result.meta["keystone/code"] == "KS_DENIED"
+    assert spy is not None and spy.tools == []
+    assert [(r["dispatched"], r["reject_code"]) for r in app.audit.records] == [
+        (False, "KS_DENIED")
+    ]
+
+
+@pytest.mark.services
 @pytest.mark.phase(1)
 async def test_i1(
     keystone_app_factory: Any, mcp_client: McpConnect, demo_upstreams: DemoUpstreams
@@ -88,14 +116,21 @@ async def test_i1(
         await client.call_tool("bank__get_balance", {"account": "CHK-001"})
         await client.call_tool("echo__echo", {"payload": 1})  # invalid, never dispatched
         await client.call_tool("echo__missing", {})  # unknown, never dispatched
+        await client.call_tool("keystone__whoami", {})  # Keystone's own, decided as virtual
 
     assert spy is not None
-    assert spy.tools == ["echo__echo", "bank__get_balance"]
-    assert [d.effect if d else None for d in spy.decisions] == [Effect.ALLOW, Effect.ALLOW]
-    # The decision comes from the policy engine and not from a stub (KS-406).
-    assert [d.source if d else None for d in spy.decisions] == ["policy", "policy"]
-    assert all(d and d.policy_version and d.reasons for d in spy.decisions)
-    assert [r["dispatched"] for r in app.audit.records] == [True, True, False, False]
+    assert spy.tools == ["echo__echo", "bank__get_balance", "keystone__whoami"]
+    assert [d.effect if d else None for d in spy.decisions] == [Effect.ALLOW] * 3
+    # The decision comes from the policy engine and not from a stub (KS-406), except for the
+    # tools Keystone serves itself, which Cedar has no rule about (KS-603). Those have the source
+    # "virtual", and nothing else does.
+    for tool, decision in zip(spy.tools, spy.decisions, strict=True):
+        assert decision is not None
+        if tool.startswith("keystone__"):
+            assert decision.source == "virtual" and decision.reasons == ["virtual-tool"]
+        else:
+            assert decision.source == "policy" and decision.policy_version and decision.reasons
+    assert [r["dispatched"] for r in app.audit.records] == [True, True, False, False, True]
 
 
 @pytest.mark.services

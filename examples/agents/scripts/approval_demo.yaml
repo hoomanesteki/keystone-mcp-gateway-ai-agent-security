@@ -1,0 +1,14 @@
+# The Phase 6 demo: olivia's agent transfers 900, and the policy sends the call to a person
+# (approve-transfer-over-500). Keystone holds the call. Once the approver decides, it completes.
+#
+# The agent calls keystone__await_approval by itself when Keystone answers KS_APPROVAL_PENDING,
+# so step 1 ends with the transfer, whichever way the approval came. Step 2 is for an approver
+# who takes longer than both waits: with no approval outstanding it passes, and with one it
+# waits for it.
+#
+# The caller is an operator (acme/olivia through ops-agent), because a transfer is high risk and
+# only operators may make one. Run it with the bank at its seed state (POST /_reset).
+steps:
+  - tool: bank__transfer
+    args: {from_account: CHK-001, to: SAV-002, amount: 900, memo: invoice 4471}
+  - tool: keystone__await_approval

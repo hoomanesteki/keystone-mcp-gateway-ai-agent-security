@@ -1,0 +1,8 @@
+# A transfer of 600 that nobody decides in time. Step 1 passes on KS_APPROVAL_PENDING, and the agent
+# does not wait for it by itself. Step 2 waits for the approval it was told about, and completes
+# the transfer when an approver says yes.
+steps:
+  - tool: bank__transfer
+    args: {from_account: CHK-001, to: SAV-002, amount: 600, memo: standing desks}
+    expect_error_code: KS_APPROVAL_PENDING
+  - tool: keystone__await_approval

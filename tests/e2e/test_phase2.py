@@ -30,7 +30,7 @@ def test_phase_2_smoke(stack: None) -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout
-    assert "tools: 15" in out
+    assert "tools: 17" in out
     assert "changed: echo__echo (quarantined)" in out
     assert "code=KS_QUARANTINED" in out
     assert "approved echo__echo" in out
