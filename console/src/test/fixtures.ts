@@ -104,3 +104,47 @@ export function approvalsApi(initial: ApprovalItem[], options: ApprovalsOptions 
   });
   return { ...api, queue };
 }
+
+interface AuditOptions {
+  verify?: unknown;
+}
+
+/** What `/audit/verify` says of a log that holds. */
+export const INTACT = {
+  ok: true,
+  records: 3,
+  broken_seq: null,
+  problem: null,
+  message: "3 records checked, the chain holds",
+};
+
+/** The audit routes of the API over a list of records: the filters and the paging work as the
+ * server's do (newest first, `cursor` is the seq to go below, one record more than `limit` says
+ * whether another page follows). */
+export function auditApi(records: AuditRecord[], options: AuditOptions = {}) {
+  return fakeApi({
+    "GET /audit": (call) => {
+      const q = call.query;
+      const limit = Number(q.get("limit") ?? 50);
+      const cursor = q.get("cursor");
+      const since = q.get("since");
+      const until = q.get("until");
+      const matching = records
+        .filter((r) => (q.get("user") ? r.user_id === q.get("user") : true))
+        .filter((r) => (q.get("agent") ? r.agent_id === q.get("agent") : true))
+        .filter((r) => (q.get("tool") ? r.tool_name === q.get("tool") : true))
+        .filter((r) => (q.get("effect") ? r.effect === q.get("effect") : true))
+        .filter((r) => (q.get("outcome") ? r.outcome === q.get("outcome") : true))
+        .filter((r) => (since ? Date.parse(r.ts) >= Date.parse(since) : true))
+        .filter((r) => (until ? Date.parse(r.ts) < Date.parse(until) : true))
+        .filter((r) => (cursor ? r.seq < Number(cursor) : true))
+        .sort((a, b) => b.seq - a.seq);
+      const page = matching.slice(0, limit);
+      return {
+        items: page,
+        next_cursor: matching.length > limit ? (page[page.length - 1]?.seq ?? null) : null,
+      };
+    },
+    "GET /audit/verify": () => options.verify ?? INTACT,
+  });
+}

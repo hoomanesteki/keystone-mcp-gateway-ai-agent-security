@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useSearchParams } from "react-router";
-import { useDecision, usePendingApprovals } from "../api/queries";
+import { useDecision, usePendingApprovals } from "../api/approvals";
 import { ApprovalCard } from "../components/ApprovalCard";
 import { Button } from "../components/Button";
 import { Icon } from "../components/Icon";

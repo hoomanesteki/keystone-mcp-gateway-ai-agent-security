@@ -76,3 +76,18 @@ export function isMaskedText(text: string): boolean {
     /\.\.\.\[sha256:[0-9a-f]{64}\]$/.test(text)
   );
 }
+
+/** Whether any value in arguments as the audit log keeps them was hidden or cut. This repeats the
+ * server's `is_masked` for the audit page, which shows records and so has no flag to read. It
+ * errs toward true, as the server's does. */
+export function isMaskedValue(value: unknown, depth = 0): boolean {
+  if (depth > 34) return true;
+  if (typeof value === "string") return isMaskedText(value);
+  if (Array.isArray(value)) return value.some((item) => isMaskedValue(item, depth + 1));
+  if (typeof value === "object" && value !== null) {
+    return Object.entries(value).some(
+      ([key, item]) => key.endsWith("[truncated]") || isMaskedValue(item, depth + 1),
+    );
+  }
+  return false;
+}

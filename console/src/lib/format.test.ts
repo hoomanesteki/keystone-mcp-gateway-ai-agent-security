@@ -4,6 +4,7 @@ import {
   formatCountdown,
   formatLatency,
   isMaskedText,
+  isMaskedValue,
   relativeTime,
   secondsLeft,
 } from "./format";
@@ -71,5 +72,20 @@ describe("what redaction leaves behind", () => {
     expect(isMaskedText(`${"a".repeat(256)}...[sha256:${"0".repeat(64)}]`)).toBe(true);
     expect(isMaskedText("invoice 4471")).toBe(false);
     expect(isMaskedText("sha256 of the invoice")).toBe(false);
+  });
+});
+
+describe("masked arguments as a whole", () => {
+  test("any hidden value anywhere makes the arguments masked", () => {
+    expect(isMaskedValue({ to: "a@b.test", token: "[redacted]" })).toBe(true);
+    expect(isMaskedValue({ rows: [{ note: "card [redacted:card]" }] })).toBe(true);
+    expect(isMaskedValue({ "extra[truncated]": "[truncated]" })).toBe(true);
+  });
+
+  test("plain arguments are not", () => {
+    expect(isMaskedValue({ amount: 900, memo: "invoice 4471", rows: [1, 2, { ok: true }] })).toBe(
+      false,
+    );
+    expect(isMaskedValue(null)).toBe(false);
   });
 });

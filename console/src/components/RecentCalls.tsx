@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import { useApprovalDetail } from "../api/queries";
+import { useApprovalDetail } from "../api/approvals";
 import { formatClock } from "../lib/format";
 import { describeError } from "../lib/errors";
 import { OutcomeBadge } from "./Badge";

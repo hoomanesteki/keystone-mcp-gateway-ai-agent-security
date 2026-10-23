@@ -53,6 +53,12 @@ export type Responder = (call: RecordedCall, params: Record<string, string>) => 
 /** A fixed answer (an array or an object), or a function that makes one from the call. */
 export type Route = Responder | object;
 
+/** The address a call to fetch is for, whichever way it was given. */
+export function addressOf(input: Parameters<typeof fetch>[0]): string {
+  if (typeof input === "string") return input;
+  return input instanceof URL ? input.href : input.url;
+}
+
 export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
