@@ -40,18 +40,9 @@ probe_as() {
   KEYSTONE_TOKEN=$token uv run python scripts/smoke/mcp_probe.py "$@"
 }
 
-# One entry of the dev audit log, by call id, as `effect reasons`.
-audit_entry() {
-  curl -fsS --max-time 10 "${BASE}/_dev/audit" | python3 -c '
-import json, sys
-
-wanted = sys.argv[1]
-for entry in json.load(sys.stdin)["recent"]:
-    if entry["call_id"] == wanted:
-        print(entry["effect"], ",".join(entry["reasons"]))
-        break
-' "$1"
-}
+# audit_entry CALL_ID prints the record of a call as `effect reasons` (scripts/smoke/audit_lib.sh).
+# shellcheck source=scripts/smoke/audit_lib.sh
+. scripts/smoke/audit_lib.sh
 
 call_id_of() { sed -n 's/.* call_id=\([0-9A-Z]\{26\}\).*/\1/p' <<<"$1" | head -1; }
 
