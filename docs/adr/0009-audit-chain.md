@@ -75,6 +75,23 @@ or 50 ms, whichever comes first. `AUDIT_LOCK_KEY` is a constant no other code ma
   the price of not writing on the call's path. The alternative, a commit before every answer,
   puts a Postgres round trip on every call.
 
+**Arguments (KS-502).** A row holds `args_redacted`, the call's arguments with secrets masked, and
+`args_digest`, the sha256 of the canonical JSON of the original arguments. Whoever holds the
+original can prove what was sent; nobody can read it back out of the log.
+
+- A key that matches the log scrubber's rule (secret, token, password, api key, authorization) or
+  is listed in `audit.redact_keys` has its value replaced by `[redacted]`, whatever the value is.
+- In strings, these patterns are masked: a payment card number (13 to 19 digits that pass the Luhn
+  check), a US social security number, `Bearer <token>`, an AWS access key id (`AKIA` or `ASIA`
+  and 16 characters) and a private key block.
+- A string over 2,048 characters becomes its first 256 characters and `...[sha256:<hex>]` of the
+  whole. Masking runs on the whole string first, so a card number across the cut is masked.
+- What one row keeps is capped at 16 KiB of canonical JSON. A call's arguments can be 1 MiB, and
+  the queue holds 10,000 records.
+
+The patterns are a net with holes: a number in a field no pattern knows, or one written in some
+other grouping, is stored as it came. The way to cover a field is to list its key.
+
 **Fail closed.** `AuditSink` gets one method, `healthy() -> bool`. It is false when the writer is
 not running or is stopping, when the queue is over 90% full, when the last flush failed less than
 5 s ago, or when a flush has run for more than 5 s. The pipeline asks it before the argument

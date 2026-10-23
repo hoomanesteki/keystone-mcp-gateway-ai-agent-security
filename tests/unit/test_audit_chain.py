@@ -11,12 +11,12 @@ from keystone.audit.chain import (
     GENESIS,
     HASHED_COLUMNS,
     canonical_fields,
-    clean_text,
     compute_hash,
     record_fields,
-    stable_json,
     to_decimal,
 )
+from keystone.audit.normalize import clean_text, stable_json
+from keystone.audit.redact import RedactionConfig
 from keystone.core.canonical import canonical_json
 from keystone.core.errors import Code, Reject
 from keystone.core.types import Decision, Effect, ScanResult
@@ -197,3 +197,35 @@ def test_a_record_never_holds_text_the_database_would_refuse() -> None:
 
     assert fields["reasons"] == ["a\\u0000b"]
     assert "\x00" not in json.dumps(fields, default=str)
+
+
+@pytest.mark.phase(5)
+def test_a_record_stores_the_masked_arguments_and_a_digest_of_the_original() -> None:
+    ctx = make_ctx({"text": "card 4111 1111 1111 1111", "api_key": "sk-live-1", "n": 2})
+
+    fields = record_fields(ctx, "ok", None)
+
+    assert fields["args_redacted"] == {
+        "text": "card [redacted:card]",
+        "api_key": "[redacted]",
+        "n": 2,
+    }
+    assert fields["args_digest"] == hashlib.sha256(canonical_json(ctx.arguments)).hexdigest()
+    assert "sk-live-1" not in json.dumps(fields, default=str)
+
+
+@pytest.mark.phase(5)
+def test_a_record_masks_the_keys_the_operator_listed() -> None:
+    ctx = make_ctx({"text": "plain", "customer": "c-77"})
+
+    fields = record_fields(ctx, "ok", None, redaction=RedactionConfig.of(["Customer"]))
+
+    assert fields["args_redacted"] == {"text": "plain", "customer": "[redacted]"}
+
+
+@pytest.mark.phase(5)
+def test_a_call_with_no_arguments_has_an_empty_object_and_a_digest() -> None:
+    fields = record_fields(make_ctx({}), "rejected", Reject(Code.DENIED, "no"))
+
+    assert fields["args_redacted"] == {}
+    assert fields["args_digest"] == hashlib.sha256(b"{}").hexdigest()

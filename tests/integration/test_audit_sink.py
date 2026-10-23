@@ -3,6 +3,7 @@ and across writers, a batch that fails is kept and written later, and a pipeline
 closed refuses calls while the writer is unhealthy (ADR-0009)."""
 
 import asyncio
+import hashlib
 import itertools
 import time
 from collections.abc import Callable
@@ -11,13 +12,14 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from keystone.audit.chain import GENESIS
 from keystone.audit.sink import AuditUnavailable, PostgresAuditSink
+from keystone.core.canonical import canonical_json
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, Decision, Effect, ScanResult, ToolResult
 from keystone.db.models import AuditEvent
@@ -447,3 +449,69 @@ async def test_the_chain_check_can_fail(sessionmaker: Sessionmaker) -> None:
         "seq 3 is missing",
         "seq 4 does not follow the hash before it",
     ]
+
+
+AWKWARD_ARGUMENTS: dict[str, Any] = {
+    "big": 1e22,
+    "zero": -0.0,
+    "small": 1.5e-7,
+    "whole": 5.0,
+    "third": 1 / 3,
+    "huge_int": 10**30,
+    "text": "a\x00b \u00e9 \U0001f600",
+    "nested": {"z": 1, "a": [1.0, 2, None, True], "m": {"y": "x"}},
+    "api_key": "sk-live-abcdef",
+    "note": "card 4111 1111 1111 1111 and ssn 123-45-6789",
+}
+
+
+async def test_arguments_are_stored_masked_and_hash_the_same_after_postgres(
+    sessionmaker: Sessionmaker,
+) -> None:
+    ctx = make_ctx(AWKWARD_ARGUMENTS)
+    async with PostgresAuditSink(sessionmaker) as sink:
+        await sink.record(ctx, "ok", None)
+        await sink.record(make_ctx({}), "ok", None)
+        await sink.flush()
+
+    rows = await rows_of(sessionmaker)
+
+    assert chain_problems(rows) == []  # recomputed from the jsonb Postgres returned
+    stored = rows[0]["args_redacted"]
+    assert stored["big"] == 10**22 and isinstance(stored["big"], int)  # what jsonb returns
+    assert stored["zero"] == 0.0 and stored["small"] == 1.5e-7 and stored["whole"] == 5.0
+    assert stored["third"] == 1 / 3 and stored["huge_int"] == 10**30
+    assert stored["text"] == "a\\u0000b \u00e9 \U0001f600"
+    assert stored["nested"] == {"z": 1, "a": [1.0, 2, None, True], "m": {"y": "x"}}
+    assert stored["api_key"] == "[redacted]"
+    assert stored["note"] == "card [redacted:card] and ssn [redacted:ssn]"
+    assert rows[0]["args_digest"] == hashlib.sha256(canonical_json(AWKWARD_ARGUMENTS)).hexdigest()
+    assert rows[1]["args_redacted"] == {}
+    assert not any(secret in str(rows) for secret in ("sk-live-abcdef", "4111 1111", "123-45-6789"))
+
+
+async def test_jsonb_does_return_a_big_float_as_an_integer(sessionmaker: Sessionmaker) -> None:
+    # The reason the writer stores numbers in the form jsonb returns: this is what it returns.
+    async with sessionmaker() as session:
+        answer = (await session.execute(text('SELECT \'{"a": 1e22, "b": -0.0}\'::jsonb'))).scalar()
+
+    assert answer == {"a": 10**22, "b": 0.0} and isinstance(answer["a"], int)
+    assert canonical_json({"a": 1e22}) != canonical_json(answer)
+
+
+async def test_the_app_stores_the_arguments_of_a_call_masked(
+    keystone_app_factory: Callable[..., KeystoneApp], mcp_client: McpConnect
+) -> None:
+    app = keystone_app_factory(settings={"audit": AuditSettings(redact_keys=["Payload"])})
+    secret_call = {"payload": 7, "extra": "unlisted"}
+
+    async with mcp_client(app) as client:
+        refused = await client.call_tool("echo__echo", secret_call)  # payload must be text
+        ok = await client.call_tool("echo__echo", {"payload": "card 4111 1111 1111 1111"})
+
+    assert refused.is_error and not ok.is_error
+    first, second = app.audit.records
+    assert first["args_redacted"] == {"payload": "[redacted]", "extra": "unlisted"}
+    assert first["args_digest"] == hashlib.sha256(canonical_json(secret_call)).hexdigest()
+    assert second["args_redacted"] == {"payload": "[redacted]"}
+    assert "4111" not in str(app.audit.records)

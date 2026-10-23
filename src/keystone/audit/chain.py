@@ -10,19 +10,20 @@ here, before the hash is computed and before the row is stored:
 - Timestamps are UTC at microsecond precision, written as one fixed-width string.
 - Numbers that are money, scores or durations are Decimals with a fixed number of places. A float
   would read back from a `numeric` column as something else.
-- JSON goes through `stable_json`: jsonb keeps numbers as `numeric`, so a float such as 1e22 comes
-  back as an integer, and a string cannot hold a NUL character.
+- JSON and text go through `audit.normalize`: jsonb keeps numbers as `numeric`, so a float such as
+  1e22 comes back as an integer, and a string cannot hold a NUL character.
 """
 
 from __future__ import annotations
 
 import hashlib
-import math
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from typing import Any, Literal
 
+from keystone.audit.normalize import clean_text
+from keystone.audit.redact import RedactionConfig, audit_arguments
 from keystone.core.canonical import canonical_json
 from keystone.core.errors import Reject
 from keystone.core.types import CallContext
@@ -64,22 +65,8 @@ DECIMAL_SCALES: dict[str, Decimal] = {
     "latency_ms": Decimal("0.001"),
 }
 
-MAX_JSON_DEPTH = 32
-TRUNCATED = "[truncated]"
-NUL_TEXT = "\\u0000"
 # Enough digits for any cost a float can hold, with the places above.
 DECIMAL_PRECISION = 60
-
-
-def clean_text(text: str) -> str:
-    """Text Postgres can store: no NUL character, and no lone surrogate (which is not UTF-8)."""
-    if "\x00" in text:
-        text = text.replace("\x00", NUL_TEXT)
-    try:
-        text.encode("utf-8")
-    except UnicodeEncodeError:
-        text = text.encode("utf-8", "replace").decode("utf-8")
-    return text
 
 
 def format_ts(moment: datetime) -> str:
@@ -120,36 +107,6 @@ def to_decimal(value: object, scale: Decimal) -> Decimal | None:
     return abs(rounded) if rounded == 0 else rounded
 
 
-def stable_float(value: float) -> int | float | str:
-    """A float in the form jsonb returns unchanged. Postgres prints a numeric without an
-    exponent, so a float whose digits have no fraction (1e22) is read back as an integer."""
-    if not math.isfinite(value):
-        return str(value)
-    if value == 0:
-        return 0.0  # jsonb has no negative zero
-    plain = format(Decimal(repr(value)), "f")
-    return float(plain) if "." in plain else int(plain)
-
-
-def stable_json(value: Any, _depth: int = 0) -> Any:
-    """`value` as JSON that survives a round trip through jsonb: strings Postgres can store,
-    numbers in the form it returns, keys as strings. Anything that is not JSON becomes its text,
-    and nesting deeper than MAX_JSON_DEPTH is cut."""
-    if _depth > MAX_JSON_DEPTH:
-        return TRUNCATED
-    if value is None or isinstance(value, bool | int):
-        return value
-    if isinstance(value, float):
-        return stable_float(value)
-    if isinstance(value, str):
-        return clean_text(value)
-    if isinstance(value, Mapping):
-        return {clean_text(str(k)): stable_json(v, _depth + 1) for k, v in value.items()}
-    if isinstance(value, list | tuple):
-        return [stable_json(item, _depth + 1) for item in value]
-    return clean_text(str(value))
-
-
 def _canonical_value(name: str, value: Any) -> Any:
     if isinstance(value, datetime):
         return format_ts(value)
@@ -188,6 +145,7 @@ def record_fields(
     reject: Reject | None,
     *,
     now: datetime | None = None,
+    redaction: RedactionConfig | None = None,
 ) -> dict[str, Any]:
     """Every column of the record except seq, prev_hash and hash, ready to store and to hash.
 
@@ -206,6 +164,8 @@ def record_fields(
     elapsed_ms = max(0.0, (finished - received).total_seconds() * 1000)
     scan = ctx.scan
     cost = to_decimal(ctx.cost_usd, DECIMAL_SCALES["cost_usd"])
+    # The arguments as they arrived, masked, and a digest of the original (KS-502).
+    shown, digest = audit_arguments(ctx.arguments, redaction)
     return {
         "ts": received,
         "call_id": clean_text(ctx.call_id),
@@ -223,9 +183,8 @@ def record_fields(
         "outcome": outcome,
         "reject_code": reject.code.value if reject else None,
         "dispatched": ctx.dispatched,
-        # Arguments arrive with KS-502, redacted, with a digest of the original.
-        "args_redacted": None,
-        "args_digest": None,
+        "args_redacted": shown,
+        "args_digest": digest,
         "scan_score": to_decimal(scan.score, DECIMAL_SCALES["scan_score"]) if scan else None,
         "scan_action": scan.action if scan else None,
         "cost_usd": cost if cost is not None else Decimal(0).quantize(DECIMAL_SCALES["cost_usd"]),
