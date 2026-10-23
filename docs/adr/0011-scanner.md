@@ -69,6 +69,55 @@ places in the text.
 contract (section 3.6) with two more fields: `normalized` (NFKC changed the text) and `truncated`.
 The contract is not changed. The rule ids that hit are in `rule_hits`.
 
+**The classifier (KS-702).** The default is `protectai/deberta-v3-base-prompt-injection-v2`,
+pinned to revision `90c9989b1a342275dd0d1a95aad283c04e075671`. I read its card, its file list and
+its config on 2026-10-23.
+
+- License: Apache-2.0, in the card and in the repository's `LICENSE` file. It is a fine-tune of
+  `microsoft/deberta-v3-base`. The card lists the training sets with their licenses (Apache-2.0,
+  MIT, CC-BY-3.0, CC-BY-4.0, CC0 and some with none) and gives attribution; the weights are
+  published under Apache-2.0.
+- Labels, from the model's `config.json`: `id2label` is `{0: "SAFE", 1: "INJECTION"}`. The score is
+  the model's probability of `INJECTION`. `SPECS` in `defense/classifier.py` names every label of a
+  model and what it means. A model that has a label the table does not name, or none that means
+  injection, does not load, and the error lists the model's own labels, so a model retrained with
+  other labels cannot be read the wrong way round. A slow test holds the table against the config.
+- Limits the card states: English only (it "does not detect jailbreak attacks or handle
+  non-English prompts"), and false positives on system prompts. The repository says the project is
+  archived, so the model will not change, which is the other reason it is pinned.
+- The optional `meta-llama/Llama-Prompt-Guard-2-86M` (revision `a8ded8e697ce7c355e395a0df51f94adb4a2fd27`)
+  is gated with manual approval, under the Llama community license. Its card and config answer 401
+  until the license is accepted on Hugging Face, and I did not accept it. So its label names are
+  not verified: the table says `LABEL_0` is benign and `LABEL_1` is malicious, from memory, and the
+  check above is what stops a wrong guess from running. That option is not tested.
+
+*How it runs.* A text goes through the tokenizer and is cut into windows of 512 tokens (510 of the
+text and the two special tokens) that overlap by 64. The score is the highest window. A window that
+is 0.99 sure ends the scan, and a text of more than 32 windows is sampled across its length with the
+first and the last kept. The model reads the text as the phrase rules do, invisible characters
+removed and NFKC applied, with Unicode tag characters written out as the ASCII they stand for, so
+that the message the `hidden_unicode` template hides is the message the model reads.
+
+It runs in a worker thread (`anyio.to_thread`) behind a semaphore of the CPU count. The model loads
+on first use, or at `warm()`, in a thread of its own, and the load goes on if the scan that asked
+for it gives up. A scan that gives up (the scanner's `classifier_timeout_ms`, 300 by default)
+cannot stop its thread by force. The thread looks between batches whether it was abandoned, and the
+place it held in the semaphore comes back when the thread leaves and not when the caller gave up,
+so abandoned scans cannot pile up when every scan times out.
+
+*Combining.* The final score is the higher of the rules' and the model's. A model that gives no
+answer in time leaves the rules' score, and `model` says `timeout`. `ScanDetails` carries both
+scores, so the evaluation can read each.
+
+*Packaging.* `keystone[scanner]` is torch and transformers. Linux gets the CPU build of torch, so
+the lock holds no CUDA library. CI never installs the extra and never downloads a model, and its
+image is built without the build argument. Compose builds with `WITH_SCANNER=1`, which installs the
+extra and downloads the pinned model (738 MB) into the image, and the image sets
+`HF_HUB_OFFLINE=1`, so the container never goes to the network for it. `make gate` installs the
+extra from Phase 7, because the gate runs the one test that loads the real model. Without the
+extra, `load_classifier` logs `scanner_classifier_unavailable` once and the scanner runs on its
+rules. `KEYSTONE_SCANNER_CLASSIFIER=none` (or `scanner.classifier: none`) turns the model off.
+
 ## Consequences
 
 - The rules miss what no pattern names: a goal in other words, a language that is not listed, a
@@ -81,12 +130,28 @@ The contract is not changed. The rule ids that hit are in `rule_hits`.
 - A business email that says "please send the invoice to bob@example.com" scores 0.4 on
   `tool_directive` alone, and stays benign. With "do not tell the user" in the same text it is
   suspicious. That is the weighting working as intended and also its cost.
+- At the default timeout the model reads about 3,500 characters on this machine, and anything
+  longer is scored by the rules alone. Latency is close to linear in length (about 0.08 ms of wall
+  time and 0.14 to 0.2 ms of CPU for each character) and five to seven times worse on a busy
+  machine (`docs/spikes/scanner.md`). `scanner.classifier_timeout_ms` is the lever, and each
+  millisecond of it can be added to a call.
+- The model is sure of a short text that is only an attack, and often loses the same instruction
+  inside a longer ordinary email or page (0.00 to 0.004 on four of the six planted pieces). The
+  rules caught three of those four. One planted email, m15, is missed by both. The final score is a
+  maximum because the two miss different things.
+- The model is English only and can be wrong about imperative text: one how-to sentence scored
+  0.9996. A false positive costs a warning wrapped round the output for a low-risk tool, and the
+  redaction or the withholding of a high-risk or critical one (KS-703), so the evaluation reports
+  the false-positive rate on hard negatives apart from the overall rate.
+- The first scans after a start find the model still loading (3.4 s from the cache, 10 to 13 s on a
+  busy machine) and fall back to the rules. `warm()` is for the start-up code to call.
 - The lower-case views make the rules about twice as fast and make their places in the text
   unreliable for cutting. `hidden_unicode` and `markdown_exfil` are the rules whose places are
   used to cut a text (KS-703), and they are run again on the text as it came.
 
 ## Revisit when
 
-The evaluation shows a rule that is wrong more often than right at its weight, or the gateway needs
-to scan outputs of several megabytes (then the rules move out of the process, or the scan is
-split and yields between pieces).
+The evaluation shows a rule that is wrong more often than right at its weight, the gateway needs
+to scan outputs of several megabytes (then the rules move out of the process, or the scan is split
+and yields between pieces), or the model is too slow for the outputs a deployment has (a quantized
+or ONNX copy, or a smaller model, would be measured against the same dev split first).

@@ -271,6 +271,9 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_APPROVALS__SLACK_WEBHOOK_URL` | unset | A Slack incoming webhook that gets a plain message for each request. A secret. |
 | `KEYSTONE_APPROVALS__WEBHOOK_BACKOFF_S` | `[1, 2, 4]` | JSON list of the seconds before each retry of a webhook delivery. |
 | `KEYSTONE_SCANNER__ENABLED` | `true` | Whether tool output is scanned. See Scanner. |
+| `KEYSTONE_SCANNER__CLASSIFIER` | `protectai-deberta-v2` | The model behind the rules: `protectai-deberta-v2`, `prompt-guard-2-86m` or `none`. Needs the extra `keystone[scanner]`. |
+| `KEYSTONE_SCANNER_CLASSIFIER` | unset | The same setting under a shorter name (one underscore). It wins when both are set. `KEYSTONE_SCANNER_CLASSIFIER=none` turns the model off. |
+| `KEYSTONE_SCANNER__CLASSIFIER_TIMEOUT_MS` | `300` | How long a scan waits for the model. After that the scan goes on with the rules alone and its `model` says `timeout`. 1 to 10,000. |
 | `KEYSTONE_SCANNER__THRESHOLDS__SUSPICIOUS` | `0.5` | A score from here up is `suspicious`. |
 | `KEYSTONE_SCANNER__THRESHOLDS__INJECTION` | `0.85` | A score from here up is an `injection`. Not below `SUSPICIOUS`. |
 | `KEYSTONE_SCANNER__ALLOWED_DOMAINS` | `[]` | JSON list of hosts a markdown image may point to without a mark against it. A name covers its subdomains. |
@@ -1016,6 +1019,32 @@ What the scan does to the text first: invisible characters are taken out and the
 normalized (NFKC), so a zero-width space inside a word or fullwidth letters do not hide a phrase.
 A tool result that is JSON is read as the strings in it, because there a line break or a quote is
 written with a backslash and a reader undoes that. Images are not read; they are counted.
+
+### The classifier
+
+Behind the rules there is a model, `protectai/deberta-v3-base-prompt-injection-v2` by default
+(Apache-2.0, English only), which scores the same text between 0 and 1. The final score is the
+higher of the two. It is the optional extra `keystone[scanner]` (torch for the CPU and
+transformers), and the compose image has it:
+
+```bash
+uv sync --extra scanner                  # in a checkout; the first use downloads about 740 MB
+uv run python -m keystone.defense.classifier fetch    # or fetch the model now
+docker build --build-arg WITH_SCANNER=1 .             # an image with the extra and the model in it
+KEYSTONE_SCANNER_CLASSIFIER=none make up              # compose without the model
+uv run pytest tests/integration/test_classifier_real.py   # the one test that loads the real model
+```
+
+Without the extra the gateway still starts and the scanner runs on its rules alone; it logs
+`scanner_classifier_unavailable` once at start, naming what is missing. A scan waits at most
+`scanner.classifier_timeout_ms` (300) for the model. A model that has not answered by then, or is
+still loading, leaves the rules' score, and the result says `model: "timeout"`. At 300 ms the model
+reads about 3,500 characters on a laptop, so raise the timeout for longer outputs and measure it
+(`scripts/bench_scanner.py --classifier`, `docs/spikes/scanner.md`). The image sets
+`HF_HUB_OFFLINE=1`: the model is in it, and the container never goes to the network for it.
+
+`prompt-guard-2-86m` (Llama Prompt Guard 2) is gated on Hugging Face: accept its license with an
+account, and give the gateway a token. Its labels are not verified here (ADR-0011).
 
 What it does not do. The rules are patterns and understand nothing: a phrase nobody listed, or a
 language the list lacks, is not seen, and the same holds for a text that explains an attack
