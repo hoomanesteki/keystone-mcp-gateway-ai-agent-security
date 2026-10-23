@@ -216,6 +216,7 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_MASTER_KEYS` | unset | Fernet keys for the credential vault, comma separated. The first encrypts, all decrypt. Needed by `keystone cred ...` and, from KS-306, by the gateway. |
 | `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is when `KEYSTONE_AUTH__MODE=none`. Refused in any other mode. |
 | `KEYSTONE_AUTH__ALLOW_UNKNOWN_AGENTS` | `false` | Let an agent that is not under `agents` in with trust `low`. Also `auth.allow_unknown_agents` in the YAML. |
+| `KEYSTONE_CONSOLE_ORIGIN` | `http://localhost:5173` | The one origin a browser may call the admin API from (CORS). A preflight from any other origin is refused with 400. Write it as `scheme://host[:port]`. |
 | `KEYSTONE_OTLP_ENDPOINT` | unset | Where spans are sent: an OTLP/HTTP endpoint such as `http://jaeger:4318` (`/v1/traces` is added). Unset means no spans are made and audit rows carry no `trace_id`. Compose sets it to Jaeger. |
 | `KEYSTONE_AUDIT__FAIL_CLOSED` | `true`, except `false` when `KEYSTONE_ENV=dev` | While the audit writer is unhealthy (its queue is over 90% full, or a flush failed less than 5 seconds ago), refuse every call with `KS_DENIED` and the reason `audit-unavailable`, before any interceptor runs. See Audit. Also `audit.fail_closed` in the YAML. |
 | `KEYSTONE_AUDIT__REDACT_KEYS` | `[]` | JSON list of argument keys whose values the audit log replaces with `[redacted]`, besides keys that look like secrets. Whole names, any case: `["ssn", "dob"]`. Also `audit.redact_keys` in the YAML. |
@@ -759,7 +760,8 @@ change its password with `ALTER ROLE keystone_app PASSWORD '...'`, and change th
 `KEYSTONE_DATABASE_URL` with it. The owner, and any Postgres superuser, can still change the log;
 that is how the Phase 5 smoke shows verify catching an edit.
 
-Until the admin API arrives (KS-507) the rows can be read with `psql`:
+The rows are read through the admin API (`GET /admin/api/v1/audit`), through
+`keystone audit export`, or with `psql` as the database owner:
 
 ```bash
 docker compose -f deploy/docker-compose.yml exec postgres psql -U keystone -d keystone \
@@ -833,6 +835,43 @@ code), Latency (p50 and p95 of the total, p95 by stage, policy evaluation), Upst
 quarantined tools), Audit (queue depth, failures) and the later phases. A test checks that every
 metric a panel asks for is declared in `telemetry/metrics.py`, and that every label it groups by
 exists.
+
+## Admin API
+
+`/admin/api/v1` is the interface the console and operator scripts use. Every route needs a token
+with the `admin` role (401 without a token or with a bad one, 403 without the role), and every
+answer is limited to the tenant of the token: a record, tool or session of another tenant is not
+found (404), so the answer does not say it exists. The OpenAPI schema is at
+`/admin/api/v1/openapi.json` and needs no token. The app as a whole serves no schema or docs.
+
+| Route | What it does |
+|---|---|
+| `GET /audit` | Search the audit log, newest first. Filters: `user`, `agent`, `tool`, `effect`, `outcome`, `since`, `until`, `call_id`. Pages by `cursor` (a `seq`) and `limit` (1 to 200, 50 by default); `next_cursor` is null on the last page. A page never repeats a record, even while calls are being made |
+| `GET /audit/{seq}` | One record |
+| `GET /audit/verify?last=10000` | Check the hash chain of the newest records. The chain runs through every tenant, so the result is about the whole log |
+| `GET /tools`, `GET /tools/{name}` | The tenant's tools; a tool's detail with its pending definition, its fingerprint and a diff |
+| `POST /tools/{name}/approve-change` | Accept a held definition. The body may carry `expect` (the fingerprint, a prefix will do) and `note` |
+| `POST /tools/{name}/disable`, `POST /tools/{name}/enable` | The same as the CLI |
+| `GET /upstreams` | Upstreams with status and last sync. A URL is shown without credentials |
+| `GET /sessions` | Live sessions of the tenant, read from Redis |
+| `GET /policies` | The version in force and the ids of the tenant's policies |
+| `POST /policies/reload` | Read the policy files again (see Policies) |
+
+Approving a change through the API calls the same code as `keystone tool approve-change`, with the
+same checks and messages: a stale fingerprint is 409 "changed after it was shown", a tool that is
+not held is 409, a tool of another tenant is 404. A refusal has the body
+`{"error": "...", "reason": "..."}`.
+
+A token for the admin role comes from `scripts/get_token.sh root keystone-cli`. For example:
+
+```bash
+TOKEN=$(bash scripts/get_token.sh root keystone-cli)
+curl -H "Authorization: Bearer $TOKEN" 'http://localhost:8080/admin/api/v1/audit?tool=bank__transfer'
+```
+
+Browsers may call it from `KEYSTONE_CONSOLE_ORIGIN` only. The CORS rule allows `GET` and `POST`
+with the `authorization` and `content-type` headers; it does not allow cookies, because the API
+takes a bearer token.
 
 ## The MCP endpoint
 
