@@ -18,7 +18,8 @@ upstreams and Keystone, and waits until every container reports healthy. Cold st
 | `scripts/get_token.sh alice support-agent` | Print an access token for a Keycloak user (see Identity) |
 | `make test-e2e` | The end-to-end tests against the running stack. The nightly workflow runs `make up` and then this |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
-| `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit count is off |
+| `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit log (read through the admin API) does not hold one new record for each call |
+| `bash scripts/smoke/phase_5.sh` | Runs the demo, finds a Jaeger trace of more than 9 spans with no user or argument in it, reads `keystone_tool_calls_total` from `/metrics` and from Prometheus, finds the dashboard in Grafana, verifies the audit chain, edits a record as the Postgres superuser and checks that `keystone audit verify` exits 2 and names the seq, then puts the record back. About 15 seconds. |
 | `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 13 tools; olivia's transfer of 900 shows `require_approval` / `approve-transfer-over-500` in the audit and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 20 seconds. |
 | `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), alice's 15 tools, bob's 3 globex tools and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
 | `bash scripts/smoke/phase_2.sh` | Lists the 15 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
@@ -848,7 +849,7 @@ found (404), so the answer does not say it exists. The OpenAPI schema is at
 |---|---|
 | `GET /audit` | Search the audit log, newest first. Filters: `user`, `agent`, `tool`, `effect`, `outcome`, `since`, `until`, `call_id`. Pages by `cursor` (a `seq`) and `limit` (1 to 200, 50 by default); `next_cursor` is null on the last page. A page never repeats a record, even while calls are being made |
 | `GET /audit/{seq}` | One record |
-| `GET /audit/verify?last=10000` | Check the hash chain of the newest records. The chain runs through every tenant, so the result is about the whole log |
+| `GET /audit/verify?last=10000` | Check the hash chain of the newest records (up to 100,000; `keystone audit verify` checks the whole log). The chain runs through every tenant, so the result is about the whole log |
 | `GET /tools`, `GET /tools/{name}` | The tenant's tools; a tool's detail with its pending definition, its fingerprint and a diff |
 | `POST /tools/{name}/approve-change` | Accept a held definition. The body may carry `expect` (the fingerprint, a prefix will do) and `note` |
 | `POST /tools/{name}/disable`, `POST /tools/{name}/enable` | The same as the CLI |
