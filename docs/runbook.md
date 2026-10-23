@@ -216,6 +216,7 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_MASTER_KEYS` | unset | Fernet keys for the credential vault, comma separated. The first encrypts, all decrypt. Needed by `keystone cred ...` and, from KS-306, by the gateway. |
 | `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is when `KEYSTONE_AUTH__MODE=none`. Refused in any other mode. |
 | `KEYSTONE_AUTH__ALLOW_UNKNOWN_AGENTS` | `false` | Let an agent that is not under `agents` in with trust `low`. Also `auth.allow_unknown_agents` in the YAML. |
+| `KEYSTONE_OTLP_ENDPOINT` | unset | Where spans are sent: an OTLP/HTTP endpoint such as `http://jaeger:4318` (`/v1/traces` is added). Unset means no spans are made and audit rows carry no `trace_id`. Compose sets it to Jaeger. |
 | `KEYSTONE_AUDIT__FAIL_CLOSED` | `true`, except `false` when `KEYSTONE_ENV=dev` | While the audit writer is unhealthy (its queue is over 90% full, or a flush failed less than 5 seconds ago), refuse every call with `KS_DENIED` and the reason `audit-unavailable`, before any interceptor runs. See Audit. Also `audit.fail_closed` in the YAML. |
 | `KEYSTONE_AUDIT__REDACT_KEYS` | `[]` | JSON list of argument keys whose values the audit log replaces with `[redacted]`, besides keys that look like secrets. Whole names, any case: `["ssn", "dob"]`. Also `audit.redact_keys` in the YAML. |
 | `KEYSTONE_POLICY__ROOT` | `policies` | The directory with the schema and the policies (see Policies). A relative path is read from the working directory; the image has its own copy at `/app/policies`, and compose mounts this checkout's at `/etc/keystone/policies`. Also `policy.root` in the YAML. |
@@ -764,6 +765,37 @@ Until the admin API arrives (KS-507) the rows can be read with `psql`:
 docker compose -f deploy/docker-compose.yml exec postgres psql -U keystone -d keystone \
   -c "SELECT seq, tool_name, effect, reasons, outcome FROM audit_events ORDER BY seq DESC LIMIT 10"
 ```
+
+## Tracing
+
+With `KEYSTONE_OTLP_ENDPOINT` set (compose points it at Jaeger), every tool call is one trace, and
+Jaeger shows it at http://localhost:16686 under the service `keystone`. The root span is
+`keystone.tool_call` (kind server). Under it are one `keystone.interceptor.<name>` span for each
+hook of each interceptor (`keystone.hook` says `before_call` or `after_call`) and
+`keystone.upstream.call` (kind client, with `keystone.upstream`). The audit row of the call holds the
+trace id.
+
+The root span carries:
+
+| Attribute | Value |
+|---|---|
+| `gen_ai.operation.name` | `execute_tool` |
+| `gen_ai.tool.name`, `gen_ai.tool.call.id` | the tool, and the call id |
+| `keystone.tenant`, `keystone.agent` | the tenant and the agent of the token |
+| `keystone.user_hash` | the first 12 hex characters of the sha256 of the user id |
+| `keystone.decision.effect`, `keystone.decision.reasons` | what the policy decided, once it has |
+| `keystone.outcome`, `keystone.reject_code` | `ok`, `rejected` or `error`, and the code that refused the call |
+
+No span holds a raw user id or an argument value, and no exception is recorded on one, because its
+text can carry either. A failed stage is a span status with fixed text. The user hash lets you
+match two traces of one user; it is not secret, since anyone with a list of user ids can hash it.
+
+A request that carries a W3C `traceparent` header is continued: the root span is a child of it, in
+the same trace. A header that cannot be read is ignored and the call starts a trace of its own. The
+call's `traceparent` (and `tracestate`) also go to the upstream in the `_meta` of the `tools/call`
+request, with the upstream call span as the parent, so an upstream that traces can join. Nothing is
+sent when tracing is off. Spans are sent in batches every second; a collector that is down costs
+nothing but the spans.
 
 ## The MCP endpoint
 
