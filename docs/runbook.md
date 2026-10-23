@@ -1355,6 +1355,13 @@ a 1 second limit each and returns 503 if either is down.
 | An approved call ends with `KS_QUARANTINED` or `KS_DENIED` | The call was checked again after its wait and the tool or the policy had changed. The approval is left unused and expires. Fix the cause, and have the agent call the tool again. |
 | Keystone does not start: "KEYSTONE_APPROVALS_WEBHOOK_SECRET must be at least 16 characters" | The signing key is too short to trust. Make one with `openssl rand -hex 32`. |
 | Keystone does not start: "KEYSTONE_APPROVALS_WEBHOOK_SECRET must be set" | `approvals.webhook_url` is set and the signing key is not in the environment. It is never read from the YAML. |
+| `pnpm dev` says port 5173 is in use | Another process holds it, perhaps an earlier `pnpm dev`. The port is fixed because the Keycloak client `console` allows `http://localhost:5173/*` only, so Vite refuses another one. Stop the other process. |
+| The console shows "Cannot reach the sign-in service" | The browser cannot read `VITE_OIDC_AUTHORITY` (`http://localhost:8180/realms/keystone`). Is Keycloak up, and is the port the one in `KEYCLOAK_PORT`? |
+| Keycloak says "Invalid parameter: redirect_uri" for the console | The realm in Keycloak is older than `deploy/keycloak/realm-keystone.json`. It is imported only when it does not exist: `make reset && make up` (see "Changing the realm"). |
+| The console says "Cannot reach Keystone" or its pages answer 502 | The dev server's proxy cannot reach `KEYSTONE_URL` (`http://localhost:8080`). Run `make up`. |
+| The console shows "No console access yet" | The user has neither the `approver` nor the `admin` role. Lena is an approver and root is an admin; see Identity. |
+| The audit page shows "Audit chain not checked" | `/audit/verify` failed (a 5xx or no answer). That is not a clean result: read the Keystone log, and run `keystone audit verify` for the whole log. |
+| The `console` job of CI says `schema.d.ts` is out of date with the admin API | A route or a model changed and `console/src/api/schema.d.ts` did not. Run `make console-types` and commit the result. `make console-check` does not look for this. |
 | Port already in use | Another process holds the port. Set a different one in `.env`. |
 | `make check` cannot reach Postgres | Run `make up-core`, then `docker compose -f deploy/docker-compose.yml ps`. |
 | `ModuleNotFoundError: keystone` right after `uv sync` (macOS) | A background process flagged `.venv` as hidden, and Python skips hidden `.pth` files. Check with `ls -lO .venv/lib/python3.12/site-packages/keystone.pth`. Set `UV_PROJECT_ENVIRONMENT` to a path outside the repo, for example `$HOME/.cache/keystone-venv`, then run `uv sync`. |
