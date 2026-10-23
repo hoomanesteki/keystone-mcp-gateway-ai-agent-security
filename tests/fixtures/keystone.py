@@ -4,7 +4,7 @@ The app runs in a background thread with its own event loop (engineering note 3)
 gets a new one, because a session manager runs once per instance (engineering note 2).
 """
 
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -20,11 +20,11 @@ from redis.asyncio import Redis
 from keystone.app import create_app
 from keystone.audit.sink import InMemoryAuditSink
 from keystone.registry.config import UpstreamConfig
-from keystone.settings import HealthSettings, RegistrySettings, Settings, TenantConfig
+from keystone.settings import AgentConfig, HealthSettings, RegistrySettings, Settings, TenantConfig
 
 # Re-exported so tests/conftest.py can name one module: tests/unit/test_phase_plugin.py copies the
 # conftest and strips its single `pytest_plugins` line, so that line must stay on one line.
-from tests.fixtures.fake_idp import fake_idp  # noqa: F401
+from tests.fixtures.fake_idp import FakeIdp, fake_idp  # noqa: F401
 from tests.fixtures.redis import redis, test_redis_url  # noqa: F401
 from tests.fixtures.servers import ServerThread
 from tests.fixtures.upstreams import (  # noqa: F401
@@ -33,6 +33,13 @@ from tests.fixtures.upstreams import (  # noqa: F401
     _reset_demo_upstreams,
     demo_upstreams,
 )
+
+AGENTS = {"support-agent": AgentConfig(trust="standard"), "ops-agent": AgentConfig(trust="high")}
+
+
+def auth_options(idp: FakeIdp) -> dict[str, Any]:
+    """Settings that make an app trust tokens from the fake IdP, with the two demo agents."""
+    return {"oidc_issuer": idp.issuer, "oidc_audience": idp.audience, "agents": dict(AGENTS)}
 
 
 @dataclass
@@ -59,19 +66,26 @@ class KeystoneApp:
 @pytest.fixture
 def keystone_app_factory(
     demo_upstreams: DemoUpstreams,  # noqa: F811 - the re-exported fixture above
+    fake_idp: FakeIdp,  # noqa: F811
     clean_env: None,
     test_database_url: str,
     clean_db: None,
     test_redis_url: str,  # noqa: F811 - the re-exported fixtures above
     redis: Redis,  # noqa: F811
 ) -> Iterator[Callable[..., KeystoneApp]]:
-    """Start Keystone against the test database and Redis database 15. Keyword arguments go to
-    create_app (a spy dispatcher, an interceptor). Tests that use it need Postgres and Redis, so
-    they carry the `services` marker, and `clean_db` and `redis` empty what the app wrote."""
+    """Start Keystone against the test database and Redis database 15. `settings` overrides
+    Settings fields, and other keyword arguments go to create_app (a spy dispatcher, an
+    interceptor). Tests that use it need Postgres and Redis, so they carry the `services` marker,
+    and `clean_db` and `redis` empty what the app wrote."""
     started: list[KeystoneApp] = []
 
-    def start(*, registry: RegistrySettings | None = None, **app_options: Any) -> KeystoneApp:
-        settings = Settings(
+    def start(
+        *,
+        registry: RegistrySettings | None = None,
+        settings: Mapping[str, Any] | None = None,
+        **app_options: Any,
+    ) -> KeystoneApp:
+        built = Settings(
             env="test",
             registry=registry or RegistrySettings(),
             database_url=SecretStr(test_database_url),
@@ -82,8 +96,9 @@ def keystone_app_factory(
                 UpstreamConfig(id=name, tenant="acme", url=demo_upstreams.url(name))
                 for name in NAMES
             ],
+            **{**auth_options(fake_idp), **(settings or {})},
         )
-        app = create_app(settings, **app_options)
+        app = create_app(built, **app_options)
         running = KeystoneApp(app, ServerThread(app).start())
         started.append(running)
         return running
@@ -100,6 +115,7 @@ def keystone_app(keystone_app_factory: Callable[..., KeystoneApp]) -> KeystoneAp
 
 @pytest.fixture
 def start_keystone(
+    fake_idp: FakeIdp,  # noqa: F811
     clean_env: None,
     test_database_url: str,
     clean_db: None,
@@ -126,6 +142,7 @@ def start_keystone(
             upstreams=upstreams,
             registry=registry or RegistrySettings(sync_interval_s=0),
             health=health or HealthSettings(interval_s=0),
+            **auth_options(fake_idp),
         )
         app = create_app(settings, **app_options)
         running = KeystoneApp(app, ServerThread(app).start())
@@ -146,14 +163,25 @@ McpConnect = Callable[..., AbstractAsyncContextManager[Client]]
 
 
 @pytest.fixture
-def mcp_client() -> McpConnect:
-    """Open an MCP client session to Keystone. `token` becomes a bearer token (Phase 3)."""
+def mcp_client(fake_idp: FakeIdp) -> McpConnect:  # noqa: F811
+    """Open an MCP client session to Keystone, signed in as alice of acme through support-agent.
+
+    `user` and `agent` choose another demo user (a test that calls a high-risk tool uses
+    `user="olivia"`, an operator). `token` sends that exact token instead, and `token=""` sends
+    none. Other keyword arguments go to the MCP client.
+    """
 
     @asynccontextmanager
     async def connect(
-        app: Endpoint, *, token: str | None = None, **client_options: Any
+        app: Endpoint,
+        *,
+        token: str | None = None,
+        user: str = "alice",
+        agent: str | None = None,
+        **client_options: Any,
     ) -> AsyncIterator[Client]:
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        bearer = fake_idp.token_for(user, agent) if token is None else token
+        headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
         async with httpx2.AsyncClient(headers=headers, timeout=httpx2.Timeout(15)) as http:
             transport = streamable_http_client(app.url, http_client=http)
             async with Client(transport, **client_options) as client:

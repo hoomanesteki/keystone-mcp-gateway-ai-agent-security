@@ -6,6 +6,12 @@ tenants:
   - id: acme
     name: Acme Corp
 
+# Who may connect (KS-308): the OAuth clients of the Keycloak realm that act for users. The
+# issuer and the keys come from the environment (docker-compose.yml).
+agents:
+  support-agent: {trust: standard}
+  ops-agent: {trust: high}
+
 upstreams:
   - {id: mail, tenant: acme, transport: http, url: "http://mail-mcp:8101/mcp"}
   - {id: files, tenant: acme, transport: http, url: "http://files-mcp:8102/mcp"}

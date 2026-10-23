@@ -47,7 +47,8 @@ async def test_direct_vs_gateway_identical(
     demo_upstreams.reset()
 
     through = []
-    async with mcp_client(keystone_app) as client:
+    # The calls include send_email and transfer, which are high risk: an operator makes them.
+    async with mcp_client(keystone_app, user="olivia") as client:
         for upstream, tool, arguments in CALLS:
             result = await client.call_tool(f"{upstream}__{tool}", arguments)
             through.append((result.is_error, blocks(result)))

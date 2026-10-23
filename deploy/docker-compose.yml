@@ -215,6 +215,12 @@ services:
       KEYSTONE_CONFIG: /etc/keystone/keystone.yaml
       KEYSTONE_DATABASE_URL: postgresql+asyncpg://keystone:keystone@postgres:5432/keystone
       KEYSTONE_REDIS_URL: redis://redis:6379/0
+      # Sign-in (KS-304). Tokens name the address a browser on this machine uses as their issuer.
+      # Keystone fetches the discovery document and the keys from the Keycloak container.
+      KEYSTONE_AUTH__MODE: oidc
+      KEYSTONE_OIDC_ISSUER: "http://localhost:${KEYCLOAK_PORT:-8180}/realms/keystone"
+      KEYSTONE_OIDC_DISCOVERY_URL: "http://keycloak:8080/realms/keystone/.well-known/openid-configuration"
+      KEYSTONE_PUBLIC_BASE_URL: "http://localhost:${KEYSTONE_PORT:-8080}"
       # Other containers reach Keystone by its service name.
       KEYSTONE_ALLOWED_HOSTS: '["127.0.0.1:*", "localhost:*", "[::1]:*", "keystone:*"]'
     volumes:
@@ -225,6 +231,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      keycloak:
         condition: service_healthy
       mail-mcp:
         condition: service_healthy

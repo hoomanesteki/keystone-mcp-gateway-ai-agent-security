@@ -21,6 +21,8 @@ from keystone.gateway.sessions import InMemorySessionStore, RedisSessionStore, S
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
 from keystone.gateway.wiring import PipelineDeps, build_pipeline
 from keystone.health import check_dependencies, upstream_statuses
+from keystone.identity.metadata import add_metadata_route
+from keystone.identity.middleware import Authenticator
 from keystone.registry.config import apply_config_upstreams, stdio_environments, tool_overrides
 from keystone.registry.repo import ToolRepo, UpstreamRepo
 from keystone.registry.service import RegistryService
@@ -40,6 +42,9 @@ def create_app(
     """Build the app. The keyword arguments are seams for tests: a different audit sink, a
     real interceptor in one slot, or a spy around the dispatcher."""
     settings = settings or Settings()
+    # Refuses to build an app whose authentication cannot work, instead of one that answers 401
+    # to everybody.
+    authenticator = Authenticator(settings)
     # The engine connects lazily, so building it needs no database. The lifespan disposes it.
     engine = create_engine(settings.database_url.get_secret_value())
     sessions = make_sessionmaker(engine)
@@ -121,7 +126,9 @@ def create_app(
     app.state.health = health
     app.state.gateway = gateway
     app.state.audit = audit
-    manager = mount_mcp(app, gateway)
+    app.state.authenticator = authenticator
+    manager = mount_mcp(app, gateway, authenticator)
+    add_metadata_route(app, settings)
 
     if settings.env != "prod" and isinstance(audit, InMemoryAuditSink):
         sink = audit

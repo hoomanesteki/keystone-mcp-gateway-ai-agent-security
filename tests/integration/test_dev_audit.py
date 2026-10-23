@@ -34,7 +34,7 @@ async def test_the_dev_audit_count_follows_the_calls(
 
 @pytest.mark.phase(1)
 async def test_prod_has_no_dev_audit_endpoint(clean_env: None) -> None:
-    app = create_app(Settings(env="prod"))
+    app = create_app(Settings(env="prod", oidc_issuer="https://idp.test/realms/keystone"))
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"

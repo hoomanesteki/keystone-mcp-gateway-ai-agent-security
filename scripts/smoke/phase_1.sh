@@ -4,7 +4,8 @@
 # log holds one record per tool call.
 #
 #   KEYSTONE_URL    MCP endpoint (default http://localhost:8080/mcp)
-#   KEYSTONE_TOKEN  bearer token, read by the agent (unset until Phase 3)
+#   KEYSTONE_TOKEN  bearer token, read by the agent. Default: olivia, an operator, through
+#                   ops-agent, because the script sends mail and reads a balance (KS-304)
 set -u
 
 cd "$(dirname "$0")/../.."
@@ -16,6 +17,12 @@ SCRIPT=examples/agents/scripts/demo_p1.yaml
 failed=0
 
 fail() { echo "FAILED: $1" >&2; failed=$((failed + 1)); }
+
+if [ -z "${KEYSTONE_TOKEN:-}" ]; then
+  KEYSTONE_TOKEN=$(bash scripts/get_token.sh olivia ops-agent) \
+    || { echo "cannot get a token for olivia. Is the stack up (make up)?" >&2; exit 1; }
+  export KEYSTONE_TOKEN
+fi
 
 for port in "${MAIL_PORT:-8101}" "${FILES_PORT:-8102}" "${BANK_PORT:-8103}" "${ECHO_PORT:-8104}"; do
   curl -fsS --max-time 5 -X POST "http://localhost:${port}/_reset" >/dev/null \

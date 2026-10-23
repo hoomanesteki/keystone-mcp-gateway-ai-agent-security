@@ -50,6 +50,7 @@ MAX_KID_CHARS = 256
 class Reason(StrEnum):
     """Why a request was refused. Short, stable and safe to show to the caller and to log."""
 
+    NO_CREDENTIALS = "no_credentials"
     MALFORMED = "malformed"
     ALG_NOT_ALLOWED = "alg_not_allowed"
     UNSUPPORTED_HEADER = "unsupported_header"

@@ -20,6 +20,7 @@ from keystone.db.models import Tool, Upstream
 from keystone.db.session import create_engine, make_sessionmaker
 from keystone.defense.description_check import check_description
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
+from keystone.identity.middleware import AuthConfigError
 from keystone.logging import configure_logging
 from keystone.registry.config import stdio_environments, tool_overrides
 from keystone.registry.naming import check_upstream_id
@@ -103,11 +104,21 @@ def serve(
     migrate: bool = typer.Option(False, "--migrate", help="Apply database migrations first."),
 ) -> None:
     """Run the gateway."""
-    settings = Settings()
+    try:
+        settings = Settings()
+    except ValueError as exc:
+        typer.echo(f"error: invalid settings: {exc}", err=True)
+        raise typer.Exit(1) from None
     configure_logging(settings.log_level)
+    try:
+        # Built before the migration, so a configuration that cannot work stops here.
+        gateway_app = create_app(settings)
+    except AuthConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from None
     if migrate:
         migrate_database(settings.database_url.get_secret_value())
-    uvicorn.run(create_app(settings), host=host, port=port)
+    uvicorn.run(gateway_app, host=host, port=port)
 
 
 db_app = typer.Typer(help="Database schema.", no_args_is_help=True, add_completion=False)

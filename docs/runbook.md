@@ -12,7 +12,7 @@ upstreams and Keystone, and waits until every container reports healthy. Cold st
 |---|---|
 | `make up` | Start the full stack and wait for health |
 | `make up-core` | Start Postgres and Redis only (what `make check` needs) |
-| `make demo` | `make up`, reset the upstreams, run the scripted agent through Keystone and print its transcript |
+| `make demo` | `make up`, reset the upstreams, run the scripted agent through Keystone as olivia and print its transcript |
 | `make down` | Stop the stack and keep its data |
 | `make reset` | Stop the stack and delete its volumes |
 | `scripts/get_token.sh alice support-agent` | Print an access token for a Keycloak user (see Identity) |
@@ -114,6 +114,13 @@ Every token then carries `iss=http://localhost:8180/realms/keystone`, while a re
 `keycloak:8080`. A service inside the network can then fetch the keys without going out through
 the host. `tests/e2e/test_keycloak.py` checks both answers.
 
+Keystone has two settings for this. `oidc_issuer` (`KEYSTONE_OIDC_ISSUER`) is the value tokens
+carry in `iss`: `http://localhost:8180/realms/keystone` in compose. `oidc_discovery_url`
+(`KEYSTONE_OIDC_DISCOVERY_URL`) is where Keystone reads the discovery document, and it only needs
+to be set when that differs from the issuer's own address: in compose it is
+`http://keycloak:8080/realms/keystone/.well-known/openid-configuration`. The document's `issuer`
+must equal `oidc_issuer`, or Keystone refuses its keys (503, and a log line naming both values).
+
 ### How Keystone checks a token
 
 `identity/jwt.py` does it in this order, and stops at the first failure:
@@ -171,6 +178,8 @@ lives in the Keycloak container, so removing the container removes the realm. Af
 | `docker compose -f deploy/docker-compose.yml up -d --force-recreate keycloak` | Re-imports the file and touches nothing else. |
 
 Recreating Keycloak creates new signing keys, so tokens fetched before it stop validating.
+Keystone picks up the new keys the first time it sees a token with an unknown key id, at most once
+a minute, so a token fetched right after the restart may be refused for up to a minute.
 
 ## Keystone settings
 
@@ -192,7 +201,12 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_HEALTH__TIMEOUT_S` | `3` | A probe slower than this has failed. |
 | `KEYSTONE_HEALTH__DEGRADED_AFTER` | `1` | Consecutive failed probes before an upstream is `degraded`. |
 | `KEYSTONE_HEALTH__DOWN_AFTER` | `3` | Consecutive failed probes before it is `down`. Not less than `DEGRADED_AFTER`. |
-| `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is, until real authentication arrives in Phase 3. Refused when `KEYSTONE_ENV=prod`. |
+| `KEYSTONE_AUTH__MODE` | `oidc` | `oidc`: every request to `/mcp` carries a bearer token from the identity provider. `none`: every caller is the dev principal. `none` is refused unless `KEYSTONE_ENV` is `dev` or `test`. Also `auth.mode` in the YAML. |
+| `KEYSTONE_OIDC_ISSUER` | unset | The `iss` of valid tokens. Required when the mode is `oidc`, and an https URL when `KEYSTONE_ENV=prod`. |
+| `KEYSTONE_OIDC_AUDIENCE` | `keystone` | The value `aud` must contain. |
+| `KEYSTONE_OIDC_DISCOVERY_URL` | the issuer's own `/.well-known/openid-configuration` | Where to read the discovery document, when that is not the issuer's address. See "The issuer". |
+| `KEYSTONE_PUBLIC_BASE_URL` | the address of the request | How clients reach Keystone, for the sign-in metadata (`http://localhost:8080` in compose). Set it behind a proxy that changes the scheme or the host. |
+| `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is when `KEYSTONE_AUTH__MODE=none`. Refused in any other mode. |
 | `KEYSTONE_AUTH__ALLOW_UNKNOWN_AGENTS` | `false` | Let an agent that is not under `agents` in with trust `low`. Also `auth.allow_unknown_agents` in the YAML. |
 
 Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
@@ -347,7 +361,7 @@ several.
 Each MCP session has a state object (flags, taint, call count, spend) stored as JSON in Redis
 under `ks:sess:{session id}`. The key lives 24 hours from its last use: both reading and writing
 a session restart the clock. Postgres holds one `sessions` row per session, written when the
-session makes its first call, as the durable reference that audit records will point at. The row's
+session opens, as the durable reference that audit records will point at. The row's
 `last_seen_at`, flags and taint are updated at most once a minute per session.
 
 If Redis cannot be reached, a call is refused with `KS_DENIED` ("session state is unavailable") and
@@ -356,15 +370,39 @@ cannot write the row, the call goes ahead and the failure is logged. A request t
 session id gets a throwaway state that is never stored. Redis database 15 belongs to the tests;
 they empty it.
 
+A session is bound to the principal that opened it. When `initialize` creates the session,
+Keystone records the tenant, the user and the agent of the token next to the new session id,
+before the client learns the id. Every later request that names the session must carry a token
+with the same three values, or it gets 403 `session belongs to another principal`. A different
+token for the same principal (a refreshed one, with changed groups) is fine, and each call is
+decided on the groups of its own token. A session id Keystone has no binding for gets 404, which
+makes a client start a new session; it is never adopted by whoever names it first. The binding
+is kept in the gateway process, like the SDK's own sessions, so it does not depend on Redis
+being up.
+
 ## The MCP endpoint
 
 `POST /mcp` on port 8080 speaks MCP over streamable HTTP. Keystone serves the handshake protocol
 era only (ADR-0003). A client in its default `auto` mode falls back to it by itself. A client
 pinned to the `2026-07-28` version is refused.
 
-Phase 1 has no authentication: whoever can reach the port acts as the dev principal above, so
-keep it on localhost. With `KEYSTONE_ENV=prod` there is no dev principal and the endpoint answers
-every request with HTTP 401 until Phase 3.
+Every request needs `Authorization: Bearer <token>`. The Host header is checked first (421 for an
+address that is not in `KEYSTONE_ALLOWED_HOSTS`), then the token:
+
+| Answer | When |
+|---|---|
+| 401 with `WWW-Authenticate: Bearer resource_metadata="<base>/.well-known/oauth-protected-resource"` | No token, or a token that is invalid. The body says why: `{"error": "invalid_token", "reason": "expired"}` |
+| 403 | The token is sound but its agent is not under `agents` (`unknown_agent`), or it names a session that another principal opened |
+| 404 | The request names a session that no one opened here |
+| 503 with `Retry-After` | The identity provider's keys cannot be fetched |
+
+`GET /.well-known/oauth-protected-resource` (RFC 9728) returns
+`{"resource": "<base>/mcp", "authorization_servers": ["<issuer>"], "bearer_methods_supported":
+["header"]}`, so an MCP client that supports OAuth can find the identity provider from the 401
+without it being written into the client. `/healthz`, `/readyz` and that document need no token.
+
+With `KEYSTONE_AUTH__MODE=none` (dev and test only) there is no check, and every caller is the dev
+principal. Keep that on localhost.
 
 `GET /_dev/audit` returns how many calls the in-memory audit log holds and the last 50. It exists
 for the Phase 1 demo, is not mounted when `KEYSTONE_ENV=prod`, and goes away when the admin API
@@ -388,6 +426,10 @@ a 1 second limit each and returns 503 if either is down.
 | `421 Invalid Host header` from `/mcp` | The `Host` is not in `KEYSTONE_ALLOWED_HOSTS`. Add it, for example `keystone:*`. |
 | `make up` times out on Keycloak | `docker compose -f deploy/docker-compose.yml logs keycloak`. First start imports the realm and can take 60 seconds on a slow disk. |
 | `get_token.sh` says `Invalid user credentials` | The realm was imported with other passwords (an older `.env`, or `.env` changed after the first start). Recreate Keycloak, see "Changing the realm". |
+| `401` with `reason: expired` | The token is older than five minutes. Get a new one with `scripts/get_token.sh`. |
+| `401` with `reason: wrong_issuer` | The token was issued under another address than `KEYSTONE_OIDC_ISSUER`. Get tokens from `http://localhost:8180`, the address in the setting. |
+| `403` with `reason: unknown_agent` | The token's `azp` is not under `agents`. Add it, or run `keystone agent list`. |
+| `503` from `/mcp` | Keystone cannot read the identity provider's keys. Check `KEYSTONE_OIDC_DISCOVERY_URL` and that Keycloak is up; the log says `jwks_fetch_failed` or `oidc_issuer_mismatch`. |
 | Port already in use | Another process holds the port. Set a different one in `.env`. |
 | `make check` cannot reach Postgres | Run `make up-core`, then `docker compose -f deploy/docker-compose.yml ps`. |
 | `ModuleNotFoundError: keystone` right after `uv sync` (macOS) | A background process flagged `.venv` as hidden, and Python skips hidden `.pth` files. Check with `ls -lO .venv/lib/python3.12/site-packages/keystone.pth`. Set `UV_PROJECT_ENVIRONMENT` to a path outside the repo, for example `$HOME/.cache/keystone-venv`, then run `uv sync`. |
