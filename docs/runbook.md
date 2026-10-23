@@ -1020,6 +1020,28 @@ normalized (NFKC), so a zero-width space inside a word or fullwidth letters do n
 A tool result that is JSON is read as the strings in it, because there a line break or a quote is
 written with a backslash and a reader undoes that. Images are not read; they are counted.
 
+### What happens to a flagged output
+
+An output that scores `suspicious` or `injection` is handled by the risk of the tool that made it
+(`scanner.actions`, one value for each of `low`, `medium`, `high` and `critical`):
+
+| Action | Default for | What the agent gets |
+|---|---|---|
+| `annotate` | low, medium | A warning block in front, then `<<<untrusted>>>`, the upstream's blocks as they were, then `<<<end untrusted>>>` |
+| `redact` | high | The same, with the invisible characters and the leaking images and links cut out of every text, resource and structured value first |
+| `block` | critical | Only `[keystone:KS_OUTPUT_BLOCKED] output withheld (score 0.93, rules: ...). Call id <id>.`, as an error |
+| `pass` | none | The output as it was. The score is still recorded |
+
+A benign output is never changed: the agent gets what the upstream sent, byte for byte.
+
+The scanner cannot crash a call. If the classifier raises, the rules alone decide and the result
+says `model: "error"`. If the rules raise, the output goes through as it is, the scan says
+`action: "error"` (the audit row's `scan_action`), and nothing is flagged. If an action raises on
+an output that was flagged, the output is withheld. Each one counts in
+`keystone_scan_errors_total{stage}` (`classifier`, `rules` or `action`) and logs
+`scanner_classifier_failed`, `scanner_rules_failed` or `scanner_action_failed` with the name of the
+exception and never the text that was being read.
+
 ### The classifier
 
 Behind the rules there is a model, `protectai/deberta-v3-base-prompt-injection-v2` by default
@@ -1199,7 +1221,8 @@ approval service sets it when it starts and after each request, decision and swe
 The metrics of Phases 7 and 8 are declared and nothing sets them yet, so the last row of the
 dashboard shows "no data" for them until then: `keystone_sessions_tainted_total`,
 `keystone_scan_score`, `keystone_rate_limited_total`, `keystone_budget_spent_usd` and
-`keystone_llm_tokens_total`.
+`keystone_llm_tokens_total`. `keystone_scan_errors_total{stage}` is declared with them (the scanner
+counts a scan that failed and was worked around; see Scanner), and has no panel yet.
 
 The dashboard has five rows: Traffic (calls per second by effect, outcome and tool, rejections by
 code), Latency (p50 and p95 of the total, p95 by stage, policy evaluation), Upstreams (errors,
