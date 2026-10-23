@@ -107,6 +107,7 @@ the "Found" list at the end.
 
 | ID | Title | Pts | Status | PR | Notes |
 |---|---|---|---|---|---|
+| KS-791 | Session updates merge instead of overwrite | 3 | todo | | Found at gate 6. Flags are a set union, taint never goes back to false through a save, counters are atomic increments. A call held for approval must not erase what a concurrent call recorded. |
 | KS-701 | Scanner interface and rule engine | 5 | todo | | |
 | KS-702 | Classifier adapter | 5 | todo | | |
 | KS-703 | Combined scoring and output actions | 3 | todo | | |
