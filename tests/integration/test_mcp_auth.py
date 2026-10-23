@@ -11,9 +11,8 @@ from mcp.shared.exceptions import MCPError
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from keystone.core.types import SessionState
 from keystone.db.models import McpSession
-from keystone.gateway.sessions import session_key
+from keystone.gateway.sessions import RedisSessionStore, session_key
 from tests.fixtures.fake_idp import FakeIdp
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.upstreams import DemoUpstreams
@@ -322,9 +321,10 @@ async def test_the_session_is_stored_with_its_principal_when_it_opens(
 ) -> None:
     session = open_session(keystone_app, fake_idp.token_for("olivia"))
 
-    state = SessionState.model_validate_json(await redis.get(session_key(session)) or "")
+    state = await RedisSessionStore(redis).peek(session)
     async with sessionmaker() as database:
         row = await database.get(McpSession, session)
+    assert state is not None
     assert (state.principal.tenant_id, state.principal.user_id) == ("acme", "olivia")
     assert state.principal.agent_id == "ops-agent" and state.principal.agent_trust == "high"
     assert row is not None and (row.tenant_id, row.user_id, row.agent_id) == (
@@ -360,11 +360,10 @@ async def test_a_call_never_runs_on_stored_state_that_belongs_to_someone_else(
     # stored state as well, so state that was changed behind the gateway's back is not trusted.
     alice = fake_idp.token_for("alice")
     session = open_session(keystone_app, alice)
-    stored = SessionState.model_validate_json(await redis.get(session_key(session)) or "")
-    forged = stored.model_copy(
-        update={"principal": stored.principal.model_copy(update={"user_id": "bob"})}
-    )
-    await redis.set(session_key(session), forged.model_dump_json())
+    stored = await RedisSessionStore(redis).peek(session)
+    assert stored is not None
+    forged = stored.principal.model_copy(update={"user_id": "bob"})
+    await redis.hset(session_key(session), "principal", forged.model_dump_json())
     call = {
         "jsonrpc": "2.0",
         "id": 3,

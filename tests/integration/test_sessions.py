@@ -49,9 +49,12 @@ async def test_redis_session_roundtrip(redis: Redis, sessionmaker: Sessions) -> 
     assert again is not None and again.principal == OLIVIA
     assert again.flags == {ToolTag.READS_UNTRUSTED} and again.tainted
     assert (again.call_count, again.spent_usd) == (3, 0.25)
-    stored = json.loads(await redis.get(session_key("s-1")) or "{}")
+    # A session is a hash since KS-791: who it belongs to, and a field for each thing that changed.
+    stored = await redis.hgetall(session_key("s-1"))
     assert stored["session_id"] == "s-1"
-    assert stored["principal"]["user_id"] == "olivia"
+    assert json.loads(stored["principal"])["user_id"] == "olivia"
+    assert stored["tainted"] == "1" and stored["flag:reads_untrusted"] == "1"
+    assert (stored["call_count"], float(stored["spent_usd"])) == ("3", 0.25)
     assert await store.get("never-seen") is None
 
 
@@ -205,8 +208,8 @@ async def test_the_gateway_writes_the_row_on_the_first_call_of_a_new_session(
         ("acme", "olivia", "ops-agent")
     }
     for row in found:
-        state = SessionState.model_validate_json(await redis.get(session_key(row.id)) or "")
-        assert state.principal.user_id == "olivia"
+        state = await RedisSessionStore(redis).peek(row.id)
+        assert state is not None and state.principal.user_id == "olivia"
     assert second is None
 
 
@@ -222,7 +225,8 @@ async def test_a_session_is_stored_when_it_opens_before_any_call(
     assert (row.tenant_id, row.user_id, row.agent_id) == ("acme", "alice", "support-agent")
     keys = [key async for key in redis.scan_iter("ks:sess:*")]
     assert keys == [session_key(row.id)]
-    state = SessionState.model_validate_json(await redis.get(keys[0]) or "")
+    state = await RedisSessionStore(redis).peek(row.id)
+    assert state is not None
     assert state.principal.user_id == "alice" and state.call_count == 0
 
 

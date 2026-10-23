@@ -16,7 +16,8 @@ import pytest
 from redis.asyncio import Redis
 
 from keystone.core.errors import Code, Reject
-from keystone.core.types import CallContext, ToolRef
+from keystone.core.types import CallContext, ToolRef, ToolTag
+from keystone.gateway.sessions import RedisSessionStore
 from keystone.settings import ApprovalSettings, PolicySettings
 from tests.fixtures.approvals import Approver
 from tests.fixtures.fake_idp import FakeIdp
@@ -250,18 +251,14 @@ async def test_whoami_shows_flags(
     token = fake_idp.token_for("olivia")
     async with mcp_client(keystone_app, token=token) as client:
         await client.list_tools()  # opens the session
-        # The scanner of Phase 7 will set these; until then a test writes the state itself.
+        # The scanner of Phase 7 will set these; until then a test records them itself.
         [key] = await redis.keys("ks:sess:*")
-        raw = await redis.get(key)
-        assert raw is not None
-        state = json.loads(raw)
-        state |= {
-            "flags": ["reads_untrusted", "reads_sensitive"],
-            "tainted": True,
-            "call_count": 7,
-            "spent_usd": 0.25,
-        }
-        await redis.set(key, json.dumps(state), ex=3600)
+        session_id = str(key).removeprefix("ks:sess:")
+        store = RedisSessionStore(redis)
+        await store.add_flags(session_id, {ToolTag.READS_UNTRUSTED, ToolTag.READS_SENSITIVE})
+        await store.mark_tainted(session_id)
+        await store.incr_calls(session_id, 7)
+        await store.add_spend(session_id, 0.25)
 
         result = await client.call_tool(WHOAMI, {})
 
