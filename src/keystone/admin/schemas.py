@@ -66,6 +66,10 @@ class ToolSummary(BaseModel):
     status: ToolState
     risk: str
     tags: list[str]
+    cost_per_call_usd: str = Field(
+        description="What one call is booked at, in US dollars, as a decimal string like the "
+        "audit log's cost. 0 for a tool with no price."
+    )
     reason: str | None = Field(description="Why the tool is not active, if it is not.")
     pending: bool = Field(description="A changed definition waits for a person.")
     description_hash: str

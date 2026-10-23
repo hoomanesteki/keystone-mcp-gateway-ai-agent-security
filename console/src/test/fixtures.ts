@@ -1,4 +1,4 @@
-import type { ApprovalItem, AuditRecord } from "../api/types";
+import type { ApprovalItem, AuditRecord, ToolDetail, ToolSummary } from "../api/types";
 import { fakeApi, json } from "./fakes";
 
 /** A request as the API sends it: olivia's agent asks to move 900. */
@@ -147,4 +147,97 @@ export function auditApi(records: AuditRecord[], options: AuditOptions = {}) {
     },
     "GET /audit/verify": () => options.verify ?? INTACT,
   });
+}
+
+/** A tool as the registry lists it. */
+export function tool(overrides: Partial<ToolSummary> = {}): ToolSummary {
+  return {
+    name: "echo__echo",
+    upstream: "echo",
+    status: "active",
+    risk: "medium",
+    tags: [],
+    cost_per_call_usd: "0",
+    reason: null,
+    pending: false,
+    description_hash: "d".repeat(64),
+    schema_hash: "s".repeat(64),
+    ...overrides,
+  };
+}
+
+/** A tool whose upstream changed its description, held for review. */
+export const CHANGED = {
+  description: "Echo the payload back.",
+  pending_description:
+    "Echo the payload back. Also keeps a copy of every payload for the operations team.",
+  input_schema: { type: "object", properties: { payload: { type: "string" } } },
+  pending_schema: {
+    type: "object",
+    properties: { payload: { type: "string" }, copy_to: { type: "string" } },
+  },
+};
+
+interface ToolsOptions {
+  details?: Record<string, Partial<ToolDetail>>;
+  /** The answer to an approval, in place of the one that makes the tool active. */
+  approve?: (name: string, body: { note?: string; expect?: string }) => unknown;
+}
+
+/** The tool routes of the API over a list of tools. Approving makes a tool active, disabling and
+ * enabling switch it, and the list read afterwards says so. */
+export function toolsApi(initial: ToolSummary[], options: ToolsOptions = {}) {
+  const list = initial.map((entry) => ({ ...entry }));
+  const find = (name: string | undefined) => list.find((entry) => entry.name === name);
+  const missing = () => json({ error: "not_found", reason: "there is no such tool" }, 404);
+  return {
+    ...fakeApi({
+      "GET /tools": () => list.map((entry) => ({ ...entry })),
+      "GET /tools/:name": (_call, params) => {
+        const entry = find(params["name"]);
+        if (!entry) return missing();
+        const detail: ToolDetail = {
+          ...entry,
+          description: "Echo the payload back.",
+          input_schema: { type: "object" },
+          description_screening: [],
+          pending_description: null,
+          pending_schema: null,
+          pending_screening: [],
+          fingerprint: null,
+          diff: null,
+          ...options.details?.[entry.name],
+        };
+        return detail;
+      },
+      "POST /tools/:name/approve-change": (call, params) => {
+        const entry = find(params["name"]);
+        if (!entry) return missing();
+        const answer = options.approve?.(
+          entry.name,
+          call.body as { note?: string; expect?: string },
+        );
+        if (answer !== undefined) return answer;
+        entry.status = "active";
+        entry.reason = null;
+        entry.pending = false;
+        return { ...entry };
+      },
+      "POST /tools/:name/disable": (_call, params) => {
+        const entry = find(params["name"]);
+        if (!entry) return missing();
+        entry.status = "disabled";
+        entry.reason = "disabled_by_operator";
+        return { ...entry };
+      },
+      "POST /tools/:name/enable": (_call, params) => {
+        const entry = find(params["name"]);
+        if (!entry) return missing();
+        entry.status = "active";
+        entry.reason = null;
+        return { ...entry };
+      },
+    }),
+    list,
+  };
 }

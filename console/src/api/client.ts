@@ -28,9 +28,16 @@ type QueryPart<O> =
       : { query?: NonNullable<Q> }
     : unknown;
 
-type BodyPart<O> = O extends { requestBody: { content: { "application/json": infer B } } }
-  ? { body: B }
-  : unknown;
+type BodyOf<O> = O extends { requestBody?: infer R } ? NonNullable<R> : never;
+
+type JsonBody<O> = BodyOf<O> extends { content: { "application/json": infer B } } ? B : never;
+
+/** A required body is `body`, an optional one (the schema allows none) is `body?`, none is nothing. */
+type BodyPart<O> = [BodyOf<O>] extends [never]
+  ? unknown
+  : O extends { requestBody: unknown }
+    ? { body: JsonBody<O> }
+    : { body?: NonNullable<JsonBody<O>> };
 
 export type RequestOptions<O> = PathPart<O> & QueryPart<O> & BodyPart<O> & { signal?: AbortSignal };
 

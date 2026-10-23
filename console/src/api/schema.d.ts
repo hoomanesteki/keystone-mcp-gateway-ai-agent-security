@@ -610,6 +610,11 @@ export interface components {
             /** Tags */
             tags: string[];
             /**
+             * Cost Per Call Usd
+             * @description What one call is booked at, in US dollars, as a decimal string like the audit log's cost. 0 for a tool with no price.
+             */
+            cost_per_call_usd: string;
+            /**
              * Reason
              * @description Why the tool is not active, if it is not.
              */
@@ -668,6 +673,11 @@ export interface components {
             risk: string;
             /** Tags */
             tags: string[];
+            /**
+             * Cost Per Call Usd
+             * @description What one call is booked at, in US dollars, as a decimal string like the audit log's cost. 0 for a tool with no price.
+             */
+            cost_per_call_usd: string;
             /**
              * Reason
              * @description Why the tool is not active, if it is not.
