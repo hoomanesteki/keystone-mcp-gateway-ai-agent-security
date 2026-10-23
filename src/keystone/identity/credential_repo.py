@@ -10,7 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from keystone.core.ids import new_id
 from keystone.db.models import Credential, Upstream
 from keystone.db.session import affected
-from keystone.identity.vault import CredentialInfo, Lookup, StoredCredential, UnknownUpstream
+from keystone.identity.vault import (
+    Cipher,
+    CredentialInfo,
+    Lookup,
+    StoredCredential,
+    UnknownUpstream,
+    Vault,
+)
+from keystone.settings import Settings
 
 
 class CredentialRepo:
@@ -124,3 +132,15 @@ class CredentialRepo:
         )
         async with self._sessionmaker() as session, session.begin():
             return bool(affected(await session.execute(statement)))
+
+
+def vault_from_settings(
+    settings: Settings, sessionmaker: async_sessionmaker[AsyncSession]
+) -> Vault | None:
+    """The vault the master keys open, or None when no key is set. Raises VaultError for keys
+    that cannot work, with a message that does not repeat them."""
+    keys = settings.master_keys
+    if keys is None or not keys.get_secret_value().strip():
+        return None
+    cipher = Cipher(keys, refuse_published=settings.env == "prod")
+    return Vault(cipher, CredentialRepo(sessionmaker))

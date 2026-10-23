@@ -104,3 +104,23 @@ def test_keycloak_issues_one_issuer_for_every_address() -> None:
     assert environment["KC_HOSTNAME_BACKCHANNEL_DYNAMIC"] == "true"
     ports = COMPOSE["services"]["keycloak"]["ports"]
     assert ports == ["${KEYCLOAK_PORT:-8180}:8080"], json.dumps(ports)
+
+
+@pytest.mark.phase(3)
+def test_every_credential_the_compose_config_takes_from_the_environment_lines_up() -> None:
+    # keystone.compose.yaml names a variable for each upstream's key. The Keystone container needs
+    # it, and the upstream's own container needs the same value, or every call would be refused.
+    config = yaml.safe_load((ROOT / "deploy" / "keystone.compose.yaml").read_text())
+    services = COMPOSE["services"]
+    named = [
+        (upstream["id"], upstream["url"].split("//")[1].split(":")[0], variable)
+        for upstream in config["upstreams"]
+        for variable in upstream.get("credential_env", {}).values()
+    ]
+
+    assert {variable for _, _, variable in named} >= {"MAIL_API_KEY", "ECHO_API_KEY"}
+    for upstream_id, host, variable in named:
+        assert variable in services["keystone"]["environment"], f"{variable} for {upstream_id}"
+        assert (
+            services[host]["environment"][variable] == services["keystone"]["environment"][variable]
+        )

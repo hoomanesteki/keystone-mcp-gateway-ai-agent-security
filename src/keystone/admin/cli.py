@@ -22,9 +22,9 @@ from keystone.db.models import Tool, Upstream
 from keystone.db.session import create_engine, make_sessionmaker
 from keystone.defense.description_check import check_description
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
-from keystone.identity.credential_repo import CredentialRepo
+from keystone.identity.credential_repo import CredentialRepo, vault_from_settings
 from keystone.identity.middleware import AuthConfigError
-from keystone.identity.vault import Cipher, UnknownUpstream, Vault, VaultError
+from keystone.identity.vault import UnknownUpstream, Vault, VaultError
 from keystone.logging import configure_logging
 from keystone.registry.config import stdio_environments, tool_overrides
 from keystone.registry.naming import check_upstream_id
@@ -121,7 +121,7 @@ def serve(
     try:
         # Built before the migration, so a configuration that cannot work stops here.
         gateway_app = create_app(settings)
-    except AuthConfigError as exc:
+    except (AuthConfigError, VaultError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from None
     if migrate:
@@ -306,6 +306,10 @@ async def run_sync(
     """Sync from this process with a pool of its own. A running gateway sees the result within its
     registry cache time (registry.cache_ttl_s)."""
     directory = UpstreamDirectory()
+    try:
+        vault = vault_from_settings(settings, sessions)
+    except VaultError as exc:
+        raise CliError(str(exc)) from exc
     async with UpstreamPool(directory_client_factory(directory)) as pool:
         syncer = RegistrySyncer(
             UpstreamRepo(sessions),
@@ -315,6 +319,7 @@ async def run_sync(
             overrides=tool_overrides(settings.upstreams),
             timeout_s=settings.registry.sync_timeout_s,
             environments=stdio_environments(settings.upstreams),
+            service_headers=vault.service_headers if vault else None,
         )
         if upstream_id is not None:
             return [await syncer.sync_upstream(upstream_id)]
@@ -616,13 +621,13 @@ def agent_list(
 
 
 def open_vault(settings: Settings, sessions: Sessionmaker) -> Vault:
-    if settings.master_keys is None or not settings.master_keys.get_secret_value().strip():
-        raise CliError("KEYSTONE_MASTER_KEYS is not set")
     try:
-        cipher = Cipher(settings.master_keys, refuse_published=settings.env == "prod")
+        vault = vault_from_settings(settings, sessions)
     except VaultError as exc:
         raise CliError(str(exc)) from exc
-    return Vault(cipher, CredentialRepo(sessions))
+    if vault is None:
+        raise CliError("KEYSTONE_MASTER_KEYS is not set")
+    return vault
 
 
 def read_secret(from_env: str | None) -> str:

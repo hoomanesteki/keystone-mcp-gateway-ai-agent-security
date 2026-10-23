@@ -215,6 +215,23 @@ class Vault:
         ciphertext, kid = self._cipher.encrypt(clean)
         await self._store.put(tenant_id, upstream_id, user_id, ciphertext, kid)
 
+    async def seed(self, tenant_id: str, upstream_id: str, headers: Mapping[str, str]) -> bool:
+        """Make these the upstream's static credential, unless they already are, and under the
+        first master key. This is how a credential given in the environment reaches the vault at
+        startup: through the same code as `cred set`. Returns True when it wrote."""
+        clean = check_headers(headers)
+        found = await self._store.lookup(tenant_id, upstream_id, None)
+        if found is None:
+            raise UnknownUpstream(f"there is no upstream {upstream_id!r}")
+        if found.static is not None and found.static.key_id == self._cipher.primary_id:
+            try:
+                if self._cipher.decrypt(found.static.ciphertext) == clean:
+                    return False
+            except VaultError:
+                pass  # unreadable, so it is replaced
+        await self.set(tenant_id, upstream_id, clean)
+        return True
+
     async def headers_for(
         self, tenant_id: str, upstream_id: str, user_id: str | None
     ) -> dict[str, SecretStr]:

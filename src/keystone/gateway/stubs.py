@@ -43,10 +43,6 @@ class ApprovalInterceptor(_Passthrough):
             raise Reject(Code.DENIED, "approval not available")
 
 
-class CredentialInterceptor(_Passthrough):
-    name = "credential"
-
-
 class OutputScanInterceptor(_Passthrough):
     name = "output_scan"
 

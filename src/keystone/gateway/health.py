@@ -9,11 +9,12 @@ it is down, which is how it comes back.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Literal, Protocol
 
 import anyio
 import structlog
+from pydantic import SecretStr
 
 from keystone.db.models import Upstream
 from keystone.gateway.upstreams import UpstreamPool
@@ -50,8 +51,10 @@ class UpstreamHealth:
         timeout_s: float = 3.0,
         degraded_after: int = 1,
         down_after: int = 3,
+        service_headers: Callable[[str, str], Awaitable[Mapping[str, SecretStr]]] | None = None,
     ) -> None:
         self._pool = pool
+        self._service_headers = service_headers
         self._upstreams = upstreams
         self._learn = learn
         self.interval_s = interval_s
@@ -100,8 +103,11 @@ class UpstreamHealth:
 
         results: dict[str, HealthStatus] = {}
 
+        tenants = {row.id: row.tenant_id for row in rows}
+
         async def probe(upstream_id: str) -> None:
-            results[upstream_id] = self.record(upstream_id, await self._probe(upstream_id))
+            ok = await self._probe(tenants[upstream_id], upstream_id)
+            results[upstream_id] = self.record(upstream_id, ok)
             try:
                 # Written every round, so the database converges on what the probes say even
                 # after a sync wrote `up` on its own.
@@ -122,10 +128,15 @@ class UpstreamHealth:
             await self.check_all()
             await anyio.sleep(self.interval_s)
 
-    async def _probe(self, upstream_id: str) -> bool:
+    async def _probe(self, tenant_id: str, upstream_id: str) -> bool:
         try:
             with anyio.fail_after(self._timeout_s):
-                async with self._pool.lease(upstream_id) as client:
+                headers = (
+                    await self._service_headers(tenant_id, upstream_id)
+                    if self._service_headers
+                    else {}
+                )
+                async with self._pool.lease(upstream_id, headers) as client:
                     return await client.health()
         except Exception:
             # TimeoutError, a Reject from a client that is closed, a factory that does not know
