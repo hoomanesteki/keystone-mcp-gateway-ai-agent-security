@@ -1265,17 +1265,19 @@ start the stack takes about 75.
    starts the Vite dev server unless one is already running on port 5173 (outside CI).
 2. The test signs in as lena on Keycloak's own page (her password is in `.env.example`) and checks
    that the menu holds Approvals only. It finds the card for `bank__transfer` and `invoice 4471`,
-   checks the risk, the requester, the amount and the link of the reason, and opens the session's
-   recent calls. It waits until a call with `KS_APPROVAL_PENDING` is listed there. That wait is the
-   point: an approval inside the first 10 seconds would finish the first call and leave the await
-   tool nothing to do.
+   checks the risk, the requester, the amount and the link of the reason, and runs axe-core over
+   the page in the light and the dark theme (WCAG 2.1 A and AA and best practices; any finding
+   fails the test). It opens the session's recent calls and waits until a call with
+   `KS_APPROVAL_PENDING` is listed there. That wait is the point: an approval inside the first 10
+   seconds would finish the first call and leave the await tool nothing to do.
 3. It approves with a note, sees the card go and the toast, and reads the agent's transcript
    (`console/test-results/approval-agent.txt`): the transfer succeeded, after
    `answered KS_APPROVAL_PENDING; waited for approval <the card's id>`, with the status
    `completed`. Then it reads `/_state` of the bank: one transfer, 900 from CHK-001 to SAV-002.
 
-A stopped stack, a missing `uv` or a bank that does not reset stops the run before the browser
-opens, with the reason. Requests of earlier runs that nobody decided stay in the queue until they
+The run asks the browser for reduced motion, which the console honors, so that colors are at rest
+when axe reads them. A stopped stack, a missing `uv` or a bank that does not reset stops the run
+before the browser opens, with the reason. Requests of earlier runs that nobody decided stay in the queue until they
 expire (15 minutes); the test takes the newest card.
 
 ### Settings
