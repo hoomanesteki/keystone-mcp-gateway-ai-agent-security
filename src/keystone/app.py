@@ -28,6 +28,7 @@ from keystone.identity.credential_repo import vault_from_settings
 from keystone.identity.metadata import add_metadata_route
 from keystone.identity.middleware import Authenticator
 from keystone.identity.vault import VaultError
+from keystone.policy.schema_info import args_fields
 from keystone.policy.store import PolicyStore, reload_on_sighup
 from keystone.policy.versions import PolicyVersionRepo
 from keystone.registry.config import (
@@ -137,6 +138,7 @@ def create_app(
                 settings.upstreams,
                 [t.id for t in settings.tenants],
                 allow_private=settings.allow_private_upstreams,
+                args=args_fields(policies.current.schema.text),
             )
             # Credentials given in the environment go into the vault now, before the first sync
             # needs them.
