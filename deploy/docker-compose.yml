@@ -269,7 +269,7 @@ services:
       dockerfile: Dockerfile
       args:
         # The classifier behind the scanner's rules, and its model, are in the image (KS-702). The
-        # first build downloads the model (738 MB) and torch.
+        # first build downloads the model (738 MB) and torch, and took 20 minutes on a laptop.
         # KEYSTONE_SCANNER_CLASSIFIER=none turns the model off.
         WITH_SCANNER: "1"
     image: keystone:dev

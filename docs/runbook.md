@@ -6,7 +6,9 @@ How to run the local stack and what each part listens on. This file grows with t
 
 `make up` builds and starts Postgres, Redis, Keycloak, Jaeger, Prometheus, Grafana, the four demo
 upstreams and Keystone, and waits until every container reports healthy. Cold start takes about
-30 seconds on a laptop with warm images. The first build of the two local images takes longer.
+30 seconds on a laptop with warm images. The first build of the two local images takes longer: the
+Keystone image holds torch and a 738 MB model (the classifier, below), and its first build took
+20 minutes on a laptop.
 
 | Command | What it does |
 |---|---|
