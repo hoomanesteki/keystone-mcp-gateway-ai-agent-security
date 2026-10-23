@@ -1,0 +1,12 @@
+# Grafana loads every dashboard in this directory at start. keystone.json is the one dashboard that
+# ships with Keystone; edit it in the file, not in the UI.
+apiVersion: 1
+
+providers:
+  - name: keystone
+    folder: Keystone
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

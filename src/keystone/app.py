@@ -5,7 +5,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 import anyio
 import structlog
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from redis.asyncio import Redis
 
 from keystone import __version__
@@ -29,7 +29,7 @@ from keystone.identity.credential_repo import vault_from_settings
 from keystone.identity.metadata import add_metadata_route
 from keystone.identity.middleware import Authenticator
 from keystone.identity.vault import VaultError
-from keystone.policy.engine import CedarPolicyEngine
+from keystone.policy.engine import CedarPolicyEngine, ObservedEngine
 from keystone.policy.schema_info import args_fields
 from keystone.policy.store import PolicyStore, reload_on_sighup
 from keystone.policy.versions import PolicyVersionRepo
@@ -43,7 +43,7 @@ from keystone.registry.repo import ToolRepo, UpstreamRepo
 from keystone.registry.service import RegistryService
 from keystone.registry.sync import RegistrySyncer
 from keystone.settings import Settings
-from keystone.telemetry.metrics import Metrics
+from keystone.telemetry.metrics import CONTENT_TYPE_LATEST, Metrics
 from keystone.telemetry.tracing import Tracer, build_tracer
 
 log = structlog.get_logger()
@@ -65,6 +65,9 @@ def create_app(
     credentials are read from (the process environment by default), or a tracer that keeps its
     spans in memory."""
     settings = settings or Settings()
+    metrics = Metrics(
+        tenants=[t.id for t in settings.tenants], upstreams=[u.id for u in settings.upstreams]
+    )
     # Refuses to build an app whose authentication cannot work, instead of one that answers 401
     # to everybody.
     authenticator = Authenticator(settings)
@@ -104,7 +107,9 @@ def create_app(
         environments=stdio_environments(settings.upstreams),
         service_headers=service_headers,
     )
-    registry = RegistryService(syncer, cache_ttl_s=settings.registry.cache_ttl_s)
+    registry = RegistryService(
+        syncer, cache_ttl_s=settings.registry.cache_ttl_s, on_load=metrics.tools_loaded
+    )
     health = UpstreamHealth(
         pool,
         syncer.upstreams,
@@ -116,20 +121,20 @@ def create_app(
         service_headers=service_headers,
     )
     tracer = tracer or build_tracer(settings.otlp_endpoint)
-    metrics = Metrics()
     audit = audit or PostgresAuditSink(
         sessions, metrics=metrics, redaction=RedactionConfig.of(settings.audit.redact_keys)
     )
     dispatcher: Dispatcher = UpstreamDispatcher(pool, health)
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
-    policy_engine = CedarPolicyEngine(policies)
+    policy_engine = ObservedEngine(CedarPolicyEngine(policies), metrics.policy_evaluated)
     pipeline = build_pipeline(
         settings,
         PipelineDeps(
             dispatcher,
             audit,
             tracer=tracer,
+            metrics=metrics,
             tool_states=registry,
             vault=vault,
             policy=policy_engine,
@@ -215,6 +220,12 @@ def create_app(
     app.include_router(create_admin_router(AdminAuth(authenticator), policies))
     manager = mount_mcp(app, gateway, authenticator)
     add_metadata_route(app, settings)
+
+    @app.get("/metrics", include_in_schema=False)
+    async def prometheus() -> Response:
+        """The Prometheus text format. It needs no token, as a scrape sends none, and it holds
+        no user, session or argument: keep it off the public network."""
+        return Response(metrics.render(), media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

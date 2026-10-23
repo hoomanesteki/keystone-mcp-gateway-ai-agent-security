@@ -45,7 +45,9 @@ class AllowsExceptForbidden:
 async def test_upstream_receives_header(
     keystone_app_factory: Factory, mcp_client: McpConnect, keyed_upstreams: DemoUpstreams
 ) -> None:
-    app = keystone_app_factory(keyed=True)
+    # No health probes: the first one starts with the app and asks every upstream for its tools
+    # with the credential, so on a busy machine it can land after the reset below.
+    app = keystone_app_factory(keyed=True, settings={"health": HealthSettings(interval_s=0)})
     # The startup sync used the credential too. Start counting from here, so that what is
     # checked below is the call and not the sync.
     keyed_upstreams.reset()

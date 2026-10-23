@@ -28,7 +28,7 @@ The audit log therefore shows `policy-error` for the "something is wrong with th
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -57,6 +57,29 @@ class PolicyEngine(Protocol):
     def evaluate(
         self, principal: Principal, action: Action, tool: ToolRef, context: Mapping[str, Any]
     ) -> Decision: ...
+
+
+class ObservedEngine:
+    """An engine that tells `observe` how long each decision took, in seconds, and decides exactly
+    as the engine it wraps (the metric `keystone_policy_eval_seconds`, KS-505)."""
+
+    def __init__(self, inner: PolicyEngine, observe: Callable[[float], None]) -> None:
+        self._inner = inner
+        self._observe = observe
+
+    @property
+    def version(self) -> str:
+        return self._inner.version
+
+    def evaluate(
+        self, principal: Principal, action: Action, tool: ToolRef, context: Mapping[str, Any]
+    ) -> Decision:
+        decision = self._inner.evaluate(principal, action, tool, context)
+        try:
+            self._observe(decision.evaluated_ms / 1000)
+        except Exception:
+            log.error("policy_metric_failed", exc_info=True)
+        return decision
 
 
 class EvaluationFailed(Exception):

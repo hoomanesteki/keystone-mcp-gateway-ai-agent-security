@@ -797,6 +797,43 @@ request, with the upstream call span as the parent, so an upstream that traces c
 sent when tracing is off. Spans are sent in batches every second; a collector that is down costs
 nothing but the spans.
 
+## Metrics and the dashboard
+
+`GET /metrics` serves the Prometheus text format. It needs no token, because a scrape sends none,
+and it holds no user, session or argument: keep it off the public network all the same. Compose
+runs Prometheus (http://localhost:9090) with a job that scrapes `keystone:8080/metrics` every 5
+seconds, and Grafana (http://localhost:3000, user `admin`, password `admin`) with the dashboard
+**Keystone** in the folder of the same name, loaded from `deploy/grafana/dashboards/keystone.json`.
+Edit the file, not the UI: the provisioned dashboard is read-only.
+
+| Metric | Labels | What it counts |
+|---|---|---|
+| `keystone_tool_calls_total` | `tenant`, `tool`, `effect`, `outcome` | Every call, by what the policy decided (`allow`, `deny`, `require_approval`, or `none` when nothing decided) and how it ended (`ok`, `rejected`, `error`) |
+| `keystone_tool_call_duration_seconds` | `stage` | A histogram. `total` is the whole call. Other stages are an interceptor (`policy`, `pinning`, ...), observed once for each of its hooks, and `upstream` |
+| `keystone_rejections_total` | `tenant`, `code` | Calls Keystone refused, by `KS_*` code |
+| `keystone_upstream_errors_total` | `upstream`, `kind` | `timeout`, `down` (refused without a try, because the upstream is marked down) or `error` |
+| `keystone_quarantined_tools` | `tenant` | Tools held for review, as of the last time the registry read the tenant's tools |
+| `keystone_policy_eval_seconds` | none | A histogram of the time the policy engine took, for calls and for tool lists |
+| `keystone_audit_queue_depth` | none | Audit records accepted and not yet written |
+| `keystone_audit_failures_total` | `reason` | `flush_failed`, `record_dropped`, `queue_full`, `shutdown_dropped`, `not_running` (see Audit) |
+
+The labels are bounded on purpose. There is no label for a user, a session or an argument: a label
+whose values come from callers would give Prometheus a series for each of them, and metrics are
+often less protected than logs. A tenant that is not in the config is `other`, an upstream that
+is not is `unknown`, and a call to a tool that does not exist is counted under the tool `unknown`,
+whatever name the caller made up.
+
+The metrics of Phases 6 to 8 are declared and nothing sets them yet, so the last row of the
+dashboard shows "no data" until then: `keystone_approvals_pending`, `keystone_sessions_tainted_total`,
+`keystone_scan_score`, `keystone_rate_limited_total`, `keystone_budget_spent_usd` and
+`keystone_llm_tokens_total`.
+
+The dashboard has five rows: Traffic (calls per second by effect, outcome and tool, rejections by
+code), Latency (p50 and p95 of the total, p95 by stage, policy evaluation), Upstreams (errors,
+quarantined tools), Audit (queue depth, failures) and the later phases. A test checks that every
+metric a panel asks for is declared in `telemetry/metrics.py`, and that every label it groups by
+exists.
+
 ## The MCP endpoint
 
 `POST /mcp` on port 8080 speaks MCP over streamable HTTP. Keystone serves the handshake protocol
