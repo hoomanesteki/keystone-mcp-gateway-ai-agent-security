@@ -215,6 +215,7 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_AUTH__ALLOW_UNKNOWN_AGENTS` | `false` | Let an agent that is not under `agents` in with trust `low`. Also `auth.allow_unknown_agents` in the YAML. |
 | `KEYSTONE_POLICY__ROOT` | `policies` | The directory with the schema and the policies (see Policies). A relative path is read from the working directory; the image has its own copy at `/app/policies`, and compose mounts this checkout's at `/etc/keystone/policies`. Also `policy.root` in the YAML. |
 | `KEYSTONE_POLICY__INCLUDE_DEMO` | `false` | Also read `demo/`, the rules that go with the demo upstreams. Compose turns it on. |
+| `KEYSTONE_POLICY__LIST_CACHE_TTL_S` | `60` | How long the answer to "which tools may this caller see" is kept, per caller and policy version. `0` turns the cache off. |
 
 Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
 
@@ -361,9 +362,47 @@ before they are used, and identified by a version. Everything is under one direc
 A tenant's access set is `default/` plus `demo/` (if on) plus its own directory, and so is its
 approval set. The access set is standard Cedar: a call is denied unless a permit matches and no
 forbid does. The approval set holds permits only, and is asked after access allowed: a permit that
-matches means a person has to approve the call. Phase 4 builds the engine in steps. At this point
-the files are loaded, checked and reloadable, and the gateway still allows every call; the
-interceptor that decides with them comes with KS-406.
+matches means a person has to approve the call.
+
+### How a call is decided
+
+The policy slot runs after the pinning check and before approval and credentials, so a refused
+call never has its credential opened. It reads the arguments a tool's `extract` config names,
+builds the entities (the user as `Keystone::User::"<tenant>:<user>"` with its groups as parents,
+the tool with its upstream, risk, risk level and tags) and the context (agent, trust, session
+flags, taint, call count, hour in UTC and the extracted `args`), and asks the engine:
+
+| The engine says | The agent gets | The audit record has |
+|---|---|---|
+| allow | the call goes on | `allow`, with the ids of the permits that allowed it |
+| deny | `KS_DENIED`, "denied by policy: `<ids>`", and the ids in `_meta` as `keystone/reasons` | `deny`, with the ids of the forbids that matched, or `default-deny` when nothing allowed it |
+| require approval | until Phase 6 the approval stub refuses it: `KS_DENIED`, "approval not available" | `require_approval`, with the ids of the approval permits that matched |
+| the rules could not be evaluated | `KS_DENIED` with the reason `policy-error` | `deny`, reason `policy-error` |
+
+The last row is the fail-closed rule. It covers a policy that failed to evaluate in either pass
+(Cedar skips such a policy, so a broken `forbid` would otherwise not forbid), a context the schema
+refuses (an `args` key it does not know), a tenant with no set, and any exception. The cause goes
+to the log as `policy_evaluation_failed`, naming the policy by its id, and never to the agent. A
+set with no rule that allows anything denies every call with `default-deny` (invariant I6).
+
+`GET /_dev/audit` shows each recent call's `effect` and `reasons`, so the decision can be read
+without a database.
+
+### The tool list
+
+`tools/list` shows a caller only the tools whose `list_tool` the policy allows. In the local stack
+support sees 13 of acme's 15 tools and operators see all 15, because `mail__send_email` and
+`bank__transfer` are high risk and only operators may use them. The list is only a convenience. Every call is decided again when it is
+made, so a tool that is not listed is still refused if it is called by name. A listing that cannot
+be decided shows nothing.
+
+The answers are kept for `policy.list_cache_ttl_s` seconds (60) per caller and policy version, in
+Redis under `ks:policy:listcache:{principal_hash}:{version}`, or in the process when there is no
+Redis. The caller is the tenant, user, groups, agent, trust and roles. A reload changes the
+version, so the next listing is decided under the new rules at once. A tool that is new, or whose
+risk or tags changed, is decided again without waiting for the entry to expire. A listing does not
+depend on the session, so a policy for `list_tool` cannot read the session flags. Redis being down
+only means the answers are worked out again.
 
 ### What a load checks
 
@@ -635,8 +674,9 @@ without it being written into the client. `/healthz`, `/readyz` and that documen
 With `KEYSTONE_AUTH__MODE=none` (dev and test only) there is no check, and every caller is the dev
 principal. Keep that on localhost.
 
-`GET /_dev/audit` returns how many calls the in-memory audit log holds and the last 50. It exists
-for the Phase 1 demo, is not mounted when `KEYSTONE_ENV=prod`, and goes away when the admin API
+`GET /_dev/audit` returns how many calls the in-memory audit log holds and the last 50, each with
+its tool, outcome, the policy's decision (`effect`) and the `reasons`. It exists for the demo and
+the smoke scripts, is not mounted when `KEYSTONE_ENV=prod`, and goes away when the admin API
 arrives in Phase 5.
 
 Every result carries `keystone/call_id` in its `_meta`. A call that Keystone refuses (unknown

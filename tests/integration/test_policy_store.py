@@ -20,20 +20,23 @@ from keystone.settings import PolicySettings
 from tests.fixtures.fake_idp import FakeIdp
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.mcp_results import texts
-from tests.fixtures.policies import POLICY_ROOT, forbid, permit, write_policies
+from tests.fixtures.policies import (
+    POLICY_ROOT,
+    copy_pack,
+    forbid,
+    permit,
+    reload_policies,
+    write_policies,
+)
 
 pytestmark = [pytest.mark.phase(4), pytest.mark.services]
 
 Factory = Callable[..., KeystoneApp]
 Sessions = async_sessionmaker[AsyncSession]
-RELOAD = "/admin/api/v1/policies/reload"
 
 
 def own_policies(tmp_path: Path) -> Path:
-    """A copy of the repository's policies that a test may edit."""
-    target = tmp_path / "policies"
-    shutil.copytree(POLICY_ROOT, target)
-    return target
+    return copy_pack(tmp_path)
 
 
 def start(factory: Factory, root: Path, **options: Any) -> KeystoneApp:
@@ -41,8 +44,7 @@ def start(factory: Factory, root: Path, **options: Any) -> KeystoneApp:
 
 
 def reload_as(app: KeystoneApp, token: str | None) -> httpx2.Response:
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    return httpx2.post(f"{app.base}{RELOAD}", headers=headers, timeout=30)
+    return reload_policies(app.base, token)
 
 
 async def recorded(sessions: Sessions) -> list[str]:

@@ -257,7 +257,7 @@ async def test_quarantined_hidden_and_rejected(
     test_database_url: str,
 ) -> None:
     app = keystone_app_factory(registry=RegistrySettings(cache_ttl_s=0.2))
-    async with mcp_client(app) as client:
+    async with mcp_client(app, user="olivia") as client:  # an operator lists all twelve tools
         assert "echo__echo" in await tool_names(client)
 
         mutate_echo(demo_upstreams)

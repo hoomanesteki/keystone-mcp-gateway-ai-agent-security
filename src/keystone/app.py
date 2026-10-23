@@ -17,6 +17,7 @@ from keystone.db.session import create_engine, make_sessionmaker
 from keystone.db.tenants import upsert_tenants
 from keystone.gateway.dispatch import UpstreamDispatcher
 from keystone.gateway.health import UpstreamHealth
+from keystone.gateway.interceptors.policy import MemoryListCache, PolicyToolFilter, RedisListCache
 from keystone.gateway.pipeline import AuditSink, Dispatcher, Interceptor
 from keystone.gateway.server import Gateway, mount_mcp
 from keystone.gateway.session_repo import SessionRepo
@@ -28,6 +29,7 @@ from keystone.identity.credential_repo import vault_from_settings
 from keystone.identity.metadata import add_metadata_route
 from keystone.identity.middleware import Authenticator
 from keystone.identity.vault import VaultError
+from keystone.policy.engine import CedarPolicyEngine
 from keystone.policy.schema_info import args_fields
 from keystone.policy.store import PolicyStore, reload_on_sighup
 from keystone.policy.versions import PolicyVersionRepo
@@ -111,8 +113,11 @@ def create_app(
     dispatcher: Dispatcher = UpstreamDispatcher(pool, health)
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
+    policy_engine = CedarPolicyEngine(policies)
     pipeline = build_pipeline(
-        settings, PipelineDeps(dispatcher, audit, tool_states=registry, vault=vault), interceptors
+        settings,
+        PipelineDeps(dispatcher, audit, tool_states=registry, vault=vault, policy=policy_engine),
+        interceptors,
     )
     # An empty KEYSTONE_REDIS_URL keeps session state in this process, for a single-process setup.
     redis = (
@@ -123,7 +128,12 @@ def create_app(
     session_store: SessionStore = (
         RedisSessionStore(redis, SessionRepo(sessions)) if redis else InMemorySessionStore()
     )
-    gateway = Gateway(settings, registry, session_store, pipeline)
+    tool_filter = PolicyToolFilter(
+        policy_engine,
+        RedisListCache(redis) if redis else MemoryListCache(),
+        ttl_s=settings.policy.list_cache_ttl_s,
+    )
+    gateway = Gateway(settings, registry, session_store, pipeline, tool_filter)
     registry.add_listener(gateway.notify_tools_changed)
 
     @asynccontextmanager
@@ -185,13 +195,20 @@ def create_app(
 
         @app.get("/_dev/audit")
         async def dev_audit() -> dict[str, Any]:
-            """How many calls the in-memory audit sink holds, for the Phase 1 demo. The admin API
-            replaces it in Phase 5. It is not mounted in prod."""
+            """How many calls the in-memory audit sink holds, and the last 50 with the policy's
+            decision and reasons, for the demo and the smoke scripts. The admin API replaces it in
+            Phase 5. It is not mounted in prod."""
             recent = sink.records[-50:]
             return {
                 "count": len(sink.records),
                 "recent": [
-                    {"call_id": r["call_id"], "tool": r["tool"], "outcome": r["outcome"]}
+                    {
+                        "call_id": r["call_id"],
+                        "tool": r["tool"],
+                        "outcome": r["outcome"],
+                        "effect": r["decision"],
+                        "reasons": r["reasons"],
+                    }
                     for r in recent
                 ],
             }

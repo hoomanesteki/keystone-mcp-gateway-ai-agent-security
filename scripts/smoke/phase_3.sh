@@ -2,7 +2,8 @@
 # Phase 3 smoke, against the compose stack (make up):
 #   1. Keycloak gives tokens to alice (acme) and bob (globex).
 #   2. A request without a token gets 401 and a pointer to the sign-in metadata.
-#   3. Alice lists acme's 15 tools and none of globex's.
+#   3. Olivia, an operator, lists acme's 15 tools and none of globex's. (Alice, in support, sees 13
+#      since Phase 4: the two high-risk tools are hidden from her. scripts/smoke/phase_4.sh checks that.)
 #   4. Bob lists globex's 3 tools and none of acme's, and calling bank__get_balance by name gives
 #      KS_TOOL_NOT_FOUND.
 #   5. After calls that work, fail and are refused, the mail server says it received the API key
@@ -61,14 +62,14 @@ grep -qi "^www-authenticate: Bearer resource_metadata=\"${BASE}/.well-known/oaut
 curl -fsS --max-time 10 "${BASE}/.well-known/oauth-protected-resource" || fail "no sign-in metadata"
 echo
 
-step "3. alice lists acme's tools"
-alice_tools=$(probe_as alice support-agent list)
-echo "$alice_tools" | sed -n '1p'
-grep -qx 'tools: 15' <<<"$alice_tools" || fail "alice should see 15 tools"
+step "3. olivia lists acme's tools"
+acme_tools=$(probe_as olivia ops-agent list)
+echo "$acme_tools" | sed -n '1p'
+grep -qx 'tools: 15' <<<"$acme_tools" || fail "olivia should see 15 tools"
 for tool in bank__get_balance mail__read_email files__read_file echostd__echo; do
-  grep -qx "$tool" <<<"$alice_tools" || fail "alice does not see $tool"
+  grep -qx "$tool" <<<"$acme_tools" || fail "olivia does not see $tool"
 done
-grep -q '^files_globex__' <<<"$alice_tools" && fail "alice sees a globex tool"
+grep -q '^files_globex__' <<<"$acme_tools" && fail "olivia sees a globex tool"
 
 step "4. bob lists globex's tools and cannot call acme's"
 bob_tools=$(probe_as bob support-agent list)

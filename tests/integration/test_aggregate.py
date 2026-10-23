@@ -21,7 +21,8 @@ Sessions = async_sessionmaker[AsyncSession]
 async def test_list_aggregates_all_upstreams(
     keystone_app: KeystoneApp, mcp_client: McpConnect
 ) -> None:
-    async with mcp_client(keystone_app) as client:
+    # An operator sees all twelve; support does not see the two high-risk tools (KS-406).
+    async with mcp_client(keystone_app, user="olivia") as client:
         names = [t.name for t in (await client.list_tools()).tools]
 
     assert names == sorted(names)
@@ -67,7 +68,7 @@ async def test_a_disabled_upstream_leaves_the_list_and_its_tools_are_not_found(
 ) -> None:
     await UpstreamRepo(sessionmaker).set_status("bank", "disabled")
 
-    async with mcp_client(keystone_app) as client:
+    async with mcp_client(keystone_app, user="olivia") as client:
         deadline = anyio.current_time() + 10
         names: list[str] = []
         while anyio.current_time() < deadline:  # the gateway's cache expires after 2 s
