@@ -17,6 +17,7 @@ model again.
 | `make up` | Start the full stack and wait for health |
 | `make up-core` | Start Postgres and Redis only (what `make check` needs) |
 | `make demo` | `make up`, reset the upstreams, run the scripted agent through Keystone as olivia and print its transcript |
+| `make sandbox-image` | Build the image the sandbox runs code in (the compose service `sandbox-image` builds it too). `make test-int` and `make gate` build it first, because the tests marked `docker` need it |
 | `make down` | Stop the stack and keep its data |
 | `make reset` | Stop the stack and delete its volumes |
 | `scripts/get_token.sh alice support-agent` | Print an access token for a Keycloak user (see Identity) |
@@ -292,6 +293,11 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_SCANNER__ALLOWED_DOMAINS` | `[]` | JSON list of hosts a markdown image may point to without a mark against it. A name covers its subdomains. |
 | `KEYSTONE_SCANNER__MAX_SCAN_CHARS` | `200000` | The most text one scan reads. A longer text is read at both ends, half of this at each. |
 | `KEYSTONE_SCANNER__DESCRIPTION_THRESHOLD` | `0.5` | A new tool is held when the rules score its description, or the description of a field of its input schema, at or above this. Above 0, at most 1. See Upstreams. |
+| `KEYSTONE_SANDBOX_ENABLED` | `true` | Whether the `sandbox` upstream is registered. `false` for a host with no Docker socket: no tool is listed and nothing talks to Docker. The same setting as `KEYSTONE_SANDBOX__ENABLED`; this shorter name wins when both are set. See Sandbox. |
+| `KEYSTONE_SANDBOX__IMAGE` | `keystone-sandbox-python:dev` | The image the code runs in (`make sandbox-image`). |
+| `KEYSTONE_SANDBOX__RUNTIME` | `runc` | The Docker runtime of the containers: `runc`, or `runsc` where gVisor is installed. |
+| `KEYSTONE_SANDBOX__TIMEOUT_S` | `30` | How long one run may take before its container is killed. Above 0, at most 300. |
+| `KEYSTONE_SANDBOX__MAX_CONCURRENT` | `4` | Containers running at once. A call over that waits for one to end. |
 
 Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
 
@@ -996,6 +1002,39 @@ that keeps the standalone GET stream open receives it; others see the change at 
 Without `--tenant`, `add` uses the config's only tenant, and fails when the config names none or
 several.
 
+## Sandbox
+
+Code an agent writes runs in a container that Keystone starts for that call and removes after it
+(ADR-0012, KS-801). The runner is `src/keystone/sandbox/runner.py`; the tools that use it arrive
+with KS-802.
+
+What a container has: no network (a loopback and no route), a read-only root, a tmpfs of 64 MB on
+`/tmp` (nothing in it can be run) and on `/workspace`, 512 MB of memory with no swap, one CPU, 128
+processes, no capabilities, `no-new-privileges`, and user 10001. These are fixed in the code and
+are not settings. Output is cut at 64 KB for stdout and for stderr, and a run still going after
+`sandbox.timeout_s` is killed and says so.
+
+Three things are needed, and compose supplies them:
+
+| What | Where it comes from |
+|---|---|
+| The Docker socket | compose mounts `/var/run/docker.sock` into the Keystone container. **Local and single-host use only**: whoever can use the socket can start any container on the host as root. Keystone runs as user 10001, so compose adds the socket's group: `DOCKER_SOCKET_GID`, default `0` for Docker Desktop. On Linux set it to `stat -c %g /var/run/docker.sock`. |
+| The image | `make sandbox-image`, or the one-shot compose service `sandbox-image` that `make up` runs. It is `deploy/sandbox/Dockerfile.python`: Python 3.12, numpy, pandas and `wget`. |
+| `KEYSTONE_SANDBOX_ENABLED` | `true` unless set. Set it to `false` where there is no socket (a Fargate task). |
+
+Look at what the sandbox has started with `docker ps -a --filter label=keystone.sandbox=1`; the
+label `keystone.call_id` names the call. A container older than 10 minutes is removed by the
+reaper, which looks once a minute. `docker ps` should show none that are minutes old; if it does,
+the reaper is not running or cannot reach the daemon (`sandbox_reaper_failed` in the log).
+
+To run under gVisor, install `runsc` on the Docker host, register it as a runtime, and set
+`KEYSTONE_SANDBOX__RUNTIME=runsc`. Keystone checks that the daemon knows the runtime before it
+says the sandbox is up.
+
+The tests marked `docker` run the runner against the daemon. Without a daemon or the image they
+are skipped and say why; with `KEYSTONE_REQUIRE_DOCKER=1` (which `make test-int`, `make gate` and
+the integration job of CI set) that is a failure.
+
 ## Sessions
 
 Each MCP session has a state (flags, taint, call count, spend) stored as a Redis hash under
@@ -1637,4 +1676,6 @@ a 1 second limit each and returns 503 if either is down.
 | The `console` job of CI says `schema.d.ts` is out of date with the admin API | A route or a model changed and `console/src/api/schema.d.ts` did not. Run `make console-types` and commit the result. `make console-check` does not look for this. |
 | Port already in use | Another process holds the port. Set a different one in `.env`. |
 | `make check` cannot reach Postgres | Run `make up-core`, then `docker compose -f deploy/docker-compose.yml ps`. |
+| `docker` tests are skipped: "no Docker daemon" or "the sandbox image ... is not built" | The tests need the daemon and the image from `make sandbox-image`. Set `KEYSTONE_REQUIRE_DOCKER=1` to make that a failure instead of a skip. |
+| The sandbox says the Docker daemon cannot be reached | Keystone has no socket, or may not use it. In compose check `docker compose exec keystone ls -l /var/run/docker.sock` and `DOCKER_SOCKET_GID`; on Linux the group of the socket is not 0. |
 | `ModuleNotFoundError: keystone` right after `uv sync` (macOS) | A background process flagged `.venv` as hidden, and Python skips hidden `.pth` files. Check with `ls -lO .venv/lib/python3.12/site-packages/keystone.pth`. Set `UV_PROJECT_ENVIRONMENT` to a path outside the repo, for example `$HOME/.cache/keystone-venv`, then run `uv sync`. |

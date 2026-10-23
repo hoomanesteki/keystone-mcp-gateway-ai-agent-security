@@ -145,3 +145,15 @@ scanner:
   # A new tool is held for review when the rules score its description, or the description of a
   # field of its input schema, at or above this. The model is not used for descriptions.
   description_threshold: 0.5
+
+# Where the code an agent writes runs (ADR-0012). Each run is a container with no network, a
+# read-only root, 512 MB of memory and one CPU; those limits are not settings. It needs the Docker
+# socket and the image from `make sandbox-image`. `enabled: false` (also KEYSTONE_SANDBOX_ENABLED=false)
+# is for a host with no Docker. `runtime: runsc` runs the containers under gVisor, where it is
+# installed. All of these can be set with KEYSTONE_SANDBOX__<NAME>.
+sandbox:
+  enabled: true
+  image: keystone-sandbox-python:dev
+  runtime: runc
+  timeout_s: 30        # one run; its container is killed after this
+  max_concurrent: 4    # containers at once
