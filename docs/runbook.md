@@ -19,6 +19,7 @@ upstreams and Keystone, and waits until every container reports healthy. Cold st
 | `make test-e2e` | The end-to-end tests against the running stack. The nightly workflow runs `make up` and then this |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit count is off |
+| `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), alice's 15 tools, bob's 3 globex tools and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
 | `bash scripts/smoke/phase_2.sh` | Lists the 15 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
 
 ## Host ports
@@ -37,7 +38,8 @@ Tests never use these ports. They start their own services on free ports.
 | Prometheus | 9090 | |
 | Grafana | 3000 | login `admin` / `admin`, Prometheus and Jaeger provisioned |
 | Mail, files, bank, echo | 8101, 8102, 8103, 8104 | demo upstreams, services `mail-mcp`, `files-mcp`, `bank-mcp`, `echo-mcp` |
-| Web, files-globex | 8105, 8112 | later phases |
+| Files for globex | 8112 | the globex tenant's own drive, service `files-globex-mcp` |
+| Web | 8105 | later phase |
 | Fake LLM | 8199 | later phase |
 | Console | 5173 | later phase |
 
@@ -55,6 +57,7 @@ share one image (`deploy/Dockerfile.upstreams`), and `make up` starts them.
 | files | 8102 | `list_files`, `read_file`, `write_file` (confined to one workspace) |
 | bank | 8103 | `get_balance`, `list_transactions`, `transfer` (3 seeded accounts) |
 | echo | 8104 | `echo`, `sleep`, `fail` |
+| files (globex) | 8112 | the tools of `files`, on another drive (`examples/fixtures/files-globex`), for the globex tenant |
 
 Each also serves plain HTTP routes next to `/mcp` that are not tools, so an agent cannot call them:
 `GET /healthz`, `POST /_reset` (back to the seed) and `GET /_state` (sent mail, transfers, written
@@ -68,6 +71,7 @@ Run one outside compose: `uv run python -m examples.upstreams.mail_server --port
 |---|---|
 | `MAIL_DB`, `BANK_DB`, `FILES_DB` | SQLite file for the server's state. Default: a temp file. Every start re-seeds it. |
 | `FILES_WORKSPACE` | Directory the files server confines itself to. Default: a temp directory. |
+| `FILES_SEED` | Directory the files server starts from and returns to on reset. Default: `examples/fixtures/files`. |
 | `MAIL_API_KEY`, `FILES_API_KEY`, `BANK_API_KEY`, `ECHO_API_KEY` | When set, `/mcp` requires a matching `X-Api-Key` header, and `/_state` reports `api_key_received`. Compose sets them (the defaults are in `.env.example`); Keystone takes them from its own environment and stores them in the vault. |
 | `ECHO_POISONED` | `1` adds the poisoned tool. |
 
@@ -302,6 +306,35 @@ Every credential the vault decrypts is also registered with the log scrubber, wh
 wherever it appears in a log line, in a field of any name and inside an exception message. A
 value shorter than 8 characters is not registered, because it would match inside ordinary words, so
 use keys longer than that.
+
+## Tenants
+
+A tenant is one team that shares the Keystone: its upstreams, its tools, its users and its
+sessions. Compose runs two, `acme` and `globex`. A token's `tenant` claim decides which one a
+caller belongs to, and nothing else can: not a header, not a field of the request. A token for a
+tenant that is not under `tenants` in the config gets 403 `unknown_tenant`.
+
+| | acme | globex |
+|---|---|---|
+| Users | alice, olivia, lena, root | bob |
+| Upstreams | mail, files, bank, echo, echostd (15 tools) | files_globex (3 tools) |
+
+An upstream id is unique across tenants, so globex's drive is `files_globex` (its tools are
+`files_globex__read_file` and so on) and not a second `files`.
+
+A caller lists and calls only its own tenant's tools. A call to another tenant's tool, by its exact
+name, gets `KS_TOOL_NOT_FOUND`, the same answer as for a name that does not exist anywhere, so
+the answer does not confirm that the tool exists. `KS_DENIED` would. The gateway also drops any
+tool the registry returns for another tenant, so a bug in a lookup cannot show one (invariant
+I5, `tests/invariants/test_i5_tenants.py`).
+
+Try it with `scripts/smoke/phase_3.sh`, or by hand:
+
+```bash
+KEYSTONE_TOKEN=$(scripts/get_token.sh bob support-agent) \
+  uv run python scripts/smoke/mcp_probe.py call bank__get_balance '{"account": "CHK-001"}'
+# error=true code=KS_TOOL_NOT_FOUND
+```
 
 ## Upstreams
 

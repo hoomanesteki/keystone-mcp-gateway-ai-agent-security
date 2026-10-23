@@ -2,9 +2,13 @@
 # Environment variables override anything set here.
 log_level: info
 
+# One Keystone can serve several tenants. A token's `tenant` claim picks one, and a caller sees only
+# that tenant's upstreams and tools. An upstream id is unique across tenants.
 tenants:
   - id: acme
     name: Acme Corp
+  - id: globex
+    name: Globex Inc
 
 # The MCP servers Keystone proxies. Each tool is exposed as <id>__<tool>, for example mail__read_email.
 # These URLs reach the demo upstreams that `make up` publishes on the host. Inside compose they are
@@ -27,6 +31,12 @@ upstreams:
   - {id: files, tenant: acme, transport: http, url: "http://localhost:8102/mcp"}
   - {id: bank, tenant: acme, transport: http, url: "http://localhost:8103/mcp"}
   - {id: echo, tenant: acme, transport: http, url: "http://localhost:8104/mcp"}
+  # Globex's own drive: `python -m examples.upstreams.files_server --port 8112` with
+  # FILES_SEED=examples/fixtures/files-globex. Only globex's users see its tools.
+  - id: files_globex
+    tenant: globex
+    transport: http
+    url: "http://localhost:8112/mcp"
 
 # Sign-in. KEYSTONE_OIDC_ISSUER is the `iss` of valid tokens (required); see docs/runbook.md for the
 # other OIDC variables. `mode: none` skips the check and makes every caller the dev principal. It is
