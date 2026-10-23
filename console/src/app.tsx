@@ -23,6 +23,8 @@ export interface AppProps {
   auth: AuthClient;
   /** Replaces the browser's fetch, for tests. */
   fetch?: typeof fetch;
+  /** Replaces the query cache, for tests that must not wait for a retry. */
+  queries?: QueryClient;
 }
 
 /** An answer in the 4xx range will not change by asking again; a network failure might. */
@@ -32,7 +34,7 @@ function shouldRetry(count: number, error: unknown): boolean {
 }
 
 /** The whole console. The router is the caller's, so tests can start at any address. */
-export function App({ auth, fetch: fetchImpl }: AppProps) {
+export function App({ auth, fetch: fetchImpl, queries: given }: AppProps) {
   const [api] = useState(() =>
     createApi({
       baseUrl: config.apiBase,
@@ -45,7 +47,9 @@ export function App({ auth, fetch: fetchImpl }: AppProps) {
     }),
   );
   const [queries] = useState(
-    () => new QueryClient({ defaultOptions: { queries: { retry: shouldRetry, staleTime: 2000 } } }),
+    () =>
+      given ??
+      new QueryClient({ defaultOptions: { queries: { retry: shouldRetry, staleTime: 2000 } } }),
   );
 
   return (
