@@ -44,8 +44,11 @@ from keystone.registry.service import RegistryService
 from keystone.registry.sync import RegistrySyncer
 from keystone.settings import Settings
 from keystone.telemetry.metrics import Metrics
+from keystone.telemetry.tracing import Tracer, build_tracer
 
 log = structlog.get_logger()
+
+TRACER_SHUTDOWN_S = 10.0
 
 
 def create_app(
@@ -55,10 +58,12 @@ def create_app(
     interceptors: dict[str, Interceptor] | None = None,
     wrap_dispatcher: Callable[[Dispatcher], Dispatcher] | None = None,
     environ: Mapping[str, str] | None = None,
+    tracer: Tracer | None = None,
 ) -> FastAPI:
     """Build the app. The keyword arguments are seams for tests: a different audit sink, a
-    real interceptor in one slot, a spy around the dispatcher, or the environment that upstream
-    credentials are read from (the process environment by default)."""
+    real interceptor in one slot, a spy around the dispatcher, the environment that upstream
+    credentials are read from (the process environment by default), or a tracer that keeps its
+    spans in memory."""
     settings = settings or Settings()
     # Refuses to build an app whose authentication cannot work, instead of one that answers 401
     # to everybody.
@@ -110,6 +115,7 @@ def create_app(
         down_after=settings.health.down_after,
         service_headers=service_headers,
     )
+    tracer = tracer or build_tracer(settings.otlp_endpoint)
     metrics = Metrics()
     audit = audit or PostgresAuditSink(
         sessions, metrics=metrics, redaction=RedactionConfig.of(settings.audit.redact_keys)
@@ -120,7 +126,14 @@ def create_app(
     policy_engine = CedarPolicyEngine(policies)
     pipeline = build_pipeline(
         settings,
-        PipelineDeps(dispatcher, audit, tool_states=registry, vault=vault, policy=policy_engine),
+        PipelineDeps(
+            dispatcher,
+            audit,
+            tracer=tracer,
+            tool_states=registry,
+            vault=vault,
+            policy=policy_engine,
+        ),
         interceptors,
     )
     # An empty KEYSTONE_REDIS_URL keeps session state in this process, for a single-process setup.
@@ -181,6 +194,10 @@ def create_app(
             if redis is not None:
                 await redis.aclose()
             await engine.dispose()
+            # Spans leave in batches; send the last ones, but never wait long for a collector that
+            # is not there.
+            with anyio.CancelScope(shield=True), anyio.move_on_after(TRACER_SHUTDOWN_S):
+                await anyio.to_thread.run_sync(tracer.shutdown)
 
     app = FastAPI(title="Keystone", version=__version__, lifespan=lifespan)
     app.state.settings = settings

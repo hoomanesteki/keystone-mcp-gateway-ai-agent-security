@@ -49,6 +49,7 @@ from keystone.identity.middleware import (
 )
 from keystone.registry.service import ToolLookup
 from keystone.settings import Settings
+from keystone.telemetry.tracing import incoming_trace
 
 log = structlog.get_logger()
 
@@ -125,6 +126,14 @@ class Gateway:
         )
 
     async def call_tool(
+        self, ctx: Context, params: types.CallToolRequestParams
+    ) -> types.CallToolResult:
+        request = cast("Request | None", ctx.request)
+        # The agent's own trace, if it sent a traceparent, is the parent of the call's root span.
+        with incoming_trace(request.headers if request is not None else {}):
+            return await self._call_tool(ctx, params)
+
+    async def _call_tool(
         self, ctx: Context, params: types.CallToolRequestParams
     ) -> types.CallToolResult:
         principal = self.principal(ctx)

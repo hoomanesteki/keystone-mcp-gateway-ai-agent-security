@@ -328,3 +328,15 @@ def test_audit_fail_closed_comes_from_the_environment_and_the_yaml(
 
     monkeypatch.setenv("KEYSTONE_AUDIT__FAIL_CLOSED", "true")
     assert Settings(env="dev", config_path=config).audit_fail_closed is True
+
+
+@pytest.mark.phase(5)
+def test_the_otlp_endpoint_is_off_by_default_and_must_be_a_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert Settings().otlp_endpoint is None
+    monkeypatch.setenv("KEYSTONE_OTLP_ENDPOINT", "http://jaeger:4318")
+    assert Settings().otlp_endpoint == "http://jaeger:4318"
+    monkeypatch.setenv("KEYSTONE_OTLP_ENDPOINT", "jaeger:4318")
+    with pytest.raises(ValueError, match="otlp_endpoint"):
+        Settings()

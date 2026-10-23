@@ -37,6 +37,7 @@ from keystone.core.errors import Reject
 from keystone.core.types import CallContext
 from keystone.db.models import AuditEvent
 from keystone.telemetry.metrics import Metrics
+from keystone.telemetry.tracing import current_trace_id
 
 log = structlog.get_logger()
 
@@ -226,7 +227,10 @@ class PostgresAuditSink:
             self._count("not_running")
             raise AuditUnavailable("the audit writer is not running")
         try:
-            row = record_fields(ctx, outcome, reject, redaction=self._redaction)
+            # The pipeline records a call inside its root span, so this is the call's trace.
+            row = record_fields(
+                ctx, outcome, reject, redaction=self._redaction, trace_id=current_trace_id()
+            )
         except Exception:
             # A call this process cannot describe would fail the same way again. It is counted and
             # logged here, and the pipeline logs it once more as a failed audit.

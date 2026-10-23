@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from typing import Any
 
 import anyio
@@ -19,7 +20,13 @@ class FakeClient:
     async def list_tools(self) -> list[UpstreamTool]:
         return []
 
-    async def call_tool(self, name: str, args: dict[str, Any], timeout_s: float) -> ToolResult:
+    async def call_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        timeout_s: float,
+        meta: Mapping[str, str] | None = None,
+    ) -> ToolResult:
         return ToolResult(content=[])
 
     async def health(self) -> bool:

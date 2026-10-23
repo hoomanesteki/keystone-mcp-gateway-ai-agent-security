@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
@@ -22,7 +23,13 @@ class Listing:
             raise self.tools
         return self.tools
 
-    async def call_tool(self, name: str, args: dict[str, Any], timeout_s: float) -> ToolResult:
+    async def call_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        timeout_s: float,
+        meta: Mapping[str, str] | None = None,
+    ) -> ToolResult:
         raise NotImplementedError
 
     async def health(self) -> bool:
