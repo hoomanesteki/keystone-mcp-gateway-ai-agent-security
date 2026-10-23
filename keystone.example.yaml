@@ -86,3 +86,6 @@ health:
 # Left out, it is true unless env is dev. Also KEYSTONE_AUDIT__FAIL_CLOSED.
 audit:
   fail_closed: true
+  # Argument keys whose values the log replaces with [redacted], besides keys that look like
+  # secrets. Whole names, any case. Also KEYSTONE_AUDIT__REDACT_KEYS (a JSON list).
+  redact_keys: [ssn, date_of_birth]

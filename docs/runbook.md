@@ -215,6 +215,7 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is when `KEYSTONE_AUTH__MODE=none`. Refused in any other mode. |
 | `KEYSTONE_AUTH__ALLOW_UNKNOWN_AGENTS` | `false` | Let an agent that is not under `agents` in with trust `low`. Also `auth.allow_unknown_agents` in the YAML. |
 | `KEYSTONE_AUDIT__FAIL_CLOSED` | `true`, except `false` when `KEYSTONE_ENV=dev` | While the audit writer is unhealthy (its queue is over 90% full, or a flush failed less than 5 seconds ago), refuse every call with `KS_DENIED` and the reason `audit-unavailable`, before any interceptor runs. See Audit. Also `audit.fail_closed` in the YAML. |
+| `KEYSTONE_AUDIT__REDACT_KEYS` | `[]` | JSON list of argument keys whose values the audit log replaces with `[redacted]`, besides keys that look like secrets. Whole names, any case: `["ssn", "dob"]`. Also `audit.redact_keys` in the YAML. |
 | `KEYSTONE_POLICY__ROOT` | `policies` | The directory with the schema and the policies (see Policies). A relative path is read from the working directory; the image has its own copy at `/app/policies`, and compose mounts this checkout's at `/etc/keystone/policies`. Also `policy.root` in the YAML. |
 | `KEYSTONE_POLICY__INCLUDE_DEMO` | `false` | Also read `demo/`, the rules that go with the demo upstreams. Compose turns it on. |
 | `KEYSTONE_POLICY__LIST_CACHE_TTL_S` | `60` | How long the answer to "which tools may this caller see" is kept, per caller and policy version. `0` turns the cache off. |
@@ -703,6 +704,14 @@ milliseconds at a time and writes each batch in one transaction. What it does wh
 | Keystone stops | Flushes the queue, for 10 seconds at most | `audit_shutdown_dropped` and `reason="shutdown_dropped"` for whatever is left |
 
 A process that is killed loses the rows it had not written, at most the last 50 ms of calls.
+
+A row keeps the arguments of the call, masked, and the sha256 of the original ones. A key that
+looks like a secret (`secret`, `token`, `password`, `api key`, `authorization`) or is listed in
+`audit.redact_keys` has its value replaced by `[redacted]`. In strings, payment card numbers,
+US social security numbers, bearer tokens, AWS access key ids and private key blocks are masked,
+and a string over 2,048 characters is cut to 256 characters and its sha256. The patterns are a net
+with holes; list the keys of any field you know is sensitive. To prove what a call sent, hash the
+canonical JSON of the original arguments (sorted keys, no spaces) and compare it with `args_digest`.
 
 The writer is unhealthy when its queue is over 90% full or a flush failed less than 5 seconds ago.
 With `audit.fail_closed` on, which is the default outside `dev`, an unhealthy writer makes the
