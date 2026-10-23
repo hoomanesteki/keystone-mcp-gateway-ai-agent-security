@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from keystone.policy.store import PolicyLoadError, load_policies
+from keystone.policy.testrunner import load_cases
 from tests.fixtures.policies import ROOT, write_policies
 
 DOC = (ROOT / "docs" / "policies.md").read_text()
@@ -59,3 +60,15 @@ def test_the_examples_from_the_pack_are_the_files_in_the_pack() -> None:
 
     assert squeezed(bank) in squeezed(shown)
     assert squeezed(mail) in squeezed(shown)
+
+
+@pytest.mark.phase(4)
+def test_the_case_example_in_the_doc_is_a_case(tmp_path: Path) -> None:
+    [example] = re.findall(r"```yaml\n# a policy case\n(.*?)```", DOC, flags=re.DOTALL)
+    path = tmp_path / "example.yaml"
+    path.write_text(example)
+
+    [loaded] = load_cases([path])
+
+    assert loaded.case.name == "support cannot transfer"
+    assert loaded.case.expect.value == "deny"
