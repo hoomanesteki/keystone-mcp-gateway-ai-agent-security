@@ -1,5 +1,5 @@
 # Local stack for development and the demo. Host ports are fixed (see .env.example).
-# The four demo upstreams (<name>-mcp) are built from deploy/Dockerfile.upstreams, one image.
+# The five demo upstreams (<name>-mcp) are built from deploy/Dockerfile.upstreams, one image.
 # Keystone is built from the Dockerfile at the repository root.
 # Every image is pinned to an exact tag and listed in docs/adr/0002-dependency-pins.md.
 name: keystone
@@ -137,6 +137,9 @@ services:
     environment:
       # Requests to /mcp need this key in X-Api-Key. Keystone holds it in its vault.
       MAIL_API_KEY: "${MAIL_API_KEY:-dev-mail-key-3f9a1c7d}"
+      # Three unread emails carry an instruction for the agent that reads them (KS-708), the
+      # material of the injection demo. Without this the mailbox is the 12 emails of the seed.
+      MAIL_POISONED: "1"
     ports:
       - "${MAIL_PORT:-8101}:8101"
     healthcheck:
@@ -158,6 +161,8 @@ services:
     environment:
       # Requests to /mcp need this key in X-Api-Key. Keystone holds it in its vault.
       FILES_API_KEY: "${FILES_API_KEY:-dev-files-key-81b2e04f}"
+      # Two files carry an instruction for the agent that reads them (KS-708).
+      FILES_POISONED: "1"
     ports:
       - "${FILES_PORT:-8102}:8102"
     healthcheck:
@@ -235,6 +240,29 @@ services:
       timeout: 3s
       retries: 20
 
+  # The web upstream (KS-708): `fetch(url)` returns stored pages, some of which carry an instruction
+  # for the agent that reads them. It never reaches the network.
+  web-mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.upstreams
+    image: keystone-upstreams:dev
+    command: ["examples.upstreams.web_server", "--host", "0.0.0.0", "--port", "8105"]
+    environment:
+      # Requests to /mcp need this key in X-Api-Key. Keystone holds it in its vault.
+      WEB_API_KEY: "${WEB_API_KEY:-dev-web-key-9d3b6e21}"
+    ports:
+      - "${WEB_PORT:-8105}:8105"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.urlopen('http://127.0.0.1:8105/healthz', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   keystone:
     build:
       context: ..
@@ -272,6 +300,7 @@ services:
       FILES_API_KEY: "${FILES_API_KEY:-dev-files-key-81b2e04f}"
       BANK_API_KEY: "${BANK_API_KEY:-dev-bank-key-c6d57a92}"
       ECHO_API_KEY: "${ECHO_API_KEY:-dev-echo-key-0e4b9d13}"
+      WEB_API_KEY: "${WEB_API_KEY:-dev-web-key-9d3b6e21}"
       FILES_GLOBEX_API_KEY: "${FILES_GLOBEX_API_KEY:-dev-globex-key-5a7c28e6}"
       # Other containers reach Keystone by its service name.
       KEYSTONE_ALLOWED_HOSTS: '["127.0.0.1:*", "localhost:*", "[::1]:*", "keystone:*"]'
@@ -296,6 +325,8 @@ services:
       bank-mcp:
         condition: service_healthy
       echo-mcp:
+        condition: service_healthy
+      web-mcp:
         condition: service_healthy
       files-globex-mcp:
         condition: service_healthy

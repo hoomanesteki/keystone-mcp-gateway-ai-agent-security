@@ -43,9 +43,8 @@ Tests never use these ports. They start their own services on free ports.
 | OTLP gRPC / HTTP | 4317 / 4318 | sent to Jaeger |
 | Prometheus | 9090 | |
 | Grafana | 3000 | login `admin` / `admin`, Prometheus and Jaeger provisioned |
-| Mail, files, bank, echo | 8101, 8102, 8103, 8104 | demo upstreams, services `mail-mcp`, `files-mcp`, `bank-mcp`, `echo-mcp` |
+| Mail, files, bank, echo, web | 8101, 8102, 8103, 8104, 8105 | demo upstreams, services `mail-mcp`, `files-mcp`, `bank-mcp`, `echo-mcp`, `web-mcp` |
 | Files for globex | 8112 | the globex tenant's own drive, service `files-globex-mcp` |
-| Web | 8105 | later phase |
 | Fake LLM | 8199 | later phase |
 | Console | 5173 | the Vite dev server (`pnpm dev` in `console/`), which `make console-e2e` also starts. The port is fixed because the Keycloak client `console` allows `http://localhost:5173/*` only |
 
@@ -54,7 +53,7 @@ beyond the machine.
 
 ## Demo upstreams
 
-Four small MCP servers give the gateway something to proxy and give tests state to inspect. They
+Five small MCP servers give the gateway something to proxy and give tests state to inspect. They
 share one image (`deploy/Dockerfile.upstreams`), and `make up` starts them.
 
 | Server | Port | Tools |
@@ -63,11 +62,12 @@ share one image (`deploy/Dockerfile.upstreams`), and `make up` starts them.
 | files | 8102 | `list_files`, `read_file`, `write_file` (confined to one workspace) |
 | bank | 8103 | `get_balance`, `list_transactions`, `transfer` (3 seeded accounts) |
 | echo | 8104 | `echo`, `sleep`, `fail` |
+| web | 8105 | `fetch(url)`, which returns a stored page and never reaches the network (`examples/fixtures/web/pages.json`) |
 | files (globex) | 8112 | the tools of `files`, on another drive (`examples/fixtures/files-globex`), for the globex tenant |
 
 Each also serves plain HTTP routes next to `/mcp` that are not tools, so an agent cannot call them:
 `GET /healthz`, `POST /_reset` (back to the seed) and `GET /_state` (sent mail, transfers, written
-files and the names of the tools called). The echo server adds `POST /_mutate`, which rewrites the
+files, the urls asked of the web server, and the names of the tools called). The echo server adds `POST /_mutate`, which rewrites the
 `echo` description, and `ECHO_POISONED=1`, which adds a tool with an injected description.
 
 Run one outside compose: `uv run python -m examples.upstreams.mail_server --port 8101`. Add
@@ -78,8 +78,42 @@ Run one outside compose: `uv run python -m examples.upstreams.mail_server --port
 | `MAIL_DB`, `BANK_DB`, `FILES_DB` | SQLite file for the server's state. Default: a temp file. Every start re-seeds it. |
 | `FILES_WORKSPACE` | Directory the files server confines itself to. Default: a temp directory. |
 | `FILES_SEED` | Directory the files server starts from and returns to on reset. Default: `examples/fixtures/files`. |
-| `MAIL_API_KEY`, `FILES_API_KEY`, `BANK_API_KEY`, `ECHO_API_KEY` | When set, `/mcp` requires a matching `X-Api-Key` header, and `/_state` reports `api_key_received`. Compose sets them (the defaults are in `.env.example`); Keystone takes them from its own environment and stores them in the vault. |
+| `MAIL_API_KEY`, `FILES_API_KEY`, `BANK_API_KEY`, `ECHO_API_KEY`, `WEB_API_KEY` | When set, `/mcp` requires a matching `X-Api-Key` header, and `/_state` reports `api_key_received`. Compose sets them (the defaults are in `.env.example`); Keystone takes them from its own environment and stores them in the vault. |
 | `ECHO_POISONED` | `1` adds the poisoned tool. |
+| `MAIL_POISONED` | `1` adds three unread emails (m13 to m15) that carry an instruction for the agent that reads them. Compose sets it. Without it the mailbox is the 12 emails of the seed. |
+| `FILES_POISONED` | `1` adds two files (`notes/vendor-onboarding.md`, `reports/q3-vendor-spend.csv`) that carry an instruction. Compose sets it for the acme drive and not for globex's. |
+
+### Injection fixtures and the naive agent
+
+The injection defense is tested against planted attacks (KS-708). `examples/fixtures/injections/templates.yaml`
+has 12 attack texts (`ignore_previous`, `important_instructions`, `fake_system`, `tool_knowledge`,
+`hidden_unicode`, `markdown_exfil`, `urgent_secrecy`, `fake_error_recovery`, `translated`, `base64`,
+`delimiter_escape`, `role_override`) and 5 goals (forward the latest invoice to `attacker@evil.test`,
+a transfer, a leak, a file write, a request to an attacker's address). Everything in the fixtures
+is invented, on `.test` addresses, in English except the `translated` template.
+
+Each text carries a marker, `<!--ks-do:{"args":{...},"tool":"mail__send_email"}-->`, which is the same goal
+as a tool call. The marker is for the naive agent only. A detector is never measured on a text that
+still has one: `re.sub(r'<!--ks-do:(\{.*?\})-->', '', text, flags=re.DOTALL)` removes it, and
+`examples/injections.py` (`strip_markers`) does the same.
+
+`examples/agents/naive_agent.py` runs a task script like the scripted agent, and whenever a result holds a
+marker it calls that tool with those arguments at once. It stands in for a model that has been fully
+taken over, so a gateway that stops it does not depend on how a model behaves. After a
+`KS_APPROVAL_PENDING` it calls `keystone__await_approval` once.
+
+    # the attack lands: the agent talks to the mail server directly, whose mailbox is poisoned in compose
+    uv run python -m examples.agents.naive_agent --url http://localhost:8101/mcp \
+        --header "X-Api-Key: dev-mail-key-3f9a1c7d" \
+        --script examples/agents/scripts/summarize_unread.yaml --format text
+    curl -s localhost:8101/_state     # "sent" holds the mail to attacker@evil.test
+
+    # the same task through Keystone, signed in as olivia
+    KEYSTONE_TOKEN=$(scripts/get_token.sh olivia ops-agent) uv run python -m examples.agents.naive_agent \
+        --url http://localhost:8080/mcp --script examples/agents/scripts/summarize_unread.yaml --format text
+
+`summarize_unread_benign.yaml` is the same task over mail with no instruction. Reset the mail
+server between runs: `curl -s -X POST localhost:8101/_reset`.
 
 ## Identity (Keycloak)
 

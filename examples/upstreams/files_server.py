@@ -25,11 +25,18 @@ SCHEMA = "CREATE TABLE writes (seq INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT,
 
 
 def create_server(
-    workspace: Path | None = None, db_path: Path | None = None, seed: Path | None = None
+    workspace: Path | None = None,
+    db_path: Path | None = None,
+    seed: Path | None = None,
+    poisoned: bool | None = None,
 ) -> MCPServer:
     """Build the server. The workspace defaults to FILES_WORKSPACE, then to a temp directory. The
     files it starts with, and goes back to on reset, come from `seed`, then FILES_SEED, then
-    examples/fixtures/files. A second server with another seed plays another tenant's drive."""
+    examples/fixtures/files. A second server with another seed plays another tenant's drive.
+    `poisoned` adds two files that carry an instruction for the agent that reads them (KS-708).
+    It defaults to the FILES_POISONED=1 environment flag."""
+    if poisoned is None:
+        poisoned = os.environ.get("FILES_POISONED") == "1"
     seed_dir = seed or (Path(os.environ["FILES_SEED"]) if os.environ.get("FILES_SEED") else None)
     seed_dir = seed_dir or FIXTURES / "files"
     env_workspace = os.environ.get("FILES_WORKSPACE")
@@ -43,6 +50,8 @@ def create_server(
         if root.exists():
             shutil.rmtree(root)
         shutil.copytree(seed_dir, root)
+        if poisoned:
+            shutil.copytree(FIXTURES / "injections" / "files", root, dirs_exist_ok=True)
         db.path.unlink(missing_ok=True)
         log.calls.clear()
         with db.connect() as con:

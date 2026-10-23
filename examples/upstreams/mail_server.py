@@ -31,8 +31,13 @@ CREATE TABLE sent (
 FOLDERS = ("inbox", "sent", "archive")
 
 
-def create_server(db_path: Path | None = None) -> MCPServer:
-    """Build the server. `db_path` defaults to MAIL_DB, then to a temp file."""
+def create_server(db_path: Path | None = None, poisoned: bool | None = None) -> MCPServer:
+    """Build the server. `db_path` defaults to MAIL_DB, then to a temp file. `poisoned` adds
+    three unread emails that carry an instruction for the agent that reads them (KS-708). It
+    defaults to the MAIL_POISONED=1 environment flag. The base mailbox stays what the earlier
+    tests count, so the poison is opt-in, as ECHO_POISONED is for the echo server."""
+    if poisoned is None:
+        poisoned = os.environ.get("MAIL_POISONED") == "1"
     env_path = os.environ.get("MAIL_DB")
     db = Database(db_path or (Path(env_path) if env_path else None), "mail")
     log = CallLog()
@@ -42,7 +47,10 @@ def create_server(db_path: Path | None = None) -> MCPServer:
         log.calls.clear()
         with db.connect() as con:
             con.executescript(SCHEMA)
-            for mail in json.loads((FIXTURES / "mailbox.json").read_text()):
+            mails = json.loads((FIXTURES / "mailbox.json").read_text())
+            if poisoned:
+                mails += json.loads((FIXTURES / "injections" / "mailbox-poisoned.json").read_text())
+            for mail in mails:
                 con.execute(
                     "INSERT INTO emails VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
