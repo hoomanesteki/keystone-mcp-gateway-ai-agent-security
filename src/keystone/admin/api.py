@@ -132,6 +132,8 @@ def _summary(row: Tool) -> ToolSummary:
         status=row.status,  # type: ignore[arg-type]
         risk=row.risk,
         tags=sorted(row.tags),
+        # Without trailing zeros (0.0 is 0), and as plain digits, so that 1E-7 reads 0.0000001.
+        cost_per_call_usd=format(row.cost_per_call_usd.normalize(), "f"),
         reason=row.quarantine_reason,
         pending=row.pending_description is not None,
         description_hash=row.description_hash,

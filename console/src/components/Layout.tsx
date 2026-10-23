@@ -1,9 +1,10 @@
 import { NavLink, Outlet, useLocation } from "react-router";
-import { usePendingApprovals } from "../api/queries";
-import { pagesFor, roleLabels, type PAGES } from "../auth/roles";
+import { usePendingApprovals } from "../api/approvals";
+import { canOpen, pagesFor, roleLabels, type PAGES } from "../auth/roles";
 import { useAuthClient, useSignedIn } from "../auth/context";
 import type { Session } from "../auth/types";
 import { Button } from "./Button";
+import { ChainStatus } from "./ChainStatus";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Icon, type IconName } from "./Icon";
 import { Logo } from "./Logo";
@@ -82,12 +83,13 @@ function UserBlock({ session }: { session: Session }) {
       <Button
         variant="ghost"
         size="sm"
+        aria-label="Sign out"
         onClick={() => {
           void client.signOut();
         }}
       >
         <Icon name="signOut" />
-        Sign out
+        <span className="hidden sm:inline">Sign out</span>
       </Button>
     </div>
   );
@@ -100,7 +102,10 @@ function Header({ session }: { session: Session }) {
         <span className="text-fg-subtle">Tenant</span>
         <span className="font-medium">{session.tenant || "unknown"}</span>
       </div>
-      <UserBlock session={session} />
+      <div className="flex items-center gap-2 sm:gap-4">
+        {canOpen(session, "audit") ? <ChainStatus /> : null}
+        <UserBlock session={session} />
+      </div>
     </header>
   );
 }

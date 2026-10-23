@@ -189,6 +189,7 @@ async def test_tool_approve_change_via_api(
     held = call(app, "GET", "/tools", root, params={"status": "quarantined"}).json()
     assert [t["name"] for t in held] == ["echo__echo"]
     assert held[0]["reason"] == "description_changed" and held[0]["pending"] is True
+    assert held[0]["cost_per_call_usd"] == "0"
     detail = call(app, "GET", "/tools/echo__echo", root).json()
     assert detail["status"] == "quarantined"
     assert detail["pending_description"] == new_text

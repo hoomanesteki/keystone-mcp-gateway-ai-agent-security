@@ -104,3 +104,16 @@ export function EffectBadge({ effect }: { effect: Effect | null }) {
   if (effect === "require_approval") return <Badge tone="warn">needs approval</Badge>;
   return <Badge>no decision</Badge>;
 }
+
+/** Whether a tool can be called. A quarantined one is held until a person reads its change. */
+export function ToolStatusBadge({ status }: { status: "active" | "quarantined" | "disabled" }) {
+  if (status === "active") return <Badge tone="ok">active</Badge>;
+  if (status === "quarantined") {
+    return (
+      <Badge tone="warn" title="Held until a person reviews it. Agents cannot see or call it.">
+        quarantined
+      </Badge>
+    );
+  }
+  return <Badge title="Switched off. Agents cannot see or call it.">disabled</Badge>;
+}

@@ -1106,7 +1106,7 @@ found (404), so the answer does not say it exists. The OpenAPI schema is at
 | `GET /audit` | Search the audit log, newest first. Filters: `user`, `agent`, `tool`, `effect`, `outcome`, `since`, `until`, `call_id`. Pages by `cursor` (a `seq`) and `limit` (1 to 200, 50 by default); `next_cursor` is null on the last page. A page never repeats a record, even while calls are being made |
 | `GET /audit/{seq}` | One record |
 | `GET /audit/verify?last=10000` | Check the hash chain of the newest records (up to 100,000; `keystone audit verify` checks the whole log). The chain runs through every tenant, so the result is about the whole log |
-| `GET /tools`, `GET /tools/{name}` | The tenant's tools; a tool's detail with its pending definition, its fingerprint and a diff |
+| `GET /tools`, `GET /tools/{name}` | The tenant's tools, each with its risk, tags, status and `cost_per_call_usd` (a decimal string); a tool's detail with its pending definition, its fingerprint and a diff |
 | `POST /tools/{name}/approve-change` | Accept a held definition. The body may carry `expect` (the fingerprint, a prefix will do) and `note` |
 | `POST /tools/{name}/disable`, `POST /tools/{name}/enable` | The same as the CLI |
 | `GET /upstreams` | Upstreams with status and last sync. A URL is shown without credentials |
@@ -1215,6 +1215,38 @@ list at once and comes back if the decision cannot be sent. A 409 (someone else 
 expired) says "Already decided" and reads the list again. A request the person made has no buttons,
 because the API would refuse them (403). The link in the webhook and Slack message,
 `/approvals?id=<id>`, scrolls to that request and outlines it.
+
+### The audit page
+
+`/audit` is for admins. It filters by user, agent, tool, decision (allowed, denied, needs approval),
+result (ok, rejected, error) and a time range (local time, sent to the API as absolute times).
+Text fields send their filter when the person pauses for 0.3 seconds, and the filters are kept in
+the address (`/audit?tool=bank__transfer&effect=deny`), so a filtered view can be sent to someone.
+Records come 25 to a page, newest first. The API pages toward older records by cursor, so the page
+keeps the trail of cursors and "Newer" goes back along it.
+
+A tool name opens a drawer with the whole record: the decision and who made it, the reasons (links
+to `docs/policies.md`), the policy version, the result and its reject code, the arguments as the log
+keeps them (the page says when something was hidden or cut), their digest, the scan result, cost and
+latency, a link to the trace in Jaeger (built from `trace_id` and `VITE_JAEGER_URL`, and only for a
+trace id of hex digits) and the hashes of the chain. Escape closes the drawer and the focus goes
+back to the row.
+
+Every page shows an admin the state of the hash chain in the header, from `/audit/verify` (the
+newest 10,000 records), read again every minute: a green "Chain verified", or "Chain broken at
+record N" in solid red. If the check itself cannot run, the badge says "Audit chain not checked",
+which is not a clean result.
+
+### The tools page
+
+`/tools` is for admins. It lists the tenant's tools by upstream with their risk, tags, status and
+cost per call (`cost_per_call_usd`, what one call is booked at). A tool that is quarantined has
+"Review change": the current and the pending definition side by side (the description by sentence
+with the changed words marked, the input schema as JSON in key order), why the tool is held, and any
+screening rule the pending description trips. "Approve change" needs a note and sends the
+fingerprint of the definition that was read, so one that changed again after the person opened it
+is refused (409) and not approved unseen. "Disable" and "Enable" switch an active tool and one an
+operator disabled; the API refuses the rest and the console shows what it said.
 
 ### Settings
 
