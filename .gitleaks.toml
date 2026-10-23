@@ -11,3 +11,15 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 paths = ['''^src/keystone/identity/jwt\.py$''']
 regexes = ['''^ec\.SECP256R1$''']
+
+# Made-up API keys that the tests store in the vault and read back. The generic rule reads any
+# long string next to the word "key" as a secret. These files only, and only that rule, so a
+# real secret in them of any other kind (a cloud key, a private key, a token) is still caught.
+[[allowlists]]
+description = "Fake credentials in the vault tests"
+targetRules = ["generic-api-key"]
+paths = [
+  '''^tests/unit/test_vault\.py$''',
+  '''^tests/integration/test_vault\.py$''',
+  '''^tests/unit/test_settings\.py$''',
+]
