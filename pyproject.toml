@@ -87,6 +87,8 @@ module = [
     "keystone.audit.*",
     "keystone.approvals",
     "keystone.approvals.*",
+    "keystone.defense",
+    "keystone.defense.*",
 ]
 disallow_any_generics = true
 disallow_subclassing_any = true

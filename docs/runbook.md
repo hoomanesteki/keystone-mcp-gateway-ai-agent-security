@@ -270,6 +270,11 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_APPROVALS_WEBHOOK_SECRET` | unset | The key that signs the webhook, at least 16 characters. Read from the environment only, never from the YAML. Not a nested setting: one underscore. |
 | `KEYSTONE_APPROVALS__SLACK_WEBHOOK_URL` | unset | A Slack incoming webhook that gets a plain message for each request. A secret. |
 | `KEYSTONE_APPROVALS__WEBHOOK_BACKOFF_S` | `[1, 2, 4]` | JSON list of the seconds before each retry of a webhook delivery. |
+| `KEYSTONE_SCANNER__ENABLED` | `true` | Whether tool output is scanned. See Scanner. |
+| `KEYSTONE_SCANNER__THRESHOLDS__SUSPICIOUS` | `0.5` | A score from here up is `suspicious`. |
+| `KEYSTONE_SCANNER__THRESHOLDS__INJECTION` | `0.85` | A score from here up is an `injection`. Not below `SUSPICIOUS`. |
+| `KEYSTONE_SCANNER__ALLOWED_DOMAINS` | `[]` | JSON list of hosts a markdown image may point to without a mark against it. A name covers its subdomains. |
+| `KEYSTONE_SCANNER__MAX_SCAN_CHARS` | `200000` | The most text one scan reads. A longer text is read at both ends, half of this at each. |
 
 Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
 
@@ -982,6 +987,41 @@ decided on the groups of its own token. A session id Keystone has no binding for
 makes a client start a new session; it is never adopted by whoever names it first. The binding
 is kept in the gateway process, like the SDK's own sessions, so it does not depend on Redis
 being up.
+
+## Scanner
+
+Tool output is untrusted text: an email, a web page or a file can carry an instruction for the
+agent that reads it. The scanner reads the output of a tool and says how much it looks like such an
+instruction (ADR-0011). It is a library today (`keystone.defense`): the pipeline starts to use it
+in KS-704, and until then no output is scanned.
+
+The rules are in `src/keystone/defense/rules.py`, seven of them, each with a weight. A text that
+breaks several gets `1 - (1 - w1) * (1 - w2) * ...`, the chance that at least one hit is real.
+
+| Rule | What it looks for | Weight |
+|---|---|---|
+| `instruction_override` | "ignore all previous instructions", also in Spanish, French, German, Portuguese and Italian | 0.6 |
+| `role_spoof` | a line that starts `system:` or `assistant:`, a `### System` heading, chat template tokens, `<system>` and `[SYSTEM NOTICE]` | 0.5 |
+| `hidden_unicode` | tag characters, bidirectional overrides, word joiners, and zero-width characters between letters of the same script | 0.9 |
+| `tool_directive` | "call the send_email tool", "send ... to someone@host", "transfer ... to account" | 0.4 |
+| `secrecy` | "do not tell the user", "secretly", "without telling", "do not ask for confirmation" | 0.5 |
+| `markdown_exfil` | a markdown image or link whose address has a query longer than 32 characters, or an image on a host that is not allowed | 0.7 |
+| `encoded_payload` | a base64 run of more than 200 characters (0.2), and 0.5 more when it decodes to text that breaks another rule | 0.2 |
+
+A score under `scanner.thresholds.suspicious` (0.5) is `benign`, from `injection` (0.85) up it is an
+`injection`, and in between it is `suspicious`. One weak rule on its own stays benign, which is
+why the weights of `tool_directive` (0.4) and `encoded_payload` (0.2) are what they are.
+
+What the scan does to the text first: invisible characters are taken out and the rest is
+normalized (NFKC), so a zero-width space inside a word or fullwidth letters do not hide a phrase.
+A tool result that is JSON is read as the strings in it, because there a line break or a quote is
+written with a backslash and a reader undoes that. Images are not read; they are counted.
+
+What it does not do. The rules are patterns and understand nothing: a phrase nobody listed, or a
+language the list lacks, is not seen, and the same holds for a text that explains an attack
+instead of making it (it can score high). Python regular expressions hold the interpreter while
+they run, so a scan of 200,000 characters (the limit) keeps the gateway busy for about 20 ms.
+`scripts/bench_scanner.py` measures it, and `docs/spikes/scanner.md` has the numbers.
 
 ## Audit
 

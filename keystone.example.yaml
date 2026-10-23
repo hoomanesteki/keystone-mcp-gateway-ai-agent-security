@@ -119,3 +119,14 @@ approvals:
   # KEYSTONE_APPROVALS__SLACK_WEBHOOK_URL. Neither delays the call.
   # webhook_url: https://hooks.example.test/keystone
   # slack_webhook_url: https://hooks.slack.com/services/...
+
+# The scanner reads the output of a tool for text that tries to steer the model (ADR-0011). A score
+# under `suspicious` is benign, from `injection` up is an injection, and a score between is
+# suspicious. `allowed_domains` are the hosts a markdown image may point to without a mark against it
+# (a name covers its subdomains). The scan reads at most `max_scan_chars`: a longer text is read at
+# both ends. All of these can be set with KEYSTONE_SCANNER__<NAME>.
+scanner:
+  enabled: true
+  thresholds: {suspicious: 0.5, injection: 0.85}
+  allowed_domains: []
+  max_scan_chars: 200000
