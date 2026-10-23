@@ -3,8 +3,9 @@
 #
 # WITH_SCANNER=1 adds the classifier behind the scanner's rules (KS-702, ADR-0011): the extra
 # keystone[scanner] (torch for the CPU, transformers) and the model, downloaded now so that the
-# container never goes to the network for it. The model alone is 738 MB. Compose builds with it. The
-# CI build and a plain `docker build .` do not, and the scanner then runs on its rules alone.
+# container never goes to the network for it. `docker images` shows 3.13 GB with it and 401 MB
+# without (Docker Desktop, measured); the model is 738 MB of the difference. Compose builds with it.
+# The CI build and a plain `docker build .` do not, and the scanner then runs on its rules alone.
 
 ARG WITH_SCANNER=0
 

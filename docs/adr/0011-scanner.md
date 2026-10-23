@@ -113,10 +113,15 @@ scores, so the evaluation can read each.
 the lock holds no CUDA library. CI never installs the extra and never downloads a model, and its
 image is built without the build argument. Compose builds with `WITH_SCANNER=1`, which installs the
 extra and downloads the pinned model (738 MB) into the image, and the image sets
-`HF_HUB_OFFLINE=1`, so the container never goes to the network for it. `make gate` installs the
-extra from Phase 7, because the gate runs the one test that loads the real model. Without the
-extra, `load_classifier` logs `scanner_classifier_unavailable` once and the scanner runs on its
-rules. `KEYSTONE_SCANNER_CLASSIFIER=none` (or `scanner.classifier: none`) turns the model off.
+`HF_HUB_OFFLINE=1`, so the container never goes to the network for it. Started with
+`docker run --network none`, the built image loaded the model from `/opt/hf-cache` and scored an
+injected sentence 1.0 and a benign one 0.0. The image is 3.13 GB in `docker images` against 401 MB
+without the argument: the virtualenv grows from 149 MB to 1.2 GB (torch is 652 MB of it) and the
+model cache is 715 MB (`du -sh`). The first build took 20 minutes on a laptop. `make gate`
+installs the extra from Phase 7, because the gate runs the one test that loads the real model.
+Without the extra, `load_classifier` logs `scanner_classifier_unavailable` once and the scanner
+runs on its rules. `KEYSTONE_SCANNER_CLASSIFIER=none` (or `scanner.classifier: none`) turns the
+model off.
 
 ## Consequences
 
