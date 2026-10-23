@@ -55,6 +55,7 @@ file or listed with a different version.
 | fastapi | 0.159.1 | HTTP app and dependency injection |
 | jsonschema | 4.26.0 | Draft 2020-12 validation of tool arguments in the pipeline |
 | mcp | 2.3.0 | MCP server and client SDK (ADR-0003); a new major version, see `docs/spikes/mcp-proxy.md` |
+| prometheus-client | 0.26.0 | metrics registry and the `/metrics` text format (KS-501, KS-505); no dependencies of its own |
 | pydantic-settings | 2.16.1 | typed settings from env and YAML |
 | pyjwt | 2.15.1 | JWT validation against the IdP's keys (KS-303), with the `crypto` extra for RS256 and ES256; it was already installed through the MCP SDK |
 | pyyaml | 6.0.3 | YAML config files |
