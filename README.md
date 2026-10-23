@@ -3,10 +3,12 @@ Self-hosted security gateway for AI agents. One MCP endpoint in front of all you
 
 ## Status
 
-Under construction, built one story at a time. Phase 0 (repo, CI, local stack, docs) and the
-Phase 1 proxy core are in place: Keystone serves one MCP endpoint, routes every tool call through
-a fixed interceptor pipeline and forwards it to four demo upstreams. The pipeline's slots are
-stubs, so there is no authentication, policy or approval yet. `make demo` shows it working.
+Under construction, built one story at a time. Phases 0 to 3 are in place: Keystone serves one
+MCP endpoint and routes every tool call through a fixed interceptor pipeline to its upstreams, HTTP
+or stdio. Callers sign in with an OIDC token (Keycloak locally), see only their own tenant's tools,
+and never hold an upstream credential: Keystone keeps it encrypted and adds it to the call itself.
+The policy, approval, scanner, rate limit and metering slots are still stubs, so Keystone does not
+decide what a signed-in caller may do yet. `make demo` shows it working.
 
 - Progress per story: [docs/progress.md](docs/progress.md)
 - The plan and every acceptance criterion: [docs/PLAN.md](docs/PLAN.md)
