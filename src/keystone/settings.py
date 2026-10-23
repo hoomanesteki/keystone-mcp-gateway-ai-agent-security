@@ -82,6 +82,9 @@ class PolicySettings(BaseModel):
     # Also read demo/, the policies that go with the demo upstreams (transfers over 500 need
     # approval). Off by default: a deployment that is not the demo does not want them.
     include_demo: bool = False
+    # How long the list of tools a caller may see is kept, per caller and policy version. A reload
+    # changes the version, so it never serves an answer from the old rules.
+    list_cache_ttl_s: float = Field(default=60.0, ge=0)
 
 
 class HealthSettings(BaseModel):

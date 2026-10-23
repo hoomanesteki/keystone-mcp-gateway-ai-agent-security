@@ -28,7 +28,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 
@@ -43,6 +43,18 @@ DEFAULT_DENY = "default-deny"
 POLICY_ERROR = "policy-error"
 # A Cedar message can quote the whole entity list. Enough to see the cause, not enough to flood.
 MAX_ERROR_CHARS = 300
+
+
+class PolicyEngine(Protocol):
+    """What the gateway needs of a policy engine (plan section 3.6). The policy slot and the tool
+    listing depend on this and not on Cedar."""
+
+    @property
+    def version(self) -> str: ...
+
+    def evaluate(
+        self, principal: Principal, action: Action, tool: ToolRef, context: Mapping[str, Any]
+    ) -> Decision: ...
 
 
 class EvaluationFailed(Exception):

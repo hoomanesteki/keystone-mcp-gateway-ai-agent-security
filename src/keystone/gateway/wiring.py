@@ -6,16 +6,18 @@ from dataclasses import dataclass, field
 
 from keystone.gateway.interceptors.credentials import CredentialInterceptor, HeaderSource
 from keystone.gateway.interceptors.pinning import PinningInterceptor, ToolStateLookup
+from keystone.gateway.interceptors.policy import PolicyInterceptor
 from keystone.gateway.pipeline import AuditSink, Dispatcher, Interceptor, Pipeline
 from keystone.gateway.stubs import (
     ApprovalInterceptor,
     BudgetInterceptor,
     MeteringInterceptor,
     OutputScanInterceptor,
-    PolicyInterceptor,
     RateLimitInterceptor,
     SessionFlagsInterceptor,
 )
+from keystone.gateway.stubs import PolicyInterceptor as StubPolicyInterceptor
+from keystone.policy.engine import PolicyEngine
 from keystone.settings import Settings
 from keystone.telemetry.tracing import NoopTracer, Tracer
 
@@ -43,6 +45,9 @@ class PipelineDeps:
     tool_states: ToolStateLookup | None = None
     # Where the credential slot gets upstream headers. Without one it adds none.
     vault: HeaderSource | None = None
+    # The engine that decides every call. The app always passes one. Without one the slot is the
+    # Phase 1 stub that allows everything, which only the unit tests of the pipeline want.
+    policy: PolicyEngine | None = None
 
 
 def build_pipeline(
@@ -60,7 +65,7 @@ def build_pipeline(
         "rate_limit": RateLimitInterceptor(),
         "pinning": PinningInterceptor(deps.tool_states),
         "budget": BudgetInterceptor(),
-        "policy": PolicyInterceptor(),
+        "policy": PolicyInterceptor(deps.policy) if deps.policy else StubPolicyInterceptor(),
         "approval": ApprovalInterceptor(),
         "credential": CredentialInterceptor(deps.vault),
         "output_scan": OutputScanInterceptor(),

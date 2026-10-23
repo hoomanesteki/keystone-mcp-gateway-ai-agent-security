@@ -8,8 +8,9 @@ served, because session state is keyed by Mcp-Session-Id and the newer era has n
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import anyio
 import mcp_types as types
@@ -61,6 +62,10 @@ MAX_NAME_IN_AUDIT = 200
 Context = ServerRequestContext[Any, Any]
 
 
+class ToolFilter(Protocol):
+    async def visible(self, principal: Principal, tools: Sequence[ToolRef]) -> list[ToolRef]: ...
+
+
 class Gateway:
     def __init__(
         self,
@@ -68,11 +73,15 @@ class Gateway:
         registry: ToolLookup,
         sessions: SessionStore,
         pipeline: Pipeline,
+        tool_filter: ToolFilter | None = None,
     ) -> None:
         self.settings = settings
         self.registry = registry
         self.sessions = sessions
         self.pipeline = pipeline
+        # What decides which tools a caller sees. Without one the caller sees every tool of its
+        # tenant, which only the unit tests of the gateway want.
+        self.tool_filter = tool_filter
         # Who opened each session. The authentication middleware fills it and checks it.
         self.bindings = SessionBindings()
         # The sessions to tell when the tool list changes: session id -> (tenant, session). A
@@ -92,16 +101,26 @@ class Gateway:
     async def list_tools(
         self, ctx: Context, params: types.PaginatedRequestParams | None
     ) -> types.ListToolsResult:
-        tenant_id = self.principal(ctx).tenant_id
+        principal = self.principal(ctx)
+        tenant_id = principal.tenant_id
         self._remember(ctx, tenant_id)
-        tools = await self.registry.list_for_tenant(tenant_id)
+        # The registry is asked for this tenant only. A tool of another tenant that came back
+        # anyway is not shown (invariant I5).
+        tools = [
+            t for t in await self.registry.list_for_tenant(tenant_id) if t.tenant_id == tenant_id
+        ]
+        if self.tool_filter is not None:
+            try:
+                tools = await self.tool_filter.visible(principal, tools)
+            except Exception:
+                # A listing that cannot be decided shows nothing. Every call is decided again
+                # when it is made, so this hides tools and opens nothing.
+                log.exception("tool_list_filter_failed", tenant=tenant_id)
+                tools = []
         return types.ListToolsResult(
             tools=[
                 types.Tool(name=t.name, description=t.description, input_schema=t.input_schema)
-                # The registry is asked for this tenant only. A tool of another tenant that came
-                # back anyway is not shown (invariant I5).
                 for t in tools
-                if t.tenant_id == tenant_id
             ]
         )
 

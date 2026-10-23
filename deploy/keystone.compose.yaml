@@ -32,6 +32,13 @@ upstreams:
     url: "http://mail-mcp:8101/mcp"
     credential_mode: static
     credential_env: {X-Api-Key: MAIL_API_KEY}
+    # How risky each tool is, and what a policy may read of a call (KS-406). A tool left out is
+    # medium risk and exposes nothing. Sending mail is high risk, so only operators may do it, and
+    # the recipient's domain is what the mail rule looks at.
+    tools:
+      list_emails: {risk: low, tags: [reads_sensitive]}
+      read_email: {risk: low, tags: [reads_untrusted, reads_sensitive]}
+      send_email: {risk: high, tags: [external_effect], extract: {recipient_domain: "$.to | domain"}}
   - id: files
     tenant: acme
     transport: http
@@ -44,6 +51,11 @@ upstreams:
     url: "http://bank-mcp:8103/mcp"
     credential_mode: static
     credential_env: {X-Api-Key: BANK_API_KEY}
+    # A transfer is high risk. The amount is read in cents ($.amount | cents), because `int` would
+    # cut 500.99 down to 500 and let it past a limit of 500.
+    tools:
+      get_balance: {risk: medium, tags: [reads_sensitive]}
+      transfer: {risk: high, tags: [external_effect], extract: {amount: "$.amount | cents"}}
   - id: echo
     tenant: acme
     transport: http
