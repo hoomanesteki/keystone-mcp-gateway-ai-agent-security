@@ -50,6 +50,7 @@ file or listed with a different version.
 | alembic | 1.20.0 | schema migrations |
 | anyio | 4.15.1 | timeouts and task groups (fail_after, create_task_group) |
 | asyncpg | 0.32.0 | Postgres driver, also used directly by the readiness probe |
+| cedarpy | 4.12.2 | Cedar policy engine in process (KS-401, ADR-0006); wraps Cedar 4.12.0, no runtime dependencies, wheels for macOS and Linux on x86_64 and arm64 |
 | cryptography | 50.0.2 | Fernet encryption for the credential vault (KS-305), and the RSA and EC keys of the fake IdP |
 | fastapi | 0.159.1 | HTTP app and dependency injection |
 | jsonschema | 4.26.0 | Draft 2020-12 validation of tool arguments in the pipeline |
