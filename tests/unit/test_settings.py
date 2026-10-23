@@ -421,3 +421,53 @@ def test_the_config_cannot_define_an_upstream_called_keystone(tmp_path: Path) ->
     )
     with pytest.raises(ValueError, match="reserved"):
         Settings(config_path=config)
+
+
+@pytest.mark.phase(6)
+def test_the_webhook_settings_are_checked_and_the_slack_address_is_a_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from keystone.settings import ApprovalSettings
+
+    defaults = ApprovalSettings()
+    assert (defaults.webhook_url, defaults.slack_webhook_url) == (None, None)
+    assert defaults.webhook_backoff_s == [1.0, 2.0, 4.0]
+
+    slack = "https://hooks.slack.test/services/T000/B000/not-for-display"
+    monkeypatch.setenv("KEYSTONE_APPROVALS__WEBHOOK_URL", "https://hooks.example.test/keystone")
+    monkeypatch.setenv("KEYSTONE_APPROVALS__SLACK_WEBHOOK_URL", slack)
+    settings = Settings()
+
+    assert settings.approvals.webhook_url == "https://hooks.example.test/keystone"
+    assert settings.approvals.slack_webhook_url is not None
+    assert settings.approvals.slack_webhook_url.get_secret_value() == slack
+    assert "not-for-display" not in repr(settings) + settings.model_dump_json()
+
+
+@pytest.mark.phase(6)
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"webhook_url": "hooks.example.test/keystone"},
+        {"webhook_url": "ftp://hooks.example.test/keystone"},
+        {"slack_webhook_url": "not a url"},
+        {"webhook_backoff_s": [1, -1]},
+        {"webhook_backoff_s": [301]},
+        {"webhook_backoff_s": [1] * 11},
+    ],
+)
+def test_a_webhook_setting_that_cannot_work_is_refused(bad: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="approvals"):
+        Settings(approvals=bad)  # type: ignore[arg-type]
+
+
+@pytest.mark.phase(6)
+def test_a_secret_put_in_the_yaml_is_refused_and_not_repeated(tmp_path: Path) -> None:
+    config = tmp_path / "keystone.yaml"
+    config.write_text("approvals:\n  webhook_secret: a-secret-that-must-not-be-echoed\n")
+
+    with pytest.raises(ValueError) as refused:
+        Settings(config_path=config)
+
+    assert "webhook_secret" in str(refused.value)
+    assert "must-not-be-echoed" not in str(refused.value)

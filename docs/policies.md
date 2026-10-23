@@ -24,8 +24,10 @@ flowchart TD
   `default-deny` when nothing allowed the call.
 - **The approval set** is asked only when access allowed, and holds `permit` policies only. If one
   matches, the call needs a person's approval, and the matching ids are the reasons. If none
-  matches, the call is allowed, and the reasons are the access permits that allowed it. Until
-  Phase 6 the approval step refuses such a call, so it does not run.
+  matches, the call is allowed, and the reasons are the access permits that allowed it. A call
+  that needs approval is held for a person, and runs only if one approves it, with the arguments
+  that were approved and once (the runbook's Approvals section says how). The policy decides it
+  again when it runs, so a rule tightened in between refuses it.
 - **A tool listing** stops after the access set. A tool the caller may not use is not listed, and
   a tool that needs approval still is.
 - **Everything else is a deny.** A policy that fails to evaluate in either pass, a context the

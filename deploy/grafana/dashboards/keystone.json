@@ -603,7 +603,7 @@
       "id": 17,
       "type": "timeseries",
       "title": "Approvals pending",
-      "description": "Phase 6. No data until approvals arrive.",
+      "description": "Requests waiting for a person to approve or reject them, by tenant.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

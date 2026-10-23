@@ -19,8 +19,9 @@ upstreams and Keystone, and waits until every container reports healthy. Cold st
 | `make test-e2e` | The end-to-end tests against the running stack. The nightly workflow runs `make up` and then this |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit log (read through the admin API) does not hold one new record for each call |
+| `bash scripts/smoke/phase_6.sh` | Three agents run as olivia and lena decides through the admin API: a transfer of 900 is held, approved and completed (a second decision is 409 and olivia's own is 403); one of 700 is rejected with a note that the agent gets; one of 600 times out as `KS_APPROVAL_PENDING`, is approved late and is awaited. Then the audit log and `keystone_approvals_pending` are checked. About 20 seconds: the third request waits out the 10 s hold. |
 | `bash scripts/smoke/phase_5.sh` | Runs the demo, finds a Jaeger trace of more than 9 spans with no user or argument in it, reads `keystone_tool_calls_total` from `/metrics` and from Prometheus, finds the dashboard in Grafana, verifies the audit chain, edits a record as the Postgres superuser and checks that `keystone audit verify` exits 2 and names the seq, then puts the record back. About 15 seconds. |
-| `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 15 tools (13 of acme's and Keystone's 2); olivia's transfer of 900 is held for approval (10 s in the local stack) and answered `KS_APPROVAL_PENDING`, the audit shows `require_approval` / `approve-transfer-over-500` and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 30 seconds. |
+| `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 15 tools (13 of acme's and Keystone's 2); olivia's transfer of 900 is held for approval, lena rejects it through the admin API and olivia is told `KS_APPROVAL_REJECTED`, the audit shows `require_approval` / `approve-transfer-over-500` and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 30 seconds. |
 | `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), olivia's 17 tools, bob's 3 globex tools and Keystone's 2, and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
 | `bash scripts/smoke/phase_2.sh` | Lists the 17 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
 
@@ -228,6 +229,10 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_APPROVALS__TTL_SECONDS` | `900` | How long after the request it can be decided and used. |
 | `KEYSTONE_APPROVALS__SWEEP_INTERVAL_S` | `30` | Seconds between marking requests that ran out of time as expired. |
 | `KEYSTONE_APPROVALS__POLL_INTERVAL_S` | `2` | Seconds between looks at a request a call is waiting for, when Redis has not woken it. |
+| `KEYSTONE_APPROVALS__WEBHOOK_URL` | unset | Where a new request is announced, signed (see Approvals). Needs `KEYSTONE_APPROVALS_WEBHOOK_SECRET`. |
+| `KEYSTONE_APPROVALS_WEBHOOK_SECRET` | unset | The key that signs the webhook. Read from the environment only, never from the YAML. Not a nested setting: one underscore. |
+| `KEYSTONE_APPROVALS__SLACK_WEBHOOK_URL` | unset | A Slack incoming webhook that gets a plain message for each request. A secret. |
+| `KEYSTONE_APPROVALS__WEBHOOK_BACKOFF_S` | `[1, 2, 4]` | JSON list of the seconds before each retry of a webhook delivery. |
 
 Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
 
@@ -570,6 +575,85 @@ one for other arguments, a used one or an expired one is refused with `KS_APPROV
 never reaches the upstream. Invariant I7 (`tests/invariants/test_i7_approvals.py`) tries every
 combination of an id in each of its six states with arguments, tool, session and user that are the
 approved ones or not: exactly one dispatches.
+
+### Deciding through the API
+
+The console and scripts decide with three routes. A caller needs the `approver` or the `admin`
+role, and sees the requests of the tenant of the token only.
+
+`GET /approvals?status=pending` answers a list, oldest first. `GET /approvals/{id}` answers one
+request and `recent_calls`. Each request has: `id`, `status`, `tool`, `risk` and `tags` (of the
+tool, `null` if the tool is not registered), `arguments` (secrets masked), `args_digest`,
+`reasons` (the ids of the policies that asked), `requested_by_user`, `requested_by_agent`,
+`own_request` (true when the caller made it and so cannot decide it), `session_id`, `call_id`,
+`requested_at`, `expires_at`, `expires_in_s` (counted by the server, so a clock that is wrong in
+the browser does not matter), `decided_by`, `decision_note`, `decided_at`, and `flags` and
+`tainted` of the session that asked. The session is read without keeping it alive.
+
+The `arguments` are what the audit log keeps of them: the value under a key that looks like a
+secret is `[redacted]`, and a string over 2,048 characters is cut to its first 256 characters and
+the sha256 of the whole. An approver should treat a masked or cut value as unknown. `args_digest`
+is the digest of the real arguments, and the approval is for exactly those.
+
+`POST /approvals/{id}/decision` takes `{"approve": true|false, "note": "..."}` (the note is
+optional and at most 500 characters; `approve` must be a JSON boolean and an unknown key is an
+error) and answers the request as it now stands.
+
+| Status | When |
+|---|---|
+| 200 | The decision was made |
+| 401 | No token, or one that is not valid |
+| 403 | No approver or admin role, or the request is the caller's own |
+| 404 | There is no such request in the caller's tenant (another tenant's looks the same) |
+| 409 | The request is no longer pending. The body is `{"error": "conflict", "reason": "the request is approved", "status": "approved"}`; `status` is `approved`, `rejected`, `consumed` or `expired`. A request past its time is `expired` at once, before the sweeper has marked it |
+| 422 | The body is not a decision |
+| 503 | Keystone has no master keys, so there are no approvals |
+
+The decision is one statement (see above), so two approvers who decide together get one 200 and
+one 409. A rejection reaches the agent as `KS_APPROVAL_REJECTED` with the note.
+
+### Telling others
+
+`approvals.webhook_url` (`KEYSTONE_APPROVALS__WEBHOOK_URL`) makes Keystone `POST` a JSON body to
+that address when a request is made:
+
+```json
+{"id": "01J...", "tenant": "acme", "tool": "bank__transfer", "requester": "olivia",
+ "agent": "ops-agent", "reasons": ["approve-transfer-over-500"],
+ "expires_at": "2026-10-23T12:15:00+00:00",
+ "console_url": "http://localhost:5173/approvals?id=01J..."}
+```
+
+The arguments are not in it. The body is signed, so the receiver can check where it came from and
+how old it is:
+
+```
+X-Keystone-Timestamp: 1761218100
+X-Keystone-Signature: sha256=<hex HMAC-SHA256 of timestamp + "." + body>
+```
+
+The key is `KEYSTONE_APPROVALS_WEBHOOK_SECRET`. It is read from the environment and from nowhere else:
+a `webhook_secret` in the YAML is an error, and Keystone does not start with a webhook and no
+secret. A receiver checks it like this, and refuses a timestamp older than a few minutes:
+
+```python
+import hashlib, hmac
+
+
+def valid(secret: bytes, timestamp: str, signature: str, body: bytes) -> bool:
+    mac = hmac.new(secret, timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, f"sha256={mac}")
+```
+
+A delivery never delays the call that asked. It is queued and sent by a task of its own, with 5
+seconds for each attempt and three retries after 1, 2 and 4 seconds (`approvals.webhook_backoff_s`
+changes them). A network error, a timeout, a 408, a 429 and a 5xx are retried; any other answer
+ends the delivery. Failures are logged with the receiver's host and no more. The queue holds 100
+notifications and drops the rest, logging `approval_notification_dropped`.
+
+`approvals.slack_webhook_url` (`KEYSTONE_APPROVALS__SLACK_WEBHOOK_URL`) sends a plain message to a
+Slack incoming webhook: who wants to call which tool, the reasons and the console link. Its address
+is a secret, so it is held as one and never logged; set it from the environment.
 
 ### Keystone's own tools
 
@@ -952,8 +1036,11 @@ often less protected than logs. A tenant that is not in the config is `other`, a
 is not is `unknown`, and a call to a tool that does not exist is counted under the tool `unknown`,
 whatever name the caller made up.
 
-The metrics of Phases 6 to 8 are declared and nothing sets them yet, so the last row of the
-dashboard shows "no data" until then: `keystone_approvals_pending`, `keystone_sessions_tainted_total`,
+`keystone_approvals_pending{tenant}` counts the approval requests waiting for a decision. The
+approval service sets it when it starts and after each request, decision and sweep.
+
+The metrics of Phases 7 and 8 are declared and nothing sets them yet, so the last row of the
+dashboard shows "no data" for them until then: `keystone_sessions_tainted_total`,
 `keystone_scan_score`, `keystone_rate_limited_total`, `keystone_budget_spent_usd` and
 `keystone_llm_tokens_total`.
 
@@ -966,8 +1053,10 @@ exists.
 ## Admin API
 
 `/admin/api/v1` is the interface the console and operator scripts use. Every route needs a token
-with the `admin` role (401 without a token or with a bad one, 403 without the role), and every
-answer is limited to the tenant of the token: a record, tool or session of another tenant is not
+with the `admin` role (401 without a token or with a bad one, 403 without the role), except the
+`/approvals` routes, which also take the `approver` role. A route added later is for admins until
+it is listed as an approvals route (`admin/auth.py`). Every answer is limited to the tenant of the
+token: a record, tool or session of another tenant is not
 found (404), so the answer does not say it exists. The OpenAPI schema is at
 `/admin/api/v1/openapi.json` and needs no token. The app as a whole serves no schema or docs.
 
@@ -983,6 +1072,9 @@ found (404), so the answer does not say it exists. The OpenAPI schema is at
 | `GET /sessions` | Live sessions of the tenant, read from Redis |
 | `GET /policies` | The version in force and the ids of the tenant's policies |
 | `POST /policies/reload` | Read the policy files again (see Policies) |
+| `GET /approvals` | The tenant's approval requests in one state: `status` (`pending` by default, or `approved`, `rejected`, `expired`, `consumed`) and `limit` (1 to 200, 100 by default). Pending ones come oldest first. Approver or admin |
+| `GET /approvals/{id}` | One request, with the last 10 calls of the session that asked (`recent_calls`, as the audit shows them). Approver or admin |
+| `POST /approvals/{id}/decision` | `{"approve": true, "note": "..."}`. Approver or admin. See Approvals |
 
 Approving a change through the API calls the same code as `keystone tool approve-change`, with the
 same checks and messages: a stale fingerprint is 409 "changed after it was shown", a tool that is
