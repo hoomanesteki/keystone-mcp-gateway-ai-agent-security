@@ -21,11 +21,19 @@ from redis.asyncio import Redis
 from keystone.app import create_app
 from keystone.audit.sink import InMemoryAuditSink
 from keystone.registry.config import UpstreamConfig
-from keystone.settings import AgentConfig, HealthSettings, RegistrySettings, Settings, TenantConfig
+from keystone.settings import (
+    AgentConfig,
+    HealthSettings,
+    PolicySettings,
+    RegistrySettings,
+    Settings,
+    TenantConfig,
+)
 
 # Re-exported so tests/conftest.py can name one module: tests/unit/test_phase_plugin.py copies the
 # conftest and strips its single `pytest_plugins` line, so that line must stay on one line.
 from tests.fixtures.fake_idp import FakeIdp, fake_idp  # noqa: F401
+from tests.fixtures.policies import POLICY_ROOT
 from tests.fixtures.redis import redis, test_redis_url  # noqa: F401
 from tests.fixtures.servers import ServerThread
 from tests.fixtures.upstreams import (  # noqa: F401
@@ -155,6 +163,8 @@ def keystone_app_factory(
             "tenants": tenants,
             "allow_private_upstreams": True,
             "upstreams": upstreams,
+            # The repository's own policies, wherever the tests are run from.
+            "policy": PolicySettings(root=POLICY_ROOT, include_demo=True),
             **auth_options(fake_idp),
         }
         options.update(settings or {})
@@ -202,6 +212,7 @@ def start_keystone(
             upstreams=upstreams,
             registry=registry or RegistrySettings(sync_interval_s=0),
             health=health or HealthSettings(interval_s=0),
+            policy=PolicySettings(root=POLICY_ROOT, include_demo=True),
             **auth_options(fake_idp),
         )
         app = create_app(settings, **app_options)

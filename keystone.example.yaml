@@ -38,6 +38,13 @@ upstreams:
     transport: http
     url: "http://localhost:8112/mcp"
 
+# The policies (Cedar). root has schema.cedarschema, default/, one directory per tenant, and demo/.
+# A tenant's rules are default/ plus demo/ (if include_demo) plus its own directory, each with an
+# access/ and an approval/ part. Both can be set with KEYSTONE_POLICY__<NAME>. See docs/runbook.md.
+policy:
+  root: policies
+  include_demo: false
+
 # Sign-in. KEYSTONE_OIDC_ISSUER is the `iss` of valid tokens (required); see docs/runbook.md for the
 # other OIDC variables. `mode: none` skips the check and makes every caller the dev principal. It is
 # refused unless env is dev or test.

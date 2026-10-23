@@ -10,6 +10,8 @@ from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 
 from keystone import __version__
+from keystone.admin.api import create_admin_router
+from keystone.admin.auth import AdminAuth, AdminRefused, admin_refused_handler
 from keystone.audit.sink import InMemoryAuditSink
 from keystone.db.session import create_engine, make_sessionmaker
 from keystone.db.tenants import upsert_tenants
@@ -26,6 +28,8 @@ from keystone.identity.credential_repo import vault_from_settings
 from keystone.identity.metadata import add_metadata_route
 from keystone.identity.middleware import Authenticator
 from keystone.identity.vault import VaultError
+from keystone.policy.store import PolicyStore, reload_on_sighup
+from keystone.policy.versions import PolicyVersionRepo
 from keystone.registry.config import (
     apply_config_upstreams,
     seed_credentials,
@@ -68,6 +72,15 @@ def create_app(
             "so KEYSTONE_MASTER_KEYS must be set"
         )
     service_headers = vault.service_headers if vault else None
+    # The policies are read now, so a missing or invalid set stops startup before anything serves.
+    # Reloads later keep the set in force when the new one is refused.
+    policies = PolicyStore(
+        settings.policy.root,
+        [t.id for t in settings.tenants],
+        include_demo=settings.policy.include_demo,
+        recorder=PolicyVersionRepo(sessions),
+    )
+    policies.start()
     directory = UpstreamDirectory()
     pool = UpstreamPool(
         directory_client_factory(directory, health_timeout_s=settings.health.timeout_s)
@@ -116,6 +129,7 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             await upsert_tenants(sessions, settings.tenants)
+            await policies.record_current()
             # A config the registry cannot use (unknown tenant, a URL the SSRF guard refuses)
             # stops startup: serving with some upstreams silently missing is worse.
             await apply_config_upstreams(
@@ -138,7 +152,9 @@ def create_app(
                 # and the periodic sync tries it again. It does not stop startup.
                 for report in await registry.sync_all():
                     log.info("startup_sync", **report.model_dump())
-                await stack.enter_async_context(background_tasks(registry, health, settings))
+                await stack.enter_async_context(
+                    background_tasks(registry, health, settings, policies)
+                )
                 await stack.enter_async_context(manager.run())
                 yield
         finally:
@@ -156,6 +172,9 @@ def create_app(
     app.state.audit = audit
     app.state.authenticator = authenticator
     app.state.vault = vault
+    app.state.policies = policies
+    app.add_exception_handler(AdminRefused, admin_refused_handler)
+    app.include_router(create_admin_router(AdminAuth(authenticator), policies))
     manager = mount_mcp(app, gateway, authenticator)
     add_metadata_route(app, settings)
 
@@ -207,13 +226,14 @@ def create_app(
 
 @asynccontextmanager
 async def background_tasks(
-    registry: RegistryService, health: UpstreamHealth, settings: Settings
+    registry: RegistryService, health: UpstreamHealth, settings: Settings, policies: PolicyStore
 ) -> AsyncIterator[None]:
     """Run the periodic sync (unless its interval is 0), the watch for changes made by other
-    processes and the health probes (unless their interval is 0) while the body of the `with`
-    runs."""
+    processes, the health probes (unless their interval is 0) and the policy reload on SIGHUP
+    while the body of the `with` runs."""
     async with anyio.create_task_group() as group:
         group.start_soon(registry.run_watch)
+        group.start_soon(reload_on_sighup, policies)
         if settings.registry.sync_interval_s > 0:
             group.start_soon(registry.run_periodic, settings.registry.sync_interval_s)
         if settings.health.interval_s > 0:

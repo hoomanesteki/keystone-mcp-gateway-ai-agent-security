@@ -100,6 +100,17 @@ class Authenticator:
             )
 
     async def principal(self, headers: Headers) -> Principal:
+        return await self._principal(
+            headers, allow_unknown_agents=self.settings.auth.allow_unknown_agents
+        )
+
+    async def admin_principal(self, headers: Headers) -> Principal:
+        """The caller of an admin route. The token is checked exactly as for /mcp, but the caller
+        need not be a listed agent: the admin CLI and the console are not agents. What lets a
+        caller in is the `admin` role, which the route checks."""
+        return await self._principal(headers, allow_unknown_agents=True)
+
+    async def _principal(self, headers: Headers, *, allow_unknown_agents: bool) -> Principal:
         if self.settings.auth.mode == "none":
             if self.settings.dev_principal is None:
                 raise AuthError(Reason.NO_CREDENTIALS)
@@ -108,9 +119,7 @@ class Authenticator:
             raise KeysUnavailable
         claims = await self.validator.validate(bearer_token(headers))
         principal = principal_from_claims(
-            claims,
-            self.settings.agents,
-            allow_unknown_agents=self.settings.auth.allow_unknown_agents,
+            claims, self.settings.agents, allow_unknown_agents=allow_unknown_agents
         )
         if principal.tenant_id not in {tenant.id for tenant in self.settings.tenants}:
             # A sound token from an identity provider that serves other tenants too. Keystone
@@ -158,6 +167,30 @@ class SessionBindings:
 
     def forget(self, session_id: str) -> None:
         self._bound.pop(session_id, None)
+
+
+def auth_refusal(request: Request, error: AuthError, settings: Settings) -> Response:
+    """The HTTP answer to a request that could not be tied to a principal: 401 with a pointer to
+    the sign-in metadata, 403, or 503 when the identity provider's keys cannot be fetched. The
+    MCP endpoint and the admin API answer in the same words."""
+    reason = error.reason.value
+    if isinstance(error, KeysUnavailable):
+        log.error("auth_unavailable", reason=reason)
+        return JSONResponse(
+            {"error": "temporarily_unavailable", "reason": reason},
+            status_code=503,
+            headers={"Retry-After": RETRY_AFTER_S},
+        )
+    if error.status == 403:
+        log.info("auth_refused", status=403, reason=reason)
+        return JSONResponse({"error": "forbidden", "reason": reason}, status_code=403)
+    origin = public_origin(request, settings.public_base_url)
+    challenge = f'Bearer resource_metadata="{metadata_url(origin)}"'
+    no_token = error.reason is Reason.NO_CREDENTIALS
+    if not no_token:
+        log.info("auth_refused", status=401, reason=reason)
+    body = {"error": "unauthorized" if no_token else "invalid_token", "reason": reason}
+    return JSONResponse(body, status_code=401, headers={"WWW-Authenticate": challenge})
 
 
 def _response_header(message: Message, name: bytes) -> str | None:
@@ -218,24 +251,7 @@ class McpAuthMiddleware:
             await self.app(scope, receive, send)
 
     def _refusal(self, request: Request, error: AuthError) -> Response:
-        reason = error.reason.value
-        if isinstance(error, KeysUnavailable):
-            log.error("auth_unavailable", reason=reason)
-            return JSONResponse(
-                {"error": "temporarily_unavailable", "reason": reason},
-                status_code=503,
-                headers={"Retry-After": RETRY_AFTER_S},
-            )
-        if error.status == 403:
-            log.info("auth_refused", status=403, reason=reason)
-            return JSONResponse({"error": "forbidden", "reason": reason}, status_code=403)
-        origin = public_origin(request, self.authenticator.settings.public_base_url)
-        challenge = f'Bearer resource_metadata="{metadata_url(origin)}"'
-        no_token = error.reason is Reason.NO_CREDENTIALS
-        if not no_token:
-            log.info("auth_refused", status=401, reason=reason)
-        body = {"error": "unauthorized" if no_token else "invalid_token", "reason": reason}
-        return JSONResponse(body, status_code=401, headers={"WWW-Authenticate": challenge})
+        return auth_refusal(request, error, self.authenticator.settings)
 
     def _bind_new_session(self, send: Send, principal: Principal) -> Send:
         """Bind the session the SDK creates for this request, before the client can learn its id.

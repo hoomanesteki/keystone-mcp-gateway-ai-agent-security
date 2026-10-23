@@ -177,3 +177,17 @@ class Credential(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class PolicyVersion(Base):
+    """A policy set that was loaded, named by the sha256 of its files. `files` keeps each file's
+    path, sha256 and content, so the rules in force when a call was decided can be read back
+    from the version the audit record names. The first load of a version sets `loaded_at`."""
+
+    __tablename__ = "policy_versions"
+
+    version: Mapped[str] = mapped_column(Text, primary_key=True)
+    files: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+    loaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

@@ -10,6 +10,12 @@ tenants:
   - id: globex
     name: Globex Inc
 
+# Where the policies are (KS-403): the checkout's policies/ directory, mounted by docker-compose.yml.
+# demo/ holds the rules that go with the demo upstreams.
+policy:
+  root: /etc/keystone/policies
+  include_demo: true
+
 # Who may connect (KS-308): the OAuth clients of the Keycloak realm that act for users. The
 # issuer and the keys come from the environment (docker-compose.yml).
 agents:
