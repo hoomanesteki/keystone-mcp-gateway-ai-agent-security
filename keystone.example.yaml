@@ -106,7 +106,8 @@ approvals:
   sweep_interval_s: 30   # how often requests that ran out of time are marked expired
   poll_interval_s: 2     # how often a waiter looks at its request when Redis has not told it
   # Tell others when a request is made (ADR-0010). The webhook gets a signed JSON body and needs
-  # KEYSTONE_APPROVALS_WEBHOOK_SECRET in the environment: the secret never goes in this file.
+  # KEYSTONE_APPROVALS_WEBHOOK_SECRET in the environment, at least 16 characters: the secret never
+  # goes in this file.
   # A Slack incoming webhook gets a plain message. Its address is a secret, so prefer
   # KEYSTONE_APPROVALS__SLACK_WEBHOOK_URL. Neither delays the call.
   # webhook_url: https://hooks.example.test/keystone

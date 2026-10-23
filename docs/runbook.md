@@ -230,7 +230,7 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_APPROVALS__SWEEP_INTERVAL_S` | `30` | Seconds between marking requests that ran out of time as expired. |
 | `KEYSTONE_APPROVALS__POLL_INTERVAL_S` | `2` | Seconds between looks at a request a call is waiting for, when Redis has not woken it. |
 | `KEYSTONE_APPROVALS__WEBHOOK_URL` | unset | Where a new request is announced, signed (see Approvals). Needs `KEYSTONE_APPROVALS_WEBHOOK_SECRET`. |
-| `KEYSTONE_APPROVALS_WEBHOOK_SECRET` | unset | The key that signs the webhook. Read from the environment only, never from the YAML. Not a nested setting: one underscore. |
+| `KEYSTONE_APPROVALS_WEBHOOK_SECRET` | unset | The key that signs the webhook, at least 16 characters. Read from the environment only, never from the YAML. Not a nested setting: one underscore. |
 | `KEYSTONE_APPROVALS__SLACK_WEBHOOK_URL` | unset | A Slack incoming webhook that gets a plain message for each request. A secret. |
 | `KEYSTONE_APPROVALS__WEBHOOK_BACKOFF_S` | `[1, 2, 4]` | JSON list of the seconds before each retry of a webhook delivery. |
 
@@ -538,6 +538,11 @@ The rules, each one SQL statement in `src/keystone/approvals/service.py`:
   a message arrives or `poll_interval_s` passes. A message only wakes it. The verdict is always
   read from the row, so a message that is lost or forged decides nothing, and without Redis the
   wait polls.
+- **Keeping.** The original arguments are kept for one purpose, to run an approved call. The
+  statement that makes a request unusable (a rejection, a use, the sweeper marking it expired)
+  empties them in the same change. The masked form, the digest and who decided stay.
+- **Ids.** An id comes from an agent's arguments or a URL, and Postgres cannot hold a NUL
+  character. Ids are cleaned like every other value, so an id with one is a request nobody has.
 
 `keystone_approvals_pending{tenant}` counts the pending requests of each tenant. It is set when
 the sweeper starts and after each request, decision and sweep.
@@ -558,7 +563,7 @@ the local stack uses 10). The agent sees one slow call, and then one of:
 
 | What happened in the wait | The agent gets | The audit record has |
 |---|---|---|
-| a person approved it | the upstream's result, as if there had been no approval | `require_approval`, outcome `ok`, `dispatched` true |
+| a person approved it | the upstream's result, as if there had been no approval | `require_approval`, outcome `ok`, `dispatched` true, and `approval:<id>` after the policy's reasons |
 | a person rejected it | `KS_APPROVAL_REJECTED`, with the approver's note as the message | outcome `rejected`, code `KS_APPROVAL_REJECTED` |
 | it expired | `KS_APPROVAL_EXPIRED` | outcome `rejected`, code `KS_APPROVAL_EXPIRED` |
 | nobody decided | `KS_APPROVAL_PENDING` | outcome `rejected`, code `KS_APPROVAL_PENDING` |
@@ -566,6 +571,17 @@ the local stack uses 10). The agent sees one slow call, and then one of:
 A pending answer carries the id of the request in the text, where a model reads it, and in `_meta`
 as `keystone/approval_id`, with `keystone/expires_at` and `keystone/next` (`call
 keystone__await_approval`). The call does not run until the request is approved and used.
+
+A call that is approved in the wait is checked again before its approval is used. The slots ahead
+of the approval slot decided it before the wait, and a tool may have been quarantined, a policy
+reloaded or a budget spent since. They run a second time (pinning, budget and policy; the rate
+limit does not, since a call is charged once) and what they say stands: a quarantined tool ends the
+call with `KS_QUARANTINED`, a policy that now denies it with `KS_DENIED`, an unhealthy audit log
+with `KS_DENIED` ("audit unavailable"), and in each case the approval is left unused. If the policy
+no longer asks for approval the call goes on as an allow and the approval is not used. The agent
+is not handed the id of an approval that was left unused: it asks again, and a person decides
+again. The record of a call that ran on an approval ends its reasons with `approval:<id>`, so the
+audit log says which approval allowed it and the approval row says who decided.
 
 A call that arrives with an approval id on its context is the re-entry of a call that waited. The
 slot takes the id off the context, uses the approval against the call's tool, session, user and
@@ -585,15 +601,19 @@ role, and sees the requests of the tenant of the token only.
 request and `recent_calls`. Each request has: `id`, `status`, `tool`, `risk` and `tags` (of the
 tool, `null` if the tool is not registered), `arguments` (secrets masked), `args_digest`,
 `reasons` (the ids of the policies that asked), `requested_by_user`, `requested_by_agent`,
-`own_request` (true when the caller made it and so cannot decide it), `session_id`, `call_id`,
-`requested_at`, `expires_at`, `expires_in_s` (counted by the server, so a clock that is wrong in
-the browser does not matter), `decided_by`, `decision_note`, `decided_at`, and `flags` and
-`tainted` of the session that asked. The session is read without keeping it alive.
+`arguments_masked`, `own_request` (true when the caller made it and so cannot decide it),
+`session_id`, `call_id`, `requested_at`, `expires_at`, `expires_in_s` (counted by the server, so a
+clock that is wrong in the browser does not matter), `decided_by`, `decision_note`, `decided_at`,
+and `flags` and `tainted` of the session that asked. The session is read without keeping it alive.
 
 The `arguments` are what the audit log keeps of them: the value under a key that looks like a
-secret is `[redacted]`, and a string over 2,048 characters is cut to its first 256 characters and
-the sha256 of the whole. An approver should treat a masked or cut value as unknown. `args_digest`
-is the digest of the real arguments, and the approval is for exactly those.
+secret is `[redacted]`, a card number, a social security number, a bearer token, an AWS key id or a
+private key inside a string is replaced, a string over 2,048 characters is cut to its first 256
+characters and the sha256 of the whole, and arguments that are still over 16 KiB after that are
+replaced by a note. `arguments_masked` is true when any of that happened. What runs is more than
+what is shown, so an approver should treat what is not shown as unknown, and a console should say
+so next to the decision. It does not block a decision. `args_digest` is the digest of the real
+arguments, and the approval is for exactly those.
 
 `POST /approvals/{id}/decision` takes `{"approve": true|false, "note": "..."}` (the note is
 optional and at most 500 characters; `approve` must be a JSON boolean and an unknown key is an
@@ -604,7 +624,7 @@ error) and answers the request as it now stands.
 | 200 | The decision was made |
 | 401 | No token, or one that is not valid |
 | 403 | No approver or admin role, or the request is the caller's own |
-| 404 | There is no such request in the caller's tenant (another tenant's looks the same) |
+| 404 | There is no such request in the caller's tenant (another tenant's looks the same, and so does an id that is not one) |
 | 409 | The request is no longer pending. The body is `{"error": "conflict", "reason": "the request is approved", "status": "approved"}`; `status` is `approved`, `rejected`, `consumed` or `expired`. A request past its time is `expired` at once, before the sweeper has marked it |
 | 422 | The body is not a decision |
 | 503 | Keystone has no master keys, so there are no approvals |
@@ -634,7 +654,8 @@ X-Keystone-Signature: sha256=<hex HMAC-SHA256 of timestamp + "." + body>
 
 The key is `KEYSTONE_APPROVALS_WEBHOOK_SECRET`. It is read from the environment and from nowhere else:
 a `webhook_secret` in the YAML is an error, and Keystone does not start with a webhook and no
-secret. A receiver checks it like this, and refuses a timestamp older than a few minutes:
+secret, or with one shorter than 16 characters (`openssl rand -hex 32` makes a good one). A receiver
+checks it like this, and refuses a timestamp older than a few minutes:
 
 ```python
 import hashlib, hmac
@@ -653,7 +674,9 @@ notifications and drops the rest, logging `approval_notification_dropped`.
 
 `approvals.slack_webhook_url` (`KEYSTONE_APPROVALS__SLACK_WEBHOOK_URL`) sends a plain message to a
 Slack incoming webhook: who wants to call which tool, the reasons and the console link. Its address
-is a secret, so it is held as one and never logged; set it from the environment.
+is a secret, so it is held as one and never logged; set it from the environment. The agent's id, the
+tool's name and the reasons are written by others, so `&`, `<` and `>` in them are escaped and a
+name such as `<!channel>` reads as text and pings no one.
 
 ### Keystone's own tools
 
@@ -696,6 +719,22 @@ audit log has a record for the call that was told to wait, one for the call the 
 for the await (source `virtual`). A client must not give up on a held call before the hold ends: an
 HTTP read timeout shorter than `approvals.wait_seconds` (or than the `wait_seconds` of an await)
 ends the connection, not the request. The scripted agent waits up to 330 seconds.
+
+### What approvals do not do
+
+- **Revoke.** An approval is good until it is used or `approvals.ttl_seconds` have passed since the
+  request (15 minutes by default). To stop a call that is approved already, quarantine or disable
+  the tool, or change the policy: the call is checked at the time of use and refused.
+- **Spare an approval that a later slot refuses.** The approval is used before the credential slot
+  and the dispatcher run. A call refused there, for a per-user credential that is missing or an
+  upstream that is marked down, has spent its approval, and a person decides again.
+- **Limit.** Nothing caps the requests one user or session leaves pending, merges identical ones (an
+  approver who approves two lets the call run twice) or counts the callers waiting at once; every
+  waiter holds a Redis connection and polls the table. The rate limits and budgets of Phase 8 are
+  where that belongs. The queue API shows the oldest 200 requests.
+- **Put the approvals table in the audit chain.** The table is not part of the tamper-evident
+  chain, and the role Keystone connects as can change it. The audit record of a call that ran on
+  an approval names it, which ties the two together without protecting the table.
 
 ## Upstreams
 
@@ -1139,6 +1178,14 @@ a 1 second limit each and returns 503 if either is down.
 | `403` with `reason: unknown_agent` | The token's `azp` is not under `agents`. Add it, or run `keystone agent list`. |
 | `503` from `/mcp` | Keystone cannot read the identity provider's keys. Check `KEYSTONE_OIDC_DISCOVERY_URL` and that Keycloak is up; the log says `jwks_fetch_failed` or `oidc_issuer_mismatch`. |
 | Every call gets `KS_DENIED`, "audit unavailable" | The audit writer is unhealthy and `audit.fail_closed` is on. Look for `audit_flush_failed` in the Keystone log: the database is down or refusing the writer. Calls resume within a few seconds of the writer succeeding. |
+| A call returns `KS_APPROVAL_PENDING` after 10 seconds | The policy sent it to approval and nobody decided in the hold (`approvals.wait_seconds`). Approve it through the admin API as an approver (`scripts/get_token.sh lena keystone-cli`), then have the agent call `keystone__await_approval`. |
+| `KS_DENIED`, "approval not available" | Keystone has no master keys, so it has no approval service. Set `KEYSTONE_MASTER_KEYS`. |
+| `keystone__await_approval` says "there is no such approval request for this session" | The id is not this session's: it was made in another session, by another user or agent, in another tenant, or it does not exist. Call the original tool again. |
+| An approver gets `403` on a decision | The token lacks the `approver` or `admin` role, or the request is the approver's own. A person cannot decide what they asked for. |
+| An approver gets `409` on a decision | The request is no longer pending. The body's `status` says what it is: decided, used, or expired. |
+| An approved call ends with `KS_QUARANTINED` or `KS_DENIED` | The call was checked again after its wait and the tool or the policy had changed. The approval is left unused and expires. Fix the cause, and have the agent call the tool again. |
+| Keystone does not start: "KEYSTONE_APPROVALS_WEBHOOK_SECRET must be at least 16 characters" | The signing key is too short to trust. Make one with `openssl rand -hex 32`. |
+| Keystone does not start: "KEYSTONE_APPROVALS_WEBHOOK_SECRET must be set" | `approvals.webhook_url` is set and the signing key is not in the environment. It is never read from the YAML. |
 | Port already in use | Another process holds the port. Set a different one in `.env`. |
 | `make check` cannot reach Postgres | Run `make up-core`, then `docker compose -f deploy/docker-compose.yml ps`. |
 | `ModuleNotFoundError: keystone` right after `uv sync` (macOS) | A background process flagged `.venv` as hidden, and Python skips hidden `.pth` files. Check with `ls -lO .venv/lib/python3.12/site-packages/keystone.pth`. Set `UV_PROJECT_ENVIRONMENT` to a path outside the repo, for example `$HOME/.cache/keystone-venv`, then run `uv sync`. |
