@@ -22,6 +22,8 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from keystone.approvals.service import ApprovalService
+from keystone.core.types import ToolTag
+from keystone.gateway.sessions import RedisSessionStore
 from keystone.settings import ApprovalSettings
 from tests.fixtures.calls import make_ctx, make_tool
 from tests.fixtures.fake_idp import FakeIdp
@@ -201,9 +203,10 @@ async def test_the_detail_has_the_context_an_approver_needs(
         await olivia.call_tool("echo__echo", {"payload": 7})  # refused: the arguments do not fit
         # What the scanner will set in Phase 7: the session is tainted and has read sensitive data.
         [key] = await redis.keys("ks:sess:*")
-        state = json.loads(await redis.get(key))
-        state |= {"flags": ["reads_sensitive", "reads_untrusted"], "tainted": True}
-        await redis.set(key, json.dumps(state), ex=3600)
+        session_id = str(key).removeprefix("ks:sess:")
+        store = RedisSessionStore(redis)
+        await store.add_flags(session_id, {ToolTag.READS_SENSITIVE, ToolTag.READS_UNTRUSTED})
+        await store.mark_tainted(session_id)
         result = await olivia.call_tool("bank__transfer", BIG)
     approval_id = str(result.meta["keystone/approval_id"])  # type: ignore[index]
     app.audit.wait()

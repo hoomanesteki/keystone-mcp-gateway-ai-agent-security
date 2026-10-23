@@ -915,11 +915,23 @@ several.
 
 ## Sessions
 
-Each MCP session has a state object (flags, taint, call count, spend) stored as JSON in Redis
-under `ks:sess:{session id}`. The key lives 24 hours from its last use: both reading and writing
-a session restart the clock. Postgres holds one `sessions` row per session, written when the
-session opens, as the durable reference that audit records will point at. The row's
-`last_seen_at`, flags and taint are updated at most once a minute per session.
+Each MCP session has a state (flags, taint, call count, spend) stored as a Redis hash under
+`ks:sess:{session id}`. `redis-cli HGETALL ks:sess:<id>` shows it: `session_id`, `principal` (JSON)
+and `created_at`, then `flag:<tag>` for each flag, `tainted`, `call_count` and `spent_usd` once
+they are set. The key lives 24 hours from its last use: reading a session and every change to it
+restart the clock. Postgres holds one `sessions` row per session, written when the session opens,
+as the durable reference that audit records will point at.
+
+A session changes by merging (ADR-0015). Flags are only added, the taint is only set, and the
+counters only go up, so a call that was held for approval cannot write an old copy over what a
+call in the meantime recorded. Deleting the key is the only way to clear a taint, and the next
+call of that MCP session then starts with a clean state. A key in the format of v0.6.0 (a JSON
+string) is not read: Keystone makes a new session over it.
+
+The row's `final_flags` and `tainted` are merged too (union, and never back to false). A flag or
+the taint that is new is written to the row at once, and `last_seen_at` at most once a minute per
+session. A write to the row that takes longer than 2 seconds is given up and logged as
+`session_row_not_touched`; the next write brings the row up to date.
 
 If Redis cannot be reached, a call is refused with `KS_DENIED` ("session state is unavailable") and
 audited, because a call must not run without the flags and taint of its session. If Postgres

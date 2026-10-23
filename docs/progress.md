@@ -107,7 +107,7 @@ the "Found" list at the end.
 
 | ID | Title | Pts | Status | PR | Notes |
 |---|---|---|---|---|---|
-| KS-791 | Session updates merge instead of overwrite | 3 | todo | | Found at gate 6. Flags are a set union, taint never goes back to false through a save, counters are atomic increments. A call held for approval must not erase what a concurrent call recorded. |
+| KS-791 | Session updates merge instead of overwrite | 3 | done | | `fix/ks-791-session-merge`. Found at gate 6. A session is a Redis hash now (ADR-0015, which changes plan section 3.7): a field per flag, the taint, `call_count` and `spent_usd`, changed by two Lua scripts that check the session exists, restart its clock and return it. `SessionStore` gains `add_flags`, `mark_tainted`, `incr_calls`, `add_spend` and `touch` (each returns the session after the change, or `None` if it is gone), and `save` is a merge: flags union, taint never cleared, a counter only raised. The gateway touches the session after a call and saves nothing. A call that waited reads its session again before the slots ahead of the approval run a second time, so the policy sees a taint recorded meanwhile (`PipelineDeps.sessions`, `catch_up`, `refresh`). The `sessions` row merges in SQL (flags union, taint OR, `last_seen_at` GREATEST); a new flag or taint goes to it at once, within 2 s, and `save` and `touch` keep the once-a-minute write. The in-memory store hands out copies. `test_a_call_held_for_approval_keeps_what_another_call_recorded` holds a real approval while a second call flags and taints the session; it failed on the old code with the flag gone after the held call ended. Both stores run one contract (`tests/fixtures/session_contract.py`). Earlier tests changed: the seven that planted or read the JSON string (`test_redis_session_roundtrip`, `test_the_gateway_writes_the_row_on_the_first_call_of_a_new_session`, `test_a_session_is_stored_when_it_opens_before_any_call`, `test_the_session_is_stored_with_its_principal_when_it_opens`, `test_a_call_never_runs_on_stored_state_that_belongs_to_someone_else`, `test_the_detail_has_the_context_an_approver_needs`, `test_whoami_shows_flags`) now plant and read through the store or the hash, with the same assertions. Slots of KS-704 and later record with the store's methods and call `catch_up(ctx.session, returned)`; a slot that only edits `ctx.session` records nothing. |
 | KS-701 | Scanner interface and rule engine | 5 | todo | | |
 | KS-702 | Classifier adapter | 5 | todo | | |
 | KS-703 | Combined scoring and output actions | 3 | todo | | |
@@ -164,8 +164,7 @@ skips hidden `.pth` files, so `import keystone` fails after `uv sync`. Setting
 call until the metering slot of Phase 8 updates the session. A policy that reads it sees 0 now. The
 session flags and the taint are in the same position until Phase 7.
 
-A session is saved whole when a call ends (`RedisSessionStore.save` is a `SET` of the document),
-and a call can now last up to 300 seconds in an approval hold. A long call that ends after another
-call changed the session's flags or taint writes its older copy back over them. Nothing changes
-them yet, so nothing is wrong today. The Phase 7 stories that set the flags must save the changes
-in a way that does not overwrite a newer session, or holding a call becomes a way to clear a taint.
+A session was saved whole when a call ended (`RedisSessionStore.save` was a `SET` of the
+document), and a call can last up to 300 seconds in an approval hold, so a long call that ended
+after another call changed the session's flags or taint wrote its older copy back over them.
+Fixed by KS-791 (ADR-0015): a session changes by merging.

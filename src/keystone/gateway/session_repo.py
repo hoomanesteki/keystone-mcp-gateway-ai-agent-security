@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from datetime import datetime
 
-from sqlalchemy import update
+from sqlalchemy import ARRAY, Boolean, DateTime, Text, bindparam, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -44,12 +44,28 @@ class SessionRepo:
         flags: Iterable[str] = (),
         tainted: bool = False,
     ) -> bool:
-        """Move `last_seen_at` forward and keep the flags and taint the session ended with.
-        Returns False when there is no such session."""
-        statement = (
-            update(McpSession)
-            .where(McpSession.id == session_id)
-            .values(last_seen_at=at, final_flags=sorted(set(flags)), tainted=tainted)
+        """Merge into the row: move `last_seen_at` forward, add the flags to those it has and set
+        the taint if it is set. Nothing is ever taken out, so two writers whose calls were
+        decided in another order, or a writer that knows less than the row, change nothing that
+        was already recorded (KS-791). Returns False when there is no such session."""
+        statement = _MERGE.bindparams(
+            bindparam("id", session_id, type_=Text),
+            bindparam("at", at, type_=DateTime(timezone=True)),
+            bindparam("flags", sorted({str(flag) for flag in flags}), type_=ARRAY(Text)),
+            bindparam("tainted", tainted, type_=Boolean),
         )
         async with self._sessionmaker() as session, session.begin():
             return bool(affected(await session.execute(statement)))
+
+
+_MERGE = text(
+    """
+    UPDATE sessions SET
+        last_seen_at = GREATEST(last_seen_at, :at),
+        final_flags = ARRAY(
+            SELECT DISTINCT f FROM unnest(final_flags || :flags) AS t(f) ORDER BY f
+        ),
+        tainted = tainted OR :tainted
+    WHERE id = :id
+    """
+)

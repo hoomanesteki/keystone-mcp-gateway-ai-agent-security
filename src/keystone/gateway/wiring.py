@@ -14,6 +14,7 @@ from keystone.gateway.interceptors.credentials import CredentialInterceptor, Hea
 from keystone.gateway.interceptors.pinning import PinningInterceptor, ToolStateLookup
 from keystone.gateway.interceptors.policy import PolicyInterceptor
 from keystone.gateway.pipeline import AuditSink, Dispatcher, Interceptor, Pipeline
+from keystone.gateway.sessions import SessionStore, refresh
 from keystone.gateway.stubs import ApprovalInterceptor as StubApprovalInterceptor
 from keystone.gateway.stubs import (
     BudgetInterceptor,
@@ -65,6 +66,10 @@ class PipelineDeps:
     # Where a call that needs approval is stored and waited for (KS-602). Without one the slot is
     # the stub that refuses it: the unit tests of the pipeline, and an app with no master key.
     approvals: ApprovalGate | None = None
+    # Where the sessions are kept. A call that waited for approval reads its session again from
+    # here before it is checked a second time (KS-791). Without one the call is checked on the
+    # copy it started with, which is what the unit tests of the pipeline want.
+    sessions: SessionStore | None = None
 
 
 def build_pipeline(
@@ -109,6 +114,11 @@ def build_pipeline(
     )
 
     async def check_again(ctx: CallContext) -> None:
+        # The copy of the session that the call carries is from before the wait, and another call
+        # of the session may have been tainted or flagged in the meantime. The policy decides
+        # again on the session as it is now. A session that cannot be read fails the call.
+        if deps.sessions is not None:
+            await refresh(deps.sessions, ctx.session)
         await pipeline.run_before(ctx, "approval", skip=NOT_REPEATED)
 
     revalidation.bind(check_again)

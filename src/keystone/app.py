@@ -189,6 +189,9 @@ def create_app(
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
     policy_engine = ObservedEngine(CedarPolicyEngine(policies), metrics.policy_evaluated)
+    session_store: SessionStore = (
+        RedisSessionStore(redis, SessionRepo(sessions)) if redis else InMemorySessionStore()
+    )
     pipeline = build_pipeline(
         settings,
         PipelineDeps(
@@ -200,13 +203,11 @@ def create_app(
             vault=vault,
             policy=policy_engine,
             approvals=approvals,
+            sessions=session_store,
         ),
         interceptors,
     )
     virtual.bind(pipeline)
-    session_store: SessionStore = (
-        RedisSessionStore(redis, SessionRepo(sessions)) if redis else InMemorySessionStore()
-    )
     tool_filter = PolicyToolFilter(
         policy_engine,
         RedisListCache(redis) if redis else MemoryListCache(),
