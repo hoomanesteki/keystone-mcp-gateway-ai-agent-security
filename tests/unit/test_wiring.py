@@ -2,6 +2,7 @@ import pytest
 
 from keystone.audit.sink import InMemoryAuditSink
 from keystone.core.types import CallContext, Effect, ToolResult
+from keystone.gateway.interceptors.policy import PolicyInterceptor
 from keystone.gateway.stubs import ApprovalInterceptor
 from keystone.gateway.wiring import INTERCEPTOR_ORDER, PipelineDeps, build_pipeline
 from keystone.settings import Settings
@@ -65,3 +66,25 @@ def test_an_override_replaces_one_slot_and_keeps_the_order(settings: Settings) -
 def test_an_unknown_override_is_an_error(settings: Settings) -> None:
     with pytest.raises(ValueError, match="polcy"):
         build_pipeline(settings, deps(), {"polcy": ApprovalInterceptor()})
+
+
+@pytest.mark.phase(4)
+def test_with_an_engine_the_policy_slot_is_the_real_interceptor(settings: Settings) -> None:
+    class Engine:
+        version = "v"
+
+        def evaluate(self, *args: object) -> None:
+            raise AssertionError("not asked in this test")
+
+    with_engine = PipelineDeps(
+        dispatcher=Echoing(),
+        audit=InMemoryAuditSink(),
+        policy=Engine(),  # type: ignore[arg-type]
+    )
+
+    real = build_pipeline(settings, with_engine)
+    stub = build_pipeline(settings, deps())
+
+    slot = INTERCEPTOR_ORDER.index("policy")
+    assert isinstance(real.interceptors[slot], PolicyInterceptor)
+    assert not isinstance(stub.interceptors[slot], PolicyInterceptor)

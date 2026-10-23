@@ -9,7 +9,7 @@
 set -euo pipefail
 
 # Keep in step with the job names in .github/workflows/ci.yml (a unit test compares them).
-CHECKS=(lint-type unit integration security docker commits docs)
+CHECKS=(lint-type unit policy integration security docker commits docs)
 BRANCHES=(main dev)
 
 dry_run=false

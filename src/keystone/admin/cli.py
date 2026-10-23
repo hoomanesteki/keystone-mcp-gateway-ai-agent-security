@@ -5,8 +5,10 @@ import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Annotated, Any
 
+import httpx2
 import structlog
 import typer
 import uvicorn
@@ -26,6 +28,10 @@ from keystone.identity.credential_repo import CredentialRepo, vault_from_setting
 from keystone.identity.middleware import AuthConfigError
 from keystone.identity.vault import UnknownUpstream, Vault, VaultError
 from keystone.logging import configure_logging
+from keystone.policy.store import PolicyLoadError
+from keystone.policy.testrunner import CaseError
+from keystone.policy.testrunner import render as render_report
+from keystone.policy.testrunner import run as run_policy_cases
 from keystone.registry.config import stdio_environments, tool_overrides
 from keystone.registry.naming import check_upstream_id
 from keystone.registry.pinning import (
@@ -65,6 +71,12 @@ cred_app = typer.Typer(
     help="Upstream credentials in the vault.", no_args_is_help=True, add_completion=False
 )
 app.add_typer(cred_app, name="cred")
+policy_app = typer.Typer(
+    help="Policies as code: reload them into a running Keystone.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(policy_app, name="policy")
 log = structlog.get_logger()
 
 
@@ -123,6 +135,11 @@ def serve(
         gateway_app = create_app(settings)
     except (AuthConfigError, VaultError) as exc:
         typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    except PolicyLoadError as exc:
+        typer.echo("error: the policies cannot be loaded:", err=True)
+        for problem in exc.problems:
+            typer.echo(f"  {problem}", err=True)
         raise typer.Exit(1) from None
     if migrate:
         migrate_database(settings.database_url.get_secret_value())
@@ -748,4 +765,99 @@ def cred_rotate_keys() -> None:
     text, ok = run_with_database(action)
     typer.echo(text)
     if not ok:
+        raise typer.Exit(1)
+
+
+RELOAD_PATH = "/admin/api/v1/policies/reload"
+RELOAD_TIMEOUT_S = 30.0
+
+
+@policy_app.command("reload")
+def policy_reload(
+    url: Annotated[
+        str,
+        typer.Option(
+            "--url", envvar="KEYSTONE_ADMIN_URL", help="Base address of the running Keystone."
+        ),
+    ] = "http://localhost:8080",
+    token: Annotated[
+        str | None,
+        typer.Option(
+            "--token",
+            envvar="KEYSTONE_ADMIN_TOKEN",
+            help="Access token of a user with the admin role. Prefer the environment variable: "
+            "an argument shows in the process list.",
+        ),
+    ] = None,
+) -> None:
+    """Make a running Keystone read its policy files again. A set with any problem is refused,
+    every problem is printed, and the set in force stays in force (exit code 1)."""
+    if not token:
+        typer.echo("error: no token: use --token or set KEYSTONE_ADMIN_TOKEN", err=True)
+        raise typer.Exit(1)
+    endpoint = url.rstrip("/") + RELOAD_PATH
+    try:
+        response = httpx2.post(
+            endpoint, headers={"Authorization": f"Bearer {token}"}, timeout=RELOAD_TIMEOUT_S
+        )
+    except httpx2.HTTPError as exc:
+        # The text of these errors can hold the address with credentials in it, so print the type.
+        typer.echo(f"error: cannot reach Keystone at {url} ({type(exc).__name__})", err=True)
+        raise typer.Exit(1) from None
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if response.status_code == 200:
+        state = "changed" if body.get("changed") else "unchanged"
+        typer.echo(f"policies reloaded: version {str(body.get('version'))[:12]} ({state})")
+        return
+    if response.status_code == 422:
+        typer.echo(
+            f"error: the new policies were refused; version {str(body.get('version'))[:12]} "
+            "stays in force:",
+            err=True,
+        )
+        for problem in body.get("errors", []):
+            typer.echo(f"  {problem}", err=True)
+        raise typer.Exit(1)
+    why = body.get("reason") or body.get("error") or "no reason given"
+    typer.echo(f"error: Keystone answered {response.status_code} ({why})", err=True)
+    raise typer.Exit(1)
+
+
+@policy_app.command("test")
+def policy_test(
+    policy_root: Annotated[
+        Path, typer.Argument(metavar="POLICY_ROOT", help="The directory with the policies.")
+    ],
+    cases: Annotated[
+        list[Path],
+        typer.Argument(metavar="CASES...", help="Case files, or directories that hold them."),
+    ],
+    coverage: Annotated[
+        bool,
+        typer.Option(
+            "--coverage",
+            help="Also list the policies no case matched, and fail if there are any.",
+        ),
+    ] = False,
+) -> None:
+    """Check that the policies decide the cases as the cases say (see docs/policies.md). Prints a
+    table, and exits 1 if any case fails, the policies or the cases cannot be read, or, with
+    --coverage, a policy was matched by no case."""
+    try:
+        report = run_policy_cases(policy_root, cases, coverage=coverage)
+    except PolicyLoadError as exc:
+        typer.echo("error: the policies cannot be loaded:", err=True)
+        for problem in exc.problems:
+            typer.echo(f"  {problem}", err=True)
+        raise typer.Exit(1) from None
+    except CaseError as exc:
+        typer.echo("error: the cases cannot be read:", err=True)
+        for problem in exc.problems:
+            typer.echo(f"  {problem}", err=True)
+        raise typer.Exit(1) from None
+    typer.echo(render_report(report))
+    if not report.ok:
         raise typer.Exit(1)

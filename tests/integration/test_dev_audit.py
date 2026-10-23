@@ -42,3 +42,24 @@ async def test_prod_has_no_dev_audit_endpoint(clean_env: None) -> None:
         response = await client.get("/_dev/audit")
 
     assert response.status_code == 404
+
+
+@pytest.mark.services
+@pytest.mark.phase(4)
+async def test_the_dev_audit_shows_the_decision_and_its_reasons(
+    keystone_app: KeystoneApp, mcp_client: McpConnect
+) -> None:
+    async with mcp_client(keystone_app) as client:  # alice
+        await client.call_tool("echo__echo", {"payload": "a"})
+        await client.call_tool(
+            "bank__transfer", {"from_account": "CHK-001", "to": "SAV-002", "amount": 5}
+        )
+        await client.call_tool("echo__nothing", {})
+
+    recent = httpx2.get(f"{keystone_app.base}/_dev/audit", timeout=10).json()["recent"]
+
+    assert [(r["tool"], r["effect"], r["reasons"]) for r in recent] == [
+        ("echo__echo", "allow", ["same-tenant-low-medium"]),
+        ("bank__transfer", "deny", ["default-deny"]),
+        ("echo__nothing", None, []),  # never reached the policy
+    ]

@@ -10,11 +10,14 @@ from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 
 from keystone import __version__
+from keystone.admin.api import create_admin_router
+from keystone.admin.auth import AdminAuth, AdminRefused, admin_refused_handler
 from keystone.audit.sink import InMemoryAuditSink
 from keystone.db.session import create_engine, make_sessionmaker
 from keystone.db.tenants import upsert_tenants
 from keystone.gateway.dispatch import UpstreamDispatcher
 from keystone.gateway.health import UpstreamHealth
+from keystone.gateway.interceptors.policy import MemoryListCache, PolicyToolFilter, RedisListCache
 from keystone.gateway.pipeline import AuditSink, Dispatcher, Interceptor
 from keystone.gateway.server import Gateway, mount_mcp
 from keystone.gateway.session_repo import SessionRepo
@@ -26,6 +29,10 @@ from keystone.identity.credential_repo import vault_from_settings
 from keystone.identity.metadata import add_metadata_route
 from keystone.identity.middleware import Authenticator
 from keystone.identity.vault import VaultError
+from keystone.policy.engine import CedarPolicyEngine
+from keystone.policy.schema_info import args_fields
+from keystone.policy.store import PolicyStore, reload_on_sighup
+from keystone.policy.versions import PolicyVersionRepo
 from keystone.registry.config import (
     apply_config_upstreams,
     seed_credentials,
@@ -68,6 +75,15 @@ def create_app(
             "so KEYSTONE_MASTER_KEYS must be set"
         )
     service_headers = vault.service_headers if vault else None
+    # The policies are read now, so a missing or invalid set stops startup before anything serves.
+    # Reloads later keep the set in force when the new one is refused.
+    policies = PolicyStore(
+        settings.policy.root,
+        [t.id for t in settings.tenants],
+        include_demo=settings.policy.include_demo,
+        recorder=PolicyVersionRepo(sessions),
+    )
+    policies.start()
     directory = UpstreamDirectory()
     pool = UpstreamPool(
         directory_client_factory(directory, health_timeout_s=settings.health.timeout_s)
@@ -97,8 +113,11 @@ def create_app(
     dispatcher: Dispatcher = UpstreamDispatcher(pool, health)
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
+    policy_engine = CedarPolicyEngine(policies)
     pipeline = build_pipeline(
-        settings, PipelineDeps(dispatcher, audit, tool_states=registry, vault=vault), interceptors
+        settings,
+        PipelineDeps(dispatcher, audit, tool_states=registry, vault=vault, policy=policy_engine),
+        interceptors,
     )
     # An empty KEYSTONE_REDIS_URL keeps session state in this process, for a single-process setup.
     redis = (
@@ -109,13 +128,19 @@ def create_app(
     session_store: SessionStore = (
         RedisSessionStore(redis, SessionRepo(sessions)) if redis else InMemorySessionStore()
     )
-    gateway = Gateway(settings, registry, session_store, pipeline)
+    tool_filter = PolicyToolFilter(
+        policy_engine,
+        RedisListCache(redis) if redis else MemoryListCache(),
+        ttl_s=settings.policy.list_cache_ttl_s,
+    )
+    gateway = Gateway(settings, registry, session_store, pipeline, tool_filter)
     registry.add_listener(gateway.notify_tools_changed)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             await upsert_tenants(sessions, settings.tenants)
+            await policies.record_current()
             # A config the registry cannot use (unknown tenant, a URL the SSRF guard refuses)
             # stops startup: serving with some upstreams silently missing is worse.
             await apply_config_upstreams(
@@ -123,6 +148,7 @@ def create_app(
                 settings.upstreams,
                 [t.id for t in settings.tenants],
                 allow_private=settings.allow_private_upstreams,
+                args=args_fields(policies.current.schema.text),
             )
             # Credentials given in the environment go into the vault now, before the first sync
             # needs them.
@@ -138,7 +164,9 @@ def create_app(
                 # and the periodic sync tries it again. It does not stop startup.
                 for report in await registry.sync_all():
                     log.info("startup_sync", **report.model_dump())
-                await stack.enter_async_context(background_tasks(registry, health, settings))
+                await stack.enter_async_context(
+                    background_tasks(registry, health, settings, policies)
+                )
                 await stack.enter_async_context(manager.run())
                 yield
         finally:
@@ -156,6 +184,9 @@ def create_app(
     app.state.audit = audit
     app.state.authenticator = authenticator
     app.state.vault = vault
+    app.state.policies = policies
+    app.add_exception_handler(AdminRefused, admin_refused_handler)
+    app.include_router(create_admin_router(AdminAuth(authenticator), policies))
     manager = mount_mcp(app, gateway, authenticator)
     add_metadata_route(app, settings)
 
@@ -164,13 +195,20 @@ def create_app(
 
         @app.get("/_dev/audit")
         async def dev_audit() -> dict[str, Any]:
-            """How many calls the in-memory audit sink holds, for the Phase 1 demo. The admin API
-            replaces it in Phase 5. It is not mounted in prod."""
+            """How many calls the in-memory audit sink holds, and the last 50 with the policy's
+            decision and reasons, for the demo and the smoke scripts. The admin API replaces it in
+            Phase 5. It is not mounted in prod."""
             recent = sink.records[-50:]
             return {
                 "count": len(sink.records),
                 "recent": [
-                    {"call_id": r["call_id"], "tool": r["tool"], "outcome": r["outcome"]}
+                    {
+                        "call_id": r["call_id"],
+                        "tool": r["tool"],
+                        "outcome": r["outcome"],
+                        "effect": r["decision"],
+                        "reasons": r["reasons"],
+                    }
                     for r in recent
                 ],
             }
@@ -207,13 +245,14 @@ def create_app(
 
 @asynccontextmanager
 async def background_tasks(
-    registry: RegistryService, health: UpstreamHealth, settings: Settings
+    registry: RegistryService, health: UpstreamHealth, settings: Settings, policies: PolicyStore
 ) -> AsyncIterator[None]:
     """Run the periodic sync (unless its interval is 0), the watch for changes made by other
-    processes and the health probes (unless their interval is 0) while the body of the `with`
-    runs."""
+    processes, the health probes (unless their interval is 0) and the policy reload on SIGHUP
+    while the body of the `with` runs."""
     async with anyio.create_task_group() as group:
         group.start_soon(registry.run_watch)
+        group.start_soon(reload_on_sighup, policies)
         if settings.registry.sync_interval_s > 0:
             group.start_soon(registry.run_periodic, settings.registry.sync_interval_s)
         if settings.health.interval_s > 0:

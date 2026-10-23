@@ -10,7 +10,7 @@ endef
 # Compose reads .env from the compose file's directory by default. Point it at the repo root instead.
 COMPOSE := docker compose -f deploy/docker-compose.yml $(if $(wildcard .env),--env-file .env)
 
-.PHONY: help prose commits setup lint fmt type test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo github-setup
+.PHONY: help prose commits setup lint fmt type policy test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo github-setup
 
 help:
 	@grep -E '^[a-z0-9-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | column -t -s $$'\t'
@@ -38,6 +38,9 @@ fmt: ## apply ruff fixes and formatting
 type: ## mypy
 	$(RUN) mypy
 
+policy: ## the policy cases, and every policy matched by a case
+	$(RUN) keystone policy test policies tests/policy_cases --coverage
+
 test-unit: ## unit tests and invariants that need no services
 	@$(call pytest,tests/unit tests/invariants -m "$(UNIT_MARKS)")
 
@@ -56,7 +59,7 @@ migrate: ## apply database migrations to KEYSTONE_DATABASE_URL
 
 ci-local: up-core ## the same steps as CI, run locally
 	uv sync --locked
-	$(MAKE) lint type test-unit test-int
+	$(MAKE) lint type policy test-unit test-int
 	gitleaks git --no-banner --redact .
 	@req=$$(mktemp) && uv export --no-emit-project -o $$req >/dev/null \
 		&& $(RUN) pip-audit -r $$req --no-deps --disable-pip; rc=$$?; rm -f $$req; exit $$rc
@@ -68,6 +71,7 @@ ci-local: up-core ## the same steps as CI, run locally
 gate: up ## everything a phase gate runs: make gate PHASE=N
 	@test -n "$(PHASE)" || { echo "usage: make gate PHASE=N" >&2; exit 2; }
 	$(MAKE) lint type
+	@if [ $(PHASE) -ge 4 ]; then $(MAKE) policy; fi
 	$(RUN) pytest --phase $(PHASE) tests/unit tests/integration tests/invariants tests/e2e
 	@k=0; while [ $$k -le $(PHASE) ]; do \
 		f=scripts/smoke/phase_$$k.sh; \

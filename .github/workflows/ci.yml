@@ -58,6 +58,22 @@ jobs:
       - name: pytest
         run: uv run pytest tests/unit tests/invariants -m "not services and not docker and not e2e and not slow"
 
+  policy:
+    name: policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.1
+        with:
+          enable-cache: true
+      - run: uv sync
+      # Every case must decide as it says, and every policy must be matched by a case: a pull
+      # request that opens access by accident flips a case, and one that adds a rule nobody tests
+      # lists it as unmatched.
+      - name: policy cases
+        run: uv run keystone policy test policies tests/policy_cases --coverage
+
   integration:
     name: integration
     runs-on: ubuntu-24.04

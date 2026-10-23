@@ -4,7 +4,8 @@
     uv run python scripts/smoke/mcp_probe.py call bank__get_balance '{"account": "CHK-001"}'
 
 `list` prints `tools: N` and then one name per line. `call` prints one line,
-`error=<true|false> code=<keystone code or -> ms=<time of the call>`, then the first text block.
+`error=<true|false> code=<keystone code or -> ms=<time of the call> call_id=<id>`, then the first
+text block.
 The URL comes from KEYSTONE_URL (default http://localhost:8080/mcp) and the bearer token from
 KEYSTONE_TOKEN. The exit code is 0 whenever Keystone answered, whatever the answer was; 2 means it
 could not be reached.
@@ -28,6 +29,7 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
 CODE_KEY = "keystone/code"
+CALL_ID_KEY = "keystone/call_id"
 TOKEN_ENV = "KEYSTONE_TOKEN"  # noqa: S105 - the name of the variable, not a token
 TIMEOUT_S = 30.0
 
@@ -54,8 +56,11 @@ async def call_tool(url: str, name: str, arguments: dict[str, Any]) -> None:
         started = time.perf_counter()
         result = await client.call_tool(name, arguments)
         elapsed_ms = (time.perf_counter() - started) * 1000
-    code = (result.meta or {}).get(CODE_KEY, "-")
-    print(f"error={str(result.is_error).lower()} code={code} ms={elapsed_ms:.1f}")
+    meta = result.meta or {}
+    print(
+        f"error={str(result.is_error).lower()} code={meta.get(CODE_KEY, '-')} ms={elapsed_ms:.1f} "
+        f"call_id={meta.get(CALL_ID_KEY, '-')}"
+    )
     for block in result.content:
         if isinstance(block, types.TextContent):
             print(block.text.splitlines()[0] if block.text else "")

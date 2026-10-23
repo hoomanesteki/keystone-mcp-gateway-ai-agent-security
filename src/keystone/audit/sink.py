@@ -37,6 +37,8 @@ class InMemoryAuditSink:
                 "upstream_id": ctx.tool.upstream_id,
                 "decision": ctx.decision.effect.value if ctx.decision else None,
                 "decision_source": ctx.decision.source if ctx.decision else None,
+                "reasons": list(ctx.decision.reasons) if ctx.decision else [],
+                "policy_version": ctx.decision.policy_version if ctx.decision else None,
                 "dispatched": ctx.dispatched,
                 "outcome": outcome,
                 "reject_code": reject.code.value if reject else None,

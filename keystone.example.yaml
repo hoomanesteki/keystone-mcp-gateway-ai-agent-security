@@ -29,7 +29,14 @@ upstreams:
       read_email: {risk: low, tags: [reads_untrusted, reads_sensitive]}
       send_email: {risk: high, tags: [external_effect], extract: {recipient_domain: "$.to | domain"}}
   - {id: files, tenant: acme, transport: http, url: "http://localhost:8102/mcp"}
-  - {id: bank, tenant: acme, transport: http, url: "http://localhost:8103/mcp"}
+  - id: bank
+    tenant: acme
+    transport: http
+    url: "http://localhost:8103/mcp"
+    tools:
+      get_balance: {risk: medium, tags: [reads_sensitive]}
+      # The amount in cents: `int` would cut 500.99 down to 500 and let it past a limit of 500.
+      transfer: {risk: high, tags: [external_effect], extract: {amount: "$.amount | cents"}}
   - {id: echo, tenant: acme, transport: http, url: "http://localhost:8104/mcp"}
   # Globex's own drive: `python -m examples.upstreams.files_server --port 8112` with
   # FILES_SEED=examples/fixtures/files-globex. Only globex's users see its tools.
@@ -37,6 +44,13 @@ upstreams:
     tenant: globex
     transport: http
     url: "http://localhost:8112/mcp"
+
+# The policies (Cedar). root has schema.cedarschema, default/, one directory per tenant, and demo/.
+# A tenant's rules are default/ plus demo/ (if include_demo) plus its own directory, each with an
+# access/ and an approval/ part. Both can be set with KEYSTONE_POLICY__<NAME>. See docs/runbook.md.
+policy:
+  root: policies
+  include_demo: false
 
 # Sign-in. KEYSTONE_OIDC_ISSUER is the `iss` of valid tokens (required); see docs/runbook.md for the
 # other OIDC variables. `mode: none` skips the check and makes every caller the dev principal. It is

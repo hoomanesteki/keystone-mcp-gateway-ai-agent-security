@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 import httpx2
 import pytest
+import yaml
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from mcp import Client
@@ -20,12 +21,20 @@ from redis.asyncio import Redis
 
 from keystone.app import create_app
 from keystone.audit.sink import InMemoryAuditSink
-from keystone.registry.config import UpstreamConfig
-from keystone.settings import AgentConfig, HealthSettings, RegistrySettings, Settings, TenantConfig
+from keystone.registry.config import ToolOverride, UpstreamConfig
+from keystone.settings import (
+    AgentConfig,
+    HealthSettings,
+    PolicySettings,
+    RegistrySettings,
+    Settings,
+    TenantConfig,
+)
 
 # Re-exported so tests/conftest.py can name one module: tests/unit/test_phase_plugin.py copies the
 # conftest and strips its single `pytest_plugins` line, so that line must stay on one line.
 from tests.fixtures.fake_idp import FakeIdp, fake_idp  # noqa: F401
+from tests.fixtures.policies import POLICY_ROOT, ROOT
 from tests.fixtures.redis import redis, test_redis_url  # noqa: F401
 from tests.fixtures.servers import ServerThread
 from tests.fixtures.upstreams import (  # noqa: F401
@@ -42,6 +51,16 @@ from tests.fixtures.upstreams import (  # noqa: F401
 AGENTS = {"support-agent": AgentConfig(trust="standard"), "ops-agent": AgentConfig(trust="high")}
 # The vault key of every test app. Made when the test run starts and never written anywhere.
 TEST_MASTER_KEY = Fernet.generate_key().decode()
+
+
+def demo_tools(upstream_id: str) -> dict[str, ToolOverride]:
+    """How risky the demo tools are and what a policy reads of a call: the classification the
+    compose stack runs with, taken from its own config file so the two cannot drift apart."""
+    compose = yaml.safe_load((ROOT / "deploy" / "keystone.compose.yaml").read_text())
+    for entry in compose["upstreams"]:
+        if entry["id"] == upstream_id:
+            return {name: ToolOverride(**config) for name, config in entry.get("tools", {}).items()}
+    return {}
 
 
 def auth_options(idp: FakeIdp) -> dict[str, Any]:
@@ -62,6 +81,7 @@ def globex_upstream(files: GlobexFiles) -> UpstreamConfig:
         url=files.url,
         credential_mode="static",
         credential_env={"X-Api-Key": "FILES_GLOBEX_API_KEY"},
+        tools=demo_tools(files.name),
     )
 
 
@@ -75,6 +95,7 @@ def credentialed_upstreams(upstreams: DemoUpstreams, tenant: str = "acme") -> li
             url=upstreams.url(name),
             credential_mode="static",
             credential_env={"X-Api-Key": f"{name.upper()}_API_KEY"},
+            tools=demo_tools(name),
         )
         for name in NAMES
     ]
@@ -136,7 +157,9 @@ def keystone_app_factory(
             app_options.setdefault("environ", keyed_servers.environ())
         else:
             upstreams = [
-                UpstreamConfig(id=name, tenant="acme", url=demo_upstreams.url(name))
+                UpstreamConfig(
+                    id=name, tenant="acme", url=demo_upstreams.url(name), tools=demo_tools(name)
+                )
                 for name in NAMES
             ]
         if globex:
@@ -155,6 +178,8 @@ def keystone_app_factory(
             "tenants": tenants,
             "allow_private_upstreams": True,
             "upstreams": upstreams,
+            # The repository's own policies, wherever the tests are run from.
+            "policy": PolicySettings(root=POLICY_ROOT, include_demo=True),
             **auth_options(fake_idp),
         }
         options.update(settings or {})
@@ -202,6 +227,7 @@ def start_keystone(
             upstreams=upstreams,
             registry=registry or RegistrySettings(sync_interval_s=0),
             health=health or HealthSettings(interval_s=0),
+            policy=PolicySettings(root=POLICY_ROOT, include_demo=True),
             **auth_options(fake_idp),
         )
         app = create_app(settings, **app_options)

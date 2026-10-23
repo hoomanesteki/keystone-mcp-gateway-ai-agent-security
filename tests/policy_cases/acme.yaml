@@ -1,0 +1,77 @@
+# Acme's own rules: mail to anyone outside acme.test needs approval (policies/acme/approval).
+# The tool is the mail server's send_email, and its extractor reads the recipient's domain.
+
+- name: an operator's mail to a colleague goes out
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: &send
+    name: mail__send_email
+    risk: high
+    tags: [external_effect]
+    extract: {recipient_domain: "$.to | domain"}
+  arguments: {to: colleague@acme.test, subject: Q3, body: The numbers are in}
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: the domain is compared in lower case
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: *send
+  arguments: {to: Colleague@ACME.test, subject: Q3, body: The numbers are in}
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: mail outside acme needs approval
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: *send
+  arguments: {to: bob@evil.test, subject: Q3, body: The numbers are in}
+  expect: require_approval
+  expect_reasons: [external-email-needs-approval]
+
+- name: a look-alike domain needs approval
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: *send
+  arguments: {to: bob@acme.test.evil.test, subject: Q3, body: The numbers are in}
+  expect: require_approval
+  expect_reasons: [external-email-needs-approval]
+
+- name: two recipients, one outside, need approval
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: *send
+  arguments: {to: "b@acme.test, a@evil.test", subject: Q3, body: The numbers are in}
+  expect: require_approval
+  expect_reasons: [external-email-needs-approval]
+
+- name: a recipient with a display name needs approval
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: *send
+  arguments: {to: "Bob <bob@acme.test>", subject: Q3, body: The numbers are in}
+  expect: require_approval
+  expect_reasons: [external-email-needs-approval]
+
+- name: support is refused before the mail rule is asked
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: *send
+  arguments: {to: bob@evil.test, subject: Q3, body: The numbers are in}
+  expect: deny
+  expect_reasons: [default-deny]
+
+- name: reading mail is not sending it
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: {name: mail__read_email, risk: low, tags: [reads_untrusted, reads_sensitive]}
+  expect: allow
+  expect_reasons: [same-tenant-low-medium]
+
+- name: globex has no mail rule
+  tenant: globex
+  principal: {user: gina, groups: [operators], agent: ops-agent, trust: high}
+  tool: *send
+  arguments: {to: bob@evil.test, subject: Q3, body: The numbers are in}
+  expect: allow
+  expect_reasons: [operators-high]

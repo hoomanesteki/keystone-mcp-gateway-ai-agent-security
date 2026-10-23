@@ -41,6 +41,7 @@ def test_migrations_up_down(clean_env: None) -> None:
             "tools",
             "sessions",
             "credentials",
+            "policy_versions",
         }
 
         command.downgrade(config, "base")

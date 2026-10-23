@@ -19,6 +19,7 @@ upstreams and Keystone, and waits until every container reports healthy. Cold st
 | `make test-e2e` | The end-to-end tests against the running stack. The nightly workflow runs `make up` and then this |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit count is off |
+| `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 13 tools; olivia's transfer of 900 shows `require_approval` / `approve-transfer-over-500` in the audit and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 20 seconds. |
 | `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), alice's 15 tools, bob's 3 globex tools and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
 | `bash scripts/smoke/phase_2.sh` | Lists the 15 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
 
@@ -213,6 +214,9 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_MASTER_KEYS` | unset | Fernet keys for the credential vault, comma separated. The first encrypts, all decrypt. Needed by `keystone cred ...` and, from KS-306, by the gateway. |
 | `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is when `KEYSTONE_AUTH__MODE=none`. Refused in any other mode. |
 | `KEYSTONE_AUTH__ALLOW_UNKNOWN_AGENTS` | `false` | Let an agent that is not under `agents` in with trust `low`. Also `auth.allow_unknown_agents` in the YAML. |
+| `KEYSTONE_POLICY__ROOT` | `policies` | The directory with the schema and the policies (see Policies). A relative path is read from the working directory; the image has its own copy at `/app/policies`, and compose mounts this checkout's at `/etc/keystone/policies`. Also `policy.root` in the YAML. |
+| `KEYSTONE_POLICY__INCLUDE_DEMO` | `false` | Also read `demo/`, the rules that go with the demo upstreams. Compose turns it on. |
+| `KEYSTONE_POLICY__LIST_CACHE_TTL_S` | `60` | How long the answer to "which tools may this caller see" is kept, per caller and policy version. `0` turns the cache off. |
 
 Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
 
@@ -291,12 +295,20 @@ demands a key even to list its tools needs a static credential as well, or its p
 Keystone marks it down.
 
 A call whose upstream gets no credential (a `static` upstream whose credential was deleted, say)
-reaches the upstream without one. If the upstream answers 401, the agent gets `KS_UPSTREAM_ERROR`,
-after the reconnect attempts, which take about 4 seconds.
+reaches the upstream without one. If the upstream answers 401 or 403, the agent gets
+`KS_UPSTREAM_ERROR` ("the upstream server refused the credentials Keystone sent") at once: a
+connection attempt that meets either status is not retried, because the same credential gets the
+same answer, and the tests hold the call under 1 s. The log line `upstream_credentials_refused`
+names the upstream. A connection that fails for any other reason still goes through the reconnect
+backoff (0.2, 0.8 and 3.2 s).
 
-Not covered: an upstream that copies the key it received into a tool result. Keystone passes
-results on unchanged, so the key would reach the agent. The demo servers never do this; a server
-you do not trust belongs behind the sandbox of Phase 8.
+An upstream that copies the key it received into a tool result does not hand it to the agent. Before
+a result leaves dispatch, every credential value Keystone sent for the call, whatever its length,
+and every secret registered with the log scrubber are replaced with `[redacted]`, in all text of
+the result and in its structured content. The log line `upstream_result_redacted` names the
+upstream and the tool, so an operator can see which server does it. Only a value that comes back as
+it was sent is caught: an upstream that reverses, splits or encodes the key first is not, and a
+server you do not trust belongs behind the sandbox of Phase 8.
 
 Header names are letters, digits and dashes. `Host`, `Content-Type`, `Mcp-Session-Id` and the
 other headers the HTTP layer owns are refused. Values are printable ASCII on one line, up to 4096
@@ -335,6 +347,139 @@ KEYSTONE_TOKEN=$(scripts/get_token.sh bob support-agent) \
   uv run python scripts/smoke/mcp_probe.py call bank__get_balance '{"account": "CHK-001"}'
 # error=true code=KS_TOOL_NOT_FOUND
 ```
+
+## Policies
+
+The rules that decide a call are Cedar policies kept in files, read when Keystone starts, checked
+before they are used, and identified by a version. `docs/policies.md` explains how to write them,
+with examples and the usual mistakes. Everything is under one directory (`policy.root`):
+
+| Path | What it holds |
+|---|---|
+| `schema.cedarschema` | The schema, the one source for entities and context (plan section 3.8) |
+| `default/access/*.cedar`, `default/approval/*.cedar` | Rules for every tenant |
+| `<tenant>/access/*.cedar`, `<tenant>/approval/*.cedar` | Rules for one tenant, named by its id |
+| `demo/access/*.cedar`, `demo/approval/*.cedar` | Rules for the demo upstreams, read when `policy.include_demo` is on |
+
+A tenant's access set is `default/` plus `demo/` (if on) plus its own directory, and so is its
+approval set. The access set is standard Cedar: a call is denied unless a permit matches and no
+forbid does. The approval set holds permits only, and is asked after access allowed: a permit that
+matches means a person has to approve the call.
+
+### How a call is decided
+
+The policy slot runs after the pinning check and before approval and credentials, so a refused
+call never has its credential opened. It reads the arguments a tool's `extract` config names,
+builds the entities (the user as `Keystone::User::"<tenant>:<user>"` with its groups as parents,
+the tool with its upstream, risk, risk level and tags) and the context (agent, trust, session
+flags, taint, call count, hour in UTC and the extracted `args`), and asks the engine:
+
+| The engine says | The agent gets | The audit record has |
+|---|---|---|
+| allow | the call goes on | `allow`, with the ids of the permits that allowed it |
+| deny | `KS_DENIED`, "denied by policy: `<ids>`", and the ids in `_meta` as `keystone/reasons` | `deny`, with the ids of the forbids that matched, or `default-deny` when nothing allowed it |
+| require approval | until Phase 6 the approval stub refuses it: `KS_DENIED`, "approval not available" | `require_approval`, with the ids of the approval permits that matched |
+| the rules could not be evaluated | `KS_DENIED` with the reason `policy-error` | `deny`, reason `policy-error` |
+
+The last row is the fail-closed rule. It covers a policy that failed to evaluate in either pass
+(Cedar skips such a policy, so a broken `forbid` would otherwise not forbid), a context the schema
+refuses (an `args` key it does not know), a tenant with no set, and any exception. The cause goes
+to the log as `policy_evaluation_failed`, naming the policy by its id, and never to the agent. A
+set with no rule that allows anything denies every call with `default-deny` (invariant I6).
+
+`GET /_dev/audit` shows each recent call's `effect` and `reasons`, so the decision can be read
+without a database.
+
+### The default pack
+
+| File | Policy | What it does |
+|---|---|---|
+| `default/access/base.cedar` | `same-tenant-low-medium` | Anyone may list and call low and medium risk tools of their own tenant |
+| | `operators-high` | Members of `operators` may also use high risk tools of their tenant |
+| | `admins-critical` | Members of `admins` may use critical tools of their tenant |
+| | `deny-cross-tenant` | No one uses another tenant's tool, whatever else allows it |
+| `demo/approval/bank.cedar` | `approve-transfer-over-500` | A transfer over 500, or one whose amount could not be read, needs approval |
+| `acme/approval/mail.cedar` | `external-email-needs-approval` | A message to anyone outside `acme.test`, or to a recipient that is not one plain address, needs approval |
+
+Risk comes from the upstream config, so in the local stack `mail__send_email` and
+`bank__transfer` are high risk: support (alice) is refused both with `default-deny`, and an
+operator (olivia) is allowed `bank__transfer` up to 500 and `mail__send_email` to `acme.test`
+(`operators-high`), and asked about the rest. Until Phase 6 a call that needs approval is refused
+by the approval stub (`KS_DENIED`, "approval not available") and nothing is sent or moved.
+`scripts/smoke/phase_4.sh` runs the demo.
+
+### The tool list
+
+`tools/list` shows a caller only the tools whose `list_tool` the policy allows. In the local stack
+support sees 13 of acme's 15 tools and operators see all 15, because `mail__send_email` and
+`bank__transfer` are high risk and only operators may use them. The list is only a convenience. Every call is decided again when it is
+made, so a tool that is not listed is still refused if it is called by name. A listing that cannot
+be decided shows nothing.
+
+The answers are kept for `policy.list_cache_ttl_s` seconds (60) per caller and policy version, in
+Redis under `ks:policy:listcache:{principal_hash}:{version}`, or in the process when there is no
+Redis. The caller is the tenant, user, groups, agent, trust and roles. A reload changes the
+version, so the next listing is decided under the new rules at once. A tool that is new, or whose
+risk or tags changed, is decided again without waiting for the entry to expire. A listing does not
+depend on the session, so a policy for `list_tool` cannot read the session flags. Redis being down
+only means the answers are worked out again.
+
+### What a load checks
+
+A set with any problem is refused whole, and every problem is listed with the file it is in:
+
+- The schema parses, and every policy validates against it. A misspelled attribute, an optional
+  attribute read without `has`, a type error and an unknown entity type or action are all caught.
+- Every policy has `@id("kebab-case-name")`. The id is what the audit log shows as the reason for
+  a decision, so it is required, unique within a tenant's combined set (access and approval
+  together), and not one of the names the engine uses itself (`default-deny`, `policy-error`).
+- The approval set has no `forbid`. A policy there can ask for approval but cannot block a call,
+  so a forbid would not do what its author expects.
+- Policy templates (`?principal`) are refused: they do nothing until linked.
+- A directory or file that Cedar would never read is an error too: `aproval/` instead of
+  `approval/`, `base.cdar` instead of `base.cedar`, a directory that is not `default`, `demo` or
+  a configured tenant, a `.cedar` file outside `access/` and `approval/`. A rule that silently does
+  not load is a rule someone believes is in force. Hidden files (`.DS_Store`, editor swap files)
+  are ignored. With no tenant configured nothing can be served, so tenant directories are not
+  read and not checked.
+
+Starting with a set that has a problem stops Keystone, and `keystone serve` prints each problem. A
+reload with one is refused and the set in force stays in force.
+
+### Versions
+
+The version of a set is the sha256 of its files, the schema included, taken as sorted
+`(relative path, content)` pairs. It does not depend on timestamps or on the order the files were
+written, so the same files give the same version on every start. Each version that is loaded is
+recorded in `policy_versions` with every file's path, sha256 and content, so the rules in force at
+the time of a decision can be read back from the version the audit record names.
+
+### Testing
+
+`uv run keystone policy test policies tests/policy_cases --coverage` runs the cases in
+`tests/policy_cases/` through the loader and the engine, prints one row per case and exits 1 if any
+case decides differently or a policy was matched by no case. The `policy` job of CI runs it on every
+push, and `make gate` expects it to pass. `docs/policies.md` describes the case format.
+
+### Reloading
+
+| How | What it does |
+|---|---|
+| `keystone policy reload` | Calls the endpoint below. `--url` (or `KEYSTONE_ADMIN_URL`, default `http://localhost:8080`) is the running Keystone, and `--token` (or `KEYSTONE_ADMIN_TOKEN`) is an access token of a user with the `admin` role. Exits 1 and prints every problem when the set is refused. |
+| `POST /admin/api/v1/policies/reload` | Needs the `admin` role. 200: `{"version", "previous", "changed"}`. 422: `{"error": "invalid_policies", "errors": [...], "version": <the version still in force>}`. 401, 403 and 503 are as for `/mcp`. |
+| `kill -HUP <pid>` | The same reload in the process that gets the signal. A refused set is logged as `policy_sighup_refused` and nothing changes. |
+
+```bash
+export KEYSTONE_ADMIN_TOKEN=$(scripts/get_token.sh root keystone-cli)
+uv run keystone policy reload
+# policies reloaded: version 4f0c8a1d92b3 (unchanged)
+```
+
+The admin API checks the token with the code that checks it for `/mcp`, but the caller does not
+have to be a listed agent: `keystone-cli` is how the CLI signs in, and it is not under `agents`.
+What lets a caller in is the `admin` role (user `root` in the local realm). A reload runs one at a
+time. It records the new version before it puts the set in force, so a set that could not be
+recorded is not used.
 
 ## Upstreams
 
@@ -400,6 +545,31 @@ when you run `keystone registry sync`. Each tool is stored with the SHA-256 of i
 of its input schema. The `tools` block of an upstream in the YAML sets risk, tags, cost, timeout
 and extractors by the upstream's own tool name (for example `send_email`, not `mail__send_email`).
 A tool without an entry has risk `medium`, no tags and no cost.
+
+An extractor reduces a call's arguments to a fact a policy may read, such as the amount of a
+transfer or the domain of a recipient. The `extract` map of a tool pairs a field of the schema's
+`args` record with a path and pipes:
+
+```yaml
+tools:
+  send_email: {risk: high, tags: [external_effect], extract: {recipient_domain: "$.to | domain"}}
+  transfer:   {risk: high, tags: [external_effect], extract: {amount: "$.amount | cents"}}
+```
+
+The path is `$.a`, `$.a.b` or `$.a[0]`, in any mix. The pipes are `int` (cut the fraction), `cents`
+(times 100, rounded half up), `domain` (the domain of one plain email address, in lower case),
+`lower` and `len` (of a text or a list). The key must be a field of `args` in
+`policies/schema.cedarschema` (`amount`, `recipient_domain`, `path` or `count`), and the pipes
+must give the type the schema says. Keystone stops at startup, naming the upstream, the tool and
+the key, if one is not. An argument that is not there, or that a pipe cannot use, leaves the key
+out for that call and logs why at debug level, without the value. A policy has to ask
+`context.args has amount` before it reads the field.
+
+Two cases are treated so that a rule is not skipped by accident. A number beyond the range of a
+Cedar `Long` (about 9.2 x 10^18) is capped at the range, so a rule that says "over 500" still sees a
+transfer of 10^30. And `domain` accepts one plain address: `a@evil.test,b@acme.test`, a display
+name or a comment has no domain. With `int`, an amount of 500.99 becomes 500; use `cents` for
+money and write the limit in cents.
 
 | Command | What it does |
 |---|---|
@@ -532,8 +702,9 @@ without it being written into the client. `/healthz`, `/readyz` and that documen
 With `KEYSTONE_AUTH__MODE=none` (dev and test only) there is no check, and every caller is the dev
 principal. Keep that on localhost.
 
-`GET /_dev/audit` returns how many calls the in-memory audit log holds and the last 50. It exists
-for the Phase 1 demo, is not mounted when `KEYSTONE_ENV=prod`, and goes away when the admin API
+`GET /_dev/audit` returns how many calls the in-memory audit log holds and the last 50, each with
+its tool, outcome, the policy's decision (`effect`) and the `reasons`. It exists for the demo and
+the smoke scripts, is not mounted when `KEYSTONE_ENV=prod`, and goes away when the admin API
 arrives in Phase 5.
 
 Every result carries `keystone/call_id` in its `_meta`. A call that Keystone refuses (unknown

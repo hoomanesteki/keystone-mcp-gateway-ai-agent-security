@@ -24,12 +24,12 @@ async def test_bob_lists_only_globex(keystone_app_factory: Factory, mcp_client: 
 
     async with mcp_client(app, user="bob") as bob:
         bobs = {t.name for t in (await bob.list_tools()).tools}
-    async with mcp_client(app, user="alice") as alice:
-        alices = {t.name for t in (await alice.list_tools()).tools}
+    async with mcp_client(app, user="olivia") as olivia:  # an operator sees all twelve (KS-406)
+        olivias = {t.name for t in (await olivia.list_tools()).tools}
 
     assert bobs == GLOBEX_TOOLS
-    assert len(alices) == 12 and alices.isdisjoint(GLOBEX_TOOLS)
-    assert {name.partition("__")[0] for name in alices} == {"mail", "files", "bank", "echo"}
+    assert len(olivias) == 12 and olivias.isdisjoint(GLOBEX_TOOLS)
+    assert {name.partition("__")[0] for name in olivias} == {"mail", "files", "bank", "echo"}
 
 
 async def test_bob_cannot_call_acme_tool(

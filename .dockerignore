@@ -6,5 +6,6 @@
 !LICENSE
 !src/
 !examples/
+!policies/
 **/__pycache__
 **/*.pyc

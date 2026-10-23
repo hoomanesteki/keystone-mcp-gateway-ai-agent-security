@@ -30,7 +30,7 @@ EXPECTED_TOOLS = {
 @pytest.mark.services
 @pytest.mark.phase(1)
 async def test_tools_list_namespaced(keystone_app: KeystoneApp, mcp_client: McpConnect) -> None:
-    async with mcp_client(keystone_app) as client:
+    async with mcp_client(keystone_app, user="olivia") as client:  # support does not see all twelve
         tools = (await client.list_tools()).tools
 
     assert {t.name for t in tools} == EXPECTED_TOOLS

@@ -19,6 +19,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from keystone.core.types import Risk, ToolTag
 from keystone.identity.vault import HEADER_NAME, Vault
+from keystone.policy.extractors import check_extractors
+from keystone.policy.schema_info import ArgField
 from keystone.registry.naming import check_upstream_id
 from keystone.registry.repo import CredentialMode, UpstreamRepo, UpstreamSpec
 from keystone.registry.ssrf import UnsafeUpstreamUrl, check_upstream_url
@@ -121,7 +123,10 @@ class ConfigReport:
 
 
 async def _problems(
-    upstreams: Sequence[UpstreamConfig], tenant_ids: Collection[str], allow_private: bool
+    upstreams: Sequence[UpstreamConfig],
+    tenant_ids: Collection[str],
+    allow_private: bool,
+    args: Mapping[str, ArgField] | None,
 ) -> list[str]:
     problems: list[str] = []
     seen: set[str] = set()
@@ -130,6 +135,10 @@ async def _problems(
         if upstream.id in seen:
             problems.append(f"{name} is listed twice")
         seen.add(upstream.id)
+        if args is not None:
+            for tool_name, override in upstream.tools.items():
+                for problem in check_extractors(override.extract, args):
+                    problems.append(f"{name} tool {tool_name!r}: {problem}")
         if upstream.transport == "builtin":
             continue
         if upstream.tenant is None:
@@ -164,10 +173,12 @@ async def apply_config_upstreams(
     tenant_ids: Collection[str],
     *,
     allow_private: bool = False,
+    args: Mapping[str, ArgField] | None = None,
 ) -> ConfigReport:
     """Make the database match the config. Raises ConfigError, before writing anything, when an
-    entry is unusable."""
-    problems = await _problems(upstreams, tenant_ids, allow_private)
+    entry is unusable. `args` are the fields of the schema's args record (KS-405): an `extract`
+    key or spec that does not fit them is a problem. Without it the extractors are not checked."""
+    problems = await _problems(upstreams, tenant_ids, allow_private, args)
     if problems:
         raise ConfigError("; ".join(problems))
 

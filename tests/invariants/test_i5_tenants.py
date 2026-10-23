@@ -43,7 +43,8 @@ async def test_i5(
     seen: dict[str, set[str]] = {}
     refused: dict[str, set[str]] = {}
 
-    for user, own, other in (("alice", ACME, GLOBEX), ("bob", GLOBEX, ACME)):
+    # Olivia is an operator, so she sees every tool of her tenant (KS-406).
+    for user, own, other in (("olivia", ACME, GLOBEX), ("bob", GLOBEX, ACME)):
         async with mcp_client(app, user=user) as client:
             seen[user] = {t.name for t in (await client.list_tools()).tools}
             refused[user] = set()
@@ -69,7 +70,7 @@ async def test_i5(
     records = app.audit.records
     assert len(records) == len(ACME) + len(GLOBEX)
     assert {(r["reject_code"], r["dispatched"]) for r in records} == {("KS_TOOL_NOT_FOUND", False)}
-    assert {r["user_id"]: r["tenant_id"] for r in records} == {"alice": "acme", "bob": "globex"}
+    assert {r["user_id"]: r["tenant_id"] for r in records} == {"olivia": "acme", "bob": "globex"}
 
 
 class LeakyRegistry:
@@ -99,9 +100,9 @@ async def test_a_registry_that_forgets_the_tenant_still_does_not_leak(
     gateway = app.app.state.gateway
     gateway.registry = LeakyRegistry(gateway.registry)
 
-    async with mcp_client(app, user="alice") as alice:
-        listed = {t.name for t in (await alice.list_tools()).tools}
-        called = await alice.call_tool("files_globex__read_file", {"path": "README.txt"})
+    async with mcp_client(app, user="olivia") as olivia:
+        listed = {t.name for t in (await olivia.list_tools()).tools}
+        called = await olivia.call_tool("files_globex__read_file", {"path": "README.txt"})
 
     assert listed == ACME
     assert called.is_error and called.meta is not None

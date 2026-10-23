@@ -71,6 +71,22 @@ class RegistrySettings(BaseModel):
     cache_ttl_s: float = Field(default=2.0, ge=0)
 
 
+class PolicySettings(BaseModel):
+    """Where the policies are and which of them apply (KS-403)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # The directory with schema.cedarschema, default/, one directory per tenant and demo/. A
+    # relative path is read from the working directory.
+    root: Path = Path("policies")
+    # Also read demo/, the policies that go with the demo upstreams (transfers over 500 need
+    # approval). Off by default: a deployment that is not the demo does not want them.
+    include_demo: bool = False
+    # How long the list of tools a caller may see is kept, per caller and policy version. A reload
+    # changes the version, so it never serves an answer from the old rules.
+    list_cache_ttl_s: float = Field(default=60.0, ge=0)
+
+
 class HealthSettings(BaseModel):
     """How the gateway watches its upstreams (KS-209)."""
 
@@ -125,6 +141,7 @@ class Settings(BaseSettings):
     allow_private_upstreams: bool = False
     registry: RegistrySettings = Field(default_factory=RegistrySettings)
     health: HealthSettings = Field(default_factory=HealthSettings)
+    policy: PolicySettings = Field(default_factory=PolicySettings)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
     auth: AuthSettings = Field(default_factory=AuthSettings)
     # Token validation (KS-303). `oidc_issuer` is the value tokens carry in `iss`. Keystone reads

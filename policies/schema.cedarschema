@@ -1,0 +1,25 @@
+namespace Keystone {
+  entity Tenant;
+  entity Group;
+  entity User in [Group] { tenant: Tenant };
+  entity Upstream { tenant: Tenant };
+  entity Tool in [Upstream] {
+    tenant: Tenant,
+    risk: String,          // "low" | "medium" | "high" | "critical"
+    risk_level: Long,      // 1..4, for comparisons
+    tags: Set<String>,
+  };
+  action list_tool, call_tool appliesTo {
+    principal: [User],
+    resource: [Tool],
+    context: {
+      agent_id: String,
+      agent_trust: String,
+      session_flags: Set<String>,
+      session_tainted: Bool,
+      call_count: Long,
+      hour_utc: Long,
+      args: { amount?: Long, recipient_domain?: String, path?: String, count?: Long },
+    }
+  };
+}
