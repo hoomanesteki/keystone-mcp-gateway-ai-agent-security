@@ -364,3 +364,21 @@ async def test_cli_adds_a_stdio_upstream_with_its_command(
     assert row.command == ["python", "-m", "my_server", "--transport", "stdio"]
     assert without_command.exit_code == 1
     assert "needs a command" in without_command.output
+
+
+@pytest.mark.phase(6)
+async def test_neither_the_cli_nor_the_config_registers_an_upstream_called_keystone(
+    clean_env: None, test_database_url: str, sessionmaker: Sessions
+) -> None:
+    await upsert_tenants(sessionmaker, [ACME])
+
+    refused = await invoke(
+        test_database_url,
+        ["upstream", "add", "keystone", "--tenant", "acme", "--url", "http://127.0.0.1:9/mcp"],
+    )
+    with pytest.raises(ValueError, match="reserved"):
+        UpstreamConfig(id="keystone", tenant="acme", url="http://127.0.0.1:9/mcp")
+
+    assert refused.exit_code == 1
+    assert "reserved for Keystone's own tools" in refused.output
+    assert await UpstreamRepo(sessionmaker).list() == []

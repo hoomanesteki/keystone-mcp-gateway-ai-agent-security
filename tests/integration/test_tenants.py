@@ -7,6 +7,7 @@ from typing import Any
 import httpx2
 import pytest
 
+from tests.fixtures.approvals import VIRTUAL_TOOLS
 from tests.fixtures.fake_idp import FakeIdp
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.mcp_results import texts
@@ -27,9 +28,16 @@ async def test_bob_lists_only_globex(keystone_app_factory: Factory, mcp_client: 
     async with mcp_client(app, user="olivia") as olivia:  # an operator sees all twelve (KS-406)
         olivias = {t.name for t in (await olivia.list_tools()).tools}
 
-    assert bobs == GLOBEX_TOOLS
-    assert len(olivias) == 12 and olivias.isdisjoint(GLOBEX_TOOLS)
-    assert {name.partition("__")[0] for name in olivias} == {"mail", "files", "bank", "echo"}
+    # Keystone's own two tools are offered to both, and nothing of the other tenant's.
+    assert bobs == GLOBEX_TOOLS | VIRTUAL_TOOLS
+    assert len(olivias) == 12 + len(VIRTUAL_TOOLS) and olivias.isdisjoint(GLOBEX_TOOLS)
+    assert {name.partition("__")[0] for name in olivias} == {
+        "mail",
+        "files",
+        "bank",
+        "echo",
+        "keystone",
+    }
 
 
 async def test_bob_cannot_call_acme_tool(
@@ -158,7 +166,7 @@ async def test_a_request_cannot_name_another_tenant(
     )
 
     names = set(tool_names(listed))
-    assert names == GLOBEX_TOOLS
+    assert names == GLOBEX_TOOLS | VIRTUAL_TOOLS
 
 
 def tool_names(response: httpx2.Response) -> list[str]:

@@ -5,6 +5,7 @@ from collections.abc import Callable
 import pytest
 
 from keystone.core.types import ToolRef
+from tests.fixtures.approvals import VIRTUAL_TOOLS
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.mcp_results import texts
 from tests.fixtures.upstreams import DemoUpstreams, GlobexFiles
@@ -59,7 +60,7 @@ async def test_i5(
                     and "forbidden" not in texts(result)[0].lower()
                 )
                 refused[user].add(name)
-        assert seen[user] == own and seen[user].isdisjoint(other)
+        assert seen[user] == own | VIRTUAL_TOOLS and seen[user].isdisjoint(other)
         assert refused[user] == other
 
     # Nothing reached the other tenant's upstreams, and every refusal was audited as such.
@@ -104,7 +105,7 @@ async def test_a_registry_that_forgets_the_tenant_still_does_not_leak(
         listed = {t.name for t in (await olivia.list_tools()).tools}
         called = await olivia.call_tool("files_globex__read_file", {"path": "README.txt"})
 
-    assert listed == ACME
+    assert listed == ACME | VIRTUAL_TOOLS
     assert called.is_error and called.meta is not None
     assert called.meta["keystone/code"] == "KS_TOOL_NOT_FOUND"
     assert globex_files.state()["calls"] == []

@@ -39,6 +39,7 @@ from keystone.core.ids import new_id
 from keystone.core.types import CallContext, Principal, SessionState, ToolRef, ToolResult
 from keystone.gateway.pipeline import Pipeline
 from keystone.gateway.sessions import SessionStore
+from keystone.gateway.virtual_tools import VirtualTools
 from keystone.identity.middleware import (
     PRINCIPAL_KEY,
     SESSION_HEADER,
@@ -47,6 +48,7 @@ from keystone.identity.middleware import (
     SessionBindings,
     principal_key,
 )
+from keystone.registry.naming import is_virtual
 from keystone.registry.service import ToolLookup
 from keystone.settings import Settings
 from keystone.telemetry.tracing import incoming_trace
@@ -75,6 +77,7 @@ class Gateway:
         sessions: SessionStore,
         pipeline: Pipeline,
         tool_filter: ToolFilter | None = None,
+        virtual: VirtualTools | None = None,
     ) -> None:
         self.settings = settings
         self.registry = registry
@@ -83,6 +86,9 @@ class Gateway:
         # What decides which tools a caller sees. Without one the caller sees every tool of its
         # tenant, which only the unit tests of the gateway want.
         self.tool_filter = tool_filter
+        # The tools Keystone offers itself (KS-603). Every caller is offered them, whatever the
+        # policy says about the rest.
+        self.virtual = virtual
         # Who opened each session. The authentication middleware fills it and checks it.
         self.bindings = SessionBindings()
         # The sessions to tell when the tool list changes: session id -> (tenant, session). A
@@ -106,9 +112,12 @@ class Gateway:
         tenant_id = principal.tenant_id
         self._remember(ctx, tenant_id)
         # The registry is asked for this tenant only. A tool of another tenant that came back
-        # anyway is not shown (invariant I5).
+        # anyway is not shown (invariant I5), and neither is a row that claims to be one of
+        # Keystone's own, which only the gateway lists.
         tools = [
-            t for t in await self.registry.list_for_tenant(tenant_id) if t.tenant_id == tenant_id
+            t
+            for t in await self.registry.list_for_tenant(tenant_id)
+            if t.tenant_id == tenant_id and not is_virtual(t)
         ]
         if self.tool_filter is not None:
             try:
@@ -118,6 +127,8 @@ class Gateway:
                 # when it is made, so this hides tools and opens nothing.
                 log.exception("tool_list_filter_failed", tenant=tenant_id)
                 tools = []
+        if self.virtual is not None:
+            tools = sorted([*tools, *self.virtual.tools_for(principal)], key=lambda t: t.name)
         return types.ListToolsResult(
             tools=[
                 types.Tool(name=t.name, description=t.description, input_schema=t.input_schema)
@@ -145,9 +156,13 @@ class Gateway:
             # Flags and taint live in the session. A call that cannot read them does not run, and
             # is still refused through the pipeline so that it leaves its audit record.
             log.error("session_store_failed", error=type(exc).__name__)
-        tool = await self.registry.get(principal.tenant_id, params.name)
-        if tool is not None and tool.tenant_id != principal.tenant_id:
-            tool = None  # as above: another tenant's tool does not exist for this caller
+        # A name that starts with `keystone__` is one of Keystone's own tools, found before the
+        # registry is asked. A registry row that claims to be one is not believed.
+        tool = self.virtual.tool(params.name, principal) if self.virtual is not None else None
+        if tool is None:
+            tool = await self.registry.get(principal.tenant_id, params.name)
+            if tool is not None and (tool.tenant_id != principal.tenant_id or is_virtual(tool)):
+                tool = None  # as above: another tenant's tool does not exist for this caller
         call = CallContext(
             call_id=new_id(),
             received_at=datetime.now(UTC),

@@ -25,6 +25,7 @@ from keystone.policy.engine import DEFAULT_DENY, CedarPolicyEngine
 from keystone.policy.entities import Action, build_context
 from keystone.policy.store import PolicyStore
 from keystone.settings import PolicySettings
+from tests.fixtures.approvals import VIRTUAL_TOOLS
 from tests.fixtures.calls import make_ctx, make_tool
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.policies import permit, write_policies
@@ -150,7 +151,9 @@ async def test_i6_through_the_gateway(
 
     for user in ("alice", "olivia", "root"):
         async with mcp_client(app, user=user) as client:
-            assert (await client.list_tools()).tools == []
+            # Not one tool of an upstream. The two that Keystone serves itself are not decided by
+            # the policy and are offered all the same (KS-603).
+            assert {t.name for t in (await client.list_tools()).tools} == VIRTUAL_TOOLS
             for name, arguments in CALLS:
                 result = await client.call_tool(name, arguments)
                 assert result.is_error, f"{user} called {name}"

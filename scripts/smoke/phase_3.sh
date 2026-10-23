@@ -2,10 +2,11 @@
 # Phase 3 smoke, against the compose stack (make up):
 #   1. Keycloak gives tokens to alice (acme) and bob (globex).
 #   2. A request without a token gets 401 and a pointer to the sign-in metadata.
-#   3. Olivia, an operator, lists acme's 15 tools and none of globex's. (Alice, in support, sees 13
-#      since Phase 4: the two high-risk tools are hidden from her. scripts/smoke/phase_4.sh checks that.)
-#   4. Bob lists globex's 3 tools and none of acme's, and calling bank__get_balance by name gives
-#      KS_TOOL_NOT_FOUND.
+#   3. Olivia, an operator, lists acme's 15 tools and none of globex's, and the 2 that Keystone
+#      offers every caller (since Phase 6): 17. (Alice, in support, sees 13 of acme's since Phase 4:
+#      the two high-risk tools are hidden from her. scripts/smoke/phase_4.sh checks that.)
+#   4. Bob lists globex's 3 tools and Keystone's 2, none of acme's, and calling bank__get_balance by
+#      name gives KS_TOOL_NOT_FOUND.
 #   5. After calls that work, fail and are refused, the mail server says it received the API key
 #      that Keystone added, and none of the demo keys, nor the master key, is in Keystone's logs.
 set -u
@@ -65,7 +66,7 @@ echo
 step "3. olivia lists acme's tools"
 acme_tools=$(probe_as olivia ops-agent list)
 echo "$acme_tools" | sed -n '1p'
-grep -qx 'tools: 15' <<<"$acme_tools" || fail "olivia should see 15 tools"
+grep -qx 'tools: 17' <<<"$acme_tools" || fail "olivia should see 17 tools"
 for tool in bank__get_balance mail__read_email files__read_file echostd__echo; do
   grep -qx "$tool" <<<"$acme_tools" || fail "olivia does not see $tool"
 done
@@ -74,7 +75,7 @@ grep -q '^files_globex__' <<<"$acme_tools" && fail "olivia sees a globex tool"
 step "4. bob lists globex's tools and cannot call acme's"
 bob_tools=$(probe_as bob support-agent list)
 echo "$bob_tools"
-grep -qx 'tools: 3' <<<"$bob_tools" || fail "bob should see 3 tools"
+grep -qx 'tools: 5' <<<"$bob_tools" || fail "bob should see 5 tools"
 [ "$(grep -c '^files_globex__' <<<"$bob_tools")" -eq 3 ] || fail "bob should see the three globex tools"
 grep -qE '^(bank|mail|echo|echostd|files)__' <<<"$bob_tools" && fail "bob sees an acme tool"
 refused=$(probe_as bob support-agent call bank__get_balance '{"account": "CHK-001"}')

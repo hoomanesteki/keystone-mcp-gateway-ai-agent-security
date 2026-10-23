@@ -23,6 +23,7 @@ from keystone.core.canonical import canonical_json, sha256_hex
 from keystone.core.types import Risk, ToolRef, ToolStatus, ToolTag
 from keystone.db.models import Tool, Upstream
 from keystone.db.session import affected
+from keystone.registry.naming import is_reserved
 from keystone.registry.pinning import pending_fingerprint
 
 Sessionmaker = async_sessionmaker[AsyncSession]
@@ -53,7 +54,10 @@ class UpstreamRepo:
 
     async def upsert(self, spec: UpstreamSpec) -> Upstream:
         """Insert the upstream or update its connection details. Status and sync fields stay.
-        An id that belongs to another tenant is an error: ids are unique across tenants."""
+        An id that belongs to another tenant is an error: ids are unique across tenants, and the
+        id of Keystone's own tools belongs to none."""
+        if is_reserved(spec.id):
+            raise ValueError(f"upstream id {spec.id!r} is reserved for Keystone's own tools")
         values: dict[str, Any] = spec.model_dump()
         insertion = insert(Upstream).values(values)
         statement = insertion.on_conflict_do_update(

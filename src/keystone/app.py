@@ -30,6 +30,7 @@ from keystone.gateway.sessions import (
     SessionStore,
 )
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
+from keystone.gateway.virtual_tools import VirtualTools
 from keystone.gateway.wiring import PipelineDeps, build_pipeline
 from keystone.health import check_dependencies, upstream_statuses
 from keystone.identity.credential_repo import vault_from_settings
@@ -153,7 +154,10 @@ def create_app(
         if vault is not None
         else None
     )
-    dispatcher: Dispatcher = UpstreamDispatcher(pool, health)
+    # keystone__await_approval and keystone__whoami: served by the dispatcher, listed by the
+    # gateway. The pipeline they run calls through is bound below, once it is built.
+    virtual = VirtualTools(approvals, registry)
+    dispatcher: Dispatcher = UpstreamDispatcher(pool, health, virtual=virtual)
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
     policy_engine = ObservedEngine(CedarPolicyEngine(policies), metrics.policy_evaluated)
@@ -171,6 +175,7 @@ def create_app(
         ),
         interceptors,
     )
+    virtual.bind(pipeline)
     session_store: SessionStore = (
         RedisSessionStore(redis, SessionRepo(sessions)) if redis else InMemorySessionStore()
     )
@@ -179,7 +184,7 @@ def create_app(
         RedisListCache(redis) if redis else MemoryListCache(),
         ttl_s=settings.policy.list_cache_ttl_s,
     )
-    gateway = Gateway(settings, registry, session_store, pipeline, tool_filter)
+    gateway = Gateway(settings, registry, session_store, pipeline, tool_filter, virtual)
     registry.add_listener(gateway.notify_tools_changed)
 
     @asynccontextmanager

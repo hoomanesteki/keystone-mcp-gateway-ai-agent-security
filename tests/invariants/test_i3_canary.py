@@ -122,6 +122,7 @@ SESSION: list[tuple[str, dict[str, Any]]] = [
     ("echo__echo", {"payload": 7}),  # arguments do not fit the schema
     ("echo__nothing", {}),  # no such tool
     ("echo__echo", {"payload": "leak"}),  # dispatch fails with the headers in its message
+    ("keystone__whoami", {}),  # says who the caller is, and holds no token or credential (KS-603)
 ]
 
 
@@ -186,6 +187,7 @@ async def test_i3(
         ("echo__echo", "rejected"),
         ("echo__nothing", "rejected"),
         ("echo__echo", "error"),
+        ("keystone__whoami", "ok"),
     ]
     codes = [json.loads(r).get("_meta", {}).get("keystone/code") for r in received[1:]]
     assert codes == [
@@ -198,7 +200,11 @@ async def test_i3(
         "KS_INVALID_ARGUMENTS",
         "KS_TOOL_NOT_FOUND",
         "KS_UPSTREAM_ERROR",
+        None,
     ]
+    # The last call asked who the caller is: the answer names the principal and holds no secret.
+    who = json.loads(received[-1])["structuredContent"]
+    assert who["principal"]["user_id"] == "alice" and who["principal"]["tenant_id"] == "acme"
     assert "startup_sync" in logs and "dispatch_failed" in logs
     assert (
         "keystone.tool_call" in observed["spans"] and "keystone.upstream.call" in observed["spans"]

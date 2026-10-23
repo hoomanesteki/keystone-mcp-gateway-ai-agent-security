@@ -12,6 +12,7 @@ from keystone.core.types import ToolStatus
 from keystone.registry.pinning import OPERATOR_DISABLED, REMOVED
 from keystone.registry.repo import ToolRepo, UpstreamRepo
 from keystone.settings import RegistrySettings
+from tests.fixtures.approvals import VIRTUAL_TOOLS
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.upstreams import DemoUpstreams
 
@@ -74,7 +75,7 @@ async def test_i4(
     at once, with no wait: the cache expiring must not be what stops them."""
     app = keystone_app_factory(registry=RegistrySettings(cache_ttl_s=0.3))
     async with mcp_client(app, user="olivia") as client:  # an operator lists all twelve tools
-        assert len((await client.list_tools()).tools) == 12
+        assert len((await client.list_tools()).tools) == 12 + len(VIRTUAL_TOOLS)
 
         for way in WAYS:
             await way.change(sessionmaker)
@@ -96,7 +97,7 @@ async def test_i4(
         calls: Any = demo_upstreams.state(way.upstream)["calls"]
         assert way.upstream_tool not in calls, way.tool
     # Three single tools are gone, and so are all three tools of the disabled upstream.
-    assert len(names) == 12 - 3 - 3
+    assert len(names) == 12 - 3 - 3 + len(VIRTUAL_TOOLS)
     refused = [r for r in app.audit.records if r["tool_name"] in gone]
     assert len(refused) == 4
     assert all(r["dispatched"] is False and r["outcome"] == "rejected" for r in refused)

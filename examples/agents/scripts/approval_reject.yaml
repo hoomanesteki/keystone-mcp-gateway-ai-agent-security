@@ -1,0 +1,6 @@
+# A transfer of 700 that the approver rejects. The step passes only if the agent is told
+# KS_APPROVAL_REJECTED, and the approver's note is in the answer.
+steps:
+  - tool: bank__transfer
+    args: {from_account: CHK-001, to: SAV-002, amount: 700, memo: office chairs}
+    expect_error_code: KS_APPROVAL_REJECTED

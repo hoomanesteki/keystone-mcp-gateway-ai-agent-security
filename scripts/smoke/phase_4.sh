@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Phase 4 smoke, against the compose stack (make up):
-#   1. Alice (support) asks for a transfer: KS_DENIED, reason default-deny. Her tool list has 13
-#      tools; the two high-risk ones are hidden from her.
+#   1. Alice (support) asks for a transfer: KS_DENIED, reason default-deny. Her tool list has 15
+#      tools: 13 of acme's (the two high-risk ones are hidden from her) and the 2 that Keystone
+#      offers every caller.
 #   2. Olivia (an operator) transfers 900: the audit shows require_approval with the reason
 #      approve-transfer-over-500. Nobody decides, so the call is held for approvals.wait_seconds
 #      (10 s here) and then answered KS_APPROVAL_PENDING with an id, and nothing moves. (Before
@@ -76,7 +77,7 @@ echo "audit: $entry"
 [ "$entry" = "deny default-deny" ] || fail "the audit shows '$entry', not 'deny default-deny'"
 alice_tools=$(probe_as alice support-agent list)
 echo "$alice_tools" | sed -n '1p'
-grep -qx 'tools: 13' <<<"$alice_tools" || fail "alice should see 13 tools"
+grep -qx 'tools: 15' <<<"$alice_tools" || fail "alice should see 15 tools"
 grep -qxE 'bank__transfer|mail__send_email' <<<"$alice_tools" && fail "alice sees a high-risk tool"
 
 step "2. olivia transfers 900 and the audit asks for approval"

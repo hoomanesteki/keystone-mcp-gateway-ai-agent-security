@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Phase 2 smoke, against the compose stack (make up):
-#   1. Keystone lists 15 tools: three each from mail, files, bank and echo over HTTP, and three
-#      from the stdio echo upstream `echostd`, which Keystone starts itself.
+#   1. Keystone lists 17 tools: three each from mail, files, bank and echo over HTTP, three from
+#      the stdio echo upstream `echostd`, which Keystone starts itself, and the two that Keystone
+#      offers every caller (keystone__await_approval and keystone__whoami, since Phase 6).
 #   2. The echo description changes upstream. After a registry sync the tool is quarantined,
 #      hidden, and refused with KS_QUARANTINED; approve-change brings it back.
 #   3. The bank server stops. Once Keystone has marked it down, a call to it fails at once.
@@ -86,7 +87,7 @@ step "1. list the tools"
 wait_for 60 status_is echostd up || fail "echostd is not up: $(upstream_status echostd)"
 count=$(tool_count)
 echo "tools: ${count}"
-[ "$count" = "15" ] || fail "expected 15 tools, saw ${count}"
+[ "$count" = "17" ] || fail "expected 17 tools, saw ${count}"
 for tool in echostd__echo mail__send_email files__read_file bank__transfer echo__sleep; do
   has_tool "$tool" || fail "no ${tool} in the list"
 done
@@ -127,6 +128,6 @@ grep -q '^error=false' <<<"$mail" || fail "mail stopped working while bank was d
 
 echo
 if [ "$failed" -eq 0 ]; then
-  echo "phase 2 smoke: ok (15 tools, quarantine and approval, a down upstream refused in ${ms} ms)"
+  echo "phase 2 smoke: ok (17 tools, quarantine and approval, a down upstream refused in ${ms} ms)"
 fi
 [ "$failed" -eq 0 ]
