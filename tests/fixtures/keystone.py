@@ -31,9 +31,11 @@ from tests.fixtures.servers import ServerThread
 from tests.fixtures.upstreams import (  # noqa: F401
     NAMES,
     DemoUpstreams,
+    GlobexFiles,
     _reset_demo_upstreams,
     canary_secret,
     demo_upstreams,
+    globex_files,
     keyed_upstreams,
 )
 
@@ -50,6 +52,17 @@ def auth_options(idp: FakeIdp) -> dict[str, Any]:
         "agents": dict(AGENTS),
         "master_keys": SecretStr(TEST_MASTER_KEY),
     }
+
+
+def globex_upstream(files: GlobexFiles) -> UpstreamConfig:
+    """The globex tenant's files upstream, with its key taken from the environment."""
+    return UpstreamConfig(
+        id=files.name,
+        tenant="globex",
+        url=files.url,
+        credential_mode="static",
+        credential_env={"X-Api-Key": "FILES_GLOBEX_API_KEY"},
+    )
 
 
 def credentialed_upstreams(upstreams: DemoUpstreams, tenant: str = "acme") -> list[UpstreamConfig]:
@@ -112,8 +125,10 @@ def keystone_app_factory(
         registry: RegistrySettings | None = None,
         settings: Mapping[str, Any] | None = None,
         keyed: bool = False,
+        globex: bool = False,
         **app_options: Any,
     ) -> KeystoneApp:
+        tenants = [TenantConfig(id="acme", name="Acme Corp")]
         if keyed:
             keyed_servers: DemoUpstreams = request.getfixturevalue("keyed_upstreams")
             keyed_servers.reset()
@@ -124,12 +139,20 @@ def keystone_app_factory(
                 UpstreamConfig(id=name, tenant="acme", url=demo_upstreams.url(name))
                 for name in NAMES
             ]
+        if globex:
+            # A second tenant with a drive of its own. Its key reaches Keystone through the
+            # environment, like the others.
+            files_globex: GlobexFiles = request.getfixturevalue("globex_files")
+            files_globex.reset()
+            tenants.append(TenantConfig(id="globex", name="Globex Inc"))
+            upstreams = [*upstreams, globex_upstream(files_globex)]
+            app_options["environ"] = {**app_options.get("environ", {}), **files_globex.environ()}
         options: dict[str, Any] = {
             "env": "test",
             "registry": registry or RegistrySettings(),
             "database_url": SecretStr(test_database_url),
             "redis_url": SecretStr(test_redis_url),
-            "tenants": [TenantConfig(id="acme", name="Acme Corp")],
+            "tenants": tenants,
             "allow_private_upstreams": True,
             "upstreams": upstreams,
             **auth_options(fake_idp),

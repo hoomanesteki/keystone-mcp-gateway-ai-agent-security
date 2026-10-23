@@ -35,7 +35,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from keystone.core.types import Principal
-from keystone.identity.jwt import AuthError, KeysUnavailable, Reason, TokenValidator
+from keystone.identity.jwt import AuthError, Forbidden, KeysUnavailable, Reason, TokenValidator
 from keystone.identity.metadata import metadata_url, public_origin
 from keystone.identity.principals import principal_from_claims
 from keystone.settings import Settings
@@ -107,11 +107,16 @@ class Authenticator:
         if self.validator is None:
             raise KeysUnavailable
         claims = await self.validator.validate(bearer_token(headers))
-        return principal_from_claims(
+        principal = principal_from_claims(
             claims,
             self.settings.agents,
             allow_unknown_agents=self.settings.auth.allow_unknown_agents,
         )
+        if principal.tenant_id not in {tenant.id for tenant in self.settings.tenants}:
+            # A sound token from an identity provider that serves other tenants too. Keystone
+            # has nothing for this one, and would only create sessions and rows for it.
+            raise Forbidden(Reason.UNKNOWN_TENANT)
+        return principal
 
 
 PrincipalKey = tuple[str, str, str]

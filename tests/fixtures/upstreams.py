@@ -108,8 +108,48 @@ def keyed_upstreams(
             thread.stop()
 
 
+class GlobexFiles:
+    """The globex tenant's own files server: another drive, and its own API key."""
+
+    name = "files_globex"
+
+    def __init__(self, thread: ServerThread, key: str) -> None:
+        self.thread = thread
+        self.key = key
+
+    @property
+    def url(self) -> str:
+        return f"{self.thread.url}/mcp"
+
+    def environ(self) -> dict[str, str]:
+        return {"FILES_GLOBEX_API_KEY": self.key}
+
+    def state(self) -> dict[str, object]:
+        response = httpx.get(f"{self.thread.url}/_state", timeout=10)
+        response.raise_for_status()
+        state: dict[str, object] = response.json()
+        return state
+
+    def reset(self) -> None:
+        httpx.post(f"{self.thread.url}/_reset", timeout=10).raise_for_status()
+
+
+@pytest.fixture(scope="session")
+def globex_files(tmp_path_factory: pytest.TempPathFactory) -> Iterator[GlobexFiles]:
+    root: Path = tmp_path_factory.mktemp("globex-files")
+    key = f"test-globex-key-{secrets.token_hex(6)}"
+    server = files_server.create_server(
+        root / "workspace", root / "files.db", seed=_common.FIXTURES / "files-globex"
+    )
+    thread = ServerThread(_common.http_app(server, api_key=key, host="127.0.0.1")).start()
+    try:
+        yield GlobexFiles(thread, key)
+    finally:
+        thread.stop()
+
+
 @pytest.fixture(autouse=True)
 def _reset_demo_upstreams(request: pytest.FixtureRequest) -> None:
-    for name in ("demo_upstreams", "keyed_upstreams"):
+    for name in ("demo_upstreams", "keyed_upstreams", "globex_files"):
         if name in request.fixturenames:
             request.getfixturevalue(name).reset()

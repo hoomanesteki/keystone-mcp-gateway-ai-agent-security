@@ -121,6 +121,7 @@ def test_every_credential_the_compose_config_takes_from_the_environment_lines_up
     assert {variable for _, _, variable in named} >= {"MAIL_API_KEY", "ECHO_API_KEY"}
     for upstream_id, host, variable in named:
         assert variable in services["keystone"]["environment"], f"{variable} for {upstream_id}"
-        assert (
-            services[host]["environment"][variable] == services["keystone"]["environment"][variable]
-        )
+        # The upstream's container reads its key from the variable its server expects (FILES_API_KEY
+        # for either files server), so the check is on the value, which is the same expression.
+        value = services["keystone"]["environment"][variable]
+        assert value in services[host]["environment"].values(), f"{host} lacks {variable}"

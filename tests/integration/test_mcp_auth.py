@@ -201,7 +201,10 @@ async def test_health_and_metadata_need_no_token(keystone_app: KeystoneApp) -> N
 
 
 @pytest.mark.phase(3)
-async def test_session_bound_to_principal(keystone_app: KeystoneApp, fake_idp: FakeIdp) -> None:
+async def test_session_bound_to_principal(
+    keystone_app_factory: Callable[..., KeystoneApp], fake_idp: FakeIdp
+) -> None:
+    keystone_app = keystone_app_factory(globex=True)  # bob is a known principal of another tenant
     alice = fake_idp.token_for("alice")
     bob = fake_idp.token_for("bob")
     session = open_session(keystone_app, alice)
@@ -222,7 +225,10 @@ async def test_session_bound_to_principal(keystone_app: KeystoneApp, fake_idp: F
 
 
 @pytest.mark.phase(3)
-async def test_token_swap_on_session_rejected(keystone_app: KeystoneApp, fake_idp: FakeIdp) -> None:
+async def test_token_swap_on_session_rejected(
+    keystone_app_factory: Callable[..., KeystoneApp], fake_idp: FakeIdp
+) -> None:
+    keystone_app = keystone_app_factory(globex=True)
     alice, bob = fake_idp.token_for("alice"), fake_idp.token_for("bob")
     http = httpx2.AsyncClient(headers={"Authorization": f"Bearer {alice}"}, timeout=15)
     async with http, Client(streamable_http_client(keystone_app.url, http_client=http)) as client:
@@ -276,8 +282,9 @@ async def test_a_session_id_nobody_opened_is_not_found(
 
 @pytest.mark.phase(3)
 async def test_a_session_nobody_bound_is_never_adopted_by_whoever_asks_first(
-    keystone_app: KeystoneApp, fake_idp: FakeIdp
+    keystone_app_factory: Callable[..., KeystoneApp], fake_idp: FakeIdp
 ) -> None:
+    keystone_app = keystone_app_factory(globex=True)
     # The SDK still knows this session, but the gateway lost its binding (a restart of the
     # binding table, say). If the first caller to name it were bound to it, anybody who learned
     # the id could take the session over before its owner used it again.

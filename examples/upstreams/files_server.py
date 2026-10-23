@@ -24,8 +24,14 @@ MAX_BYTES = 1024 * 1024
 SCHEMA = "CREATE TABLE writes (seq INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, content TEXT)"
 
 
-def create_server(workspace: Path | None = None, db_path: Path | None = None) -> MCPServer:
-    """Build the server. The workspace defaults to FILES_WORKSPACE, then to a temp directory."""
+def create_server(
+    workspace: Path | None = None, db_path: Path | None = None, seed: Path | None = None
+) -> MCPServer:
+    """Build the server. The workspace defaults to FILES_WORKSPACE, then to a temp directory. The
+    files it starts with, and goes back to on reset, come from `seed`, then FILES_SEED, then
+    examples/fixtures/files. A second server with another seed plays another tenant's drive."""
+    seed_dir = seed or (Path(os.environ["FILES_SEED"]) if os.environ.get("FILES_SEED") else None)
+    seed_dir = seed_dir or FIXTURES / "files"
     env_workspace = os.environ.get("FILES_WORKSPACE")
     base = workspace or (Path(env_workspace) if env_workspace else None)
     root = (base or Path(tempfile.mkdtemp(prefix="keystone-files-"))).resolve()
@@ -36,7 +42,7 @@ def create_server(workspace: Path | None = None, db_path: Path | None = None) ->
     def reset() -> None:
         if root.exists():
             shutil.rmtree(root)
-        shutil.copytree(FIXTURES / "files", root)
+        shutil.copytree(seed_dir, root)
         db.path.unlink(missing_ok=True)
         log.calls.clear()
         with db.connect() as con:
