@@ -12,11 +12,34 @@ agents:
   support-agent: {trust: standard}
   ops-agent: {trust: high}
 
+# The four HTTP upstreams require an API key. `credential_env` names the variable that holds it
+# (docker-compose.yml sets them); Keystone stores the value encrypted in its vault at startup and
+# adds it to every call, so no agent and no file here holds it.
 upstreams:
-  - {id: mail, tenant: acme, transport: http, url: "http://mail-mcp:8101/mcp"}
-  - {id: files, tenant: acme, transport: http, url: "http://files-mcp:8102/mcp"}
-  - {id: bank, tenant: acme, transport: http, url: "http://bank-mcp:8103/mcp"}
-  - {id: echo, tenant: acme, transport: http, url: "http://echo-mcp:8104/mcp"}
+  - id: mail
+    tenant: acme
+    transport: http
+    url: "http://mail-mcp:8101/mcp"
+    credential_mode: static
+    credential_env: {X-Api-Key: MAIL_API_KEY}
+  - id: files
+    tenant: acme
+    transport: http
+    url: "http://files-mcp:8102/mcp"
+    credential_mode: static
+    credential_env: {X-Api-Key: FILES_API_KEY}
+  - id: bank
+    tenant: acme
+    transport: http
+    url: "http://bank-mcp:8103/mcp"
+    credential_mode: static
+    credential_env: {X-Api-Key: BANK_API_KEY}
+  - id: echo
+    tenant: acme
+    transport: http
+    url: "http://echo-mcp:8104/mcp"
+    credential_mode: static
+    credential_env: {X-Api-Key: ECHO_API_KEY}
   # A demo MCP server that Keystone starts itself and talks to over stdin and stdout. The working
   # directory of the container is /app, where the image keeps `examples`.
   - id: echostd
