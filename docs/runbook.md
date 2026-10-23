@@ -119,6 +119,15 @@ taken over, so a gateway that stops it does not depend on how a model behaves. A
 `summarize_unread_benign.yaml` is the same task over mail with no instruction. Reset the mail
 server between runs: `curl -s -X POST localhost:8101/_reset`.
 
+Through Keystone the agent still reads the poisoned email and still tries to forward the invoice.
+The forward is held for a person (`rule-of-two`, `tainted-external-effect` and acme's
+`external-email-needs-approval` are its reasons), and nobody approves it. `make demo-attack` runs
+both scenarios and prints them side by side, with `examples/agents/auto_reject.py` standing in for
+the person: lena through the admin API, rejecting whatever reaches the queue. It prints one line of
+JSON for each request, with what a person would see on the card (tool, reasons, taint, flags,
+arguments). `scripts/smoke/phase_7.sh` runs the same two scenarios and a harmless summary with
+assertions, and `scripts/smoke/attack_lib.sh` is what both share.
+
 ## Identity (Keycloak)
 
 `make up` starts Keycloak 26 and imports the realm `keystone` from `deploy/keycloak/realm-keystone.json`.
@@ -465,6 +474,19 @@ decision can be read back from the log (see Audit).
 | | `deny-cross-tenant` | No one uses another tenant's tool, whatever else allows it |
 | `demo/approval/bank.cedar` | `approve-transfer-over-500` | A transfer over 500, or one whose amount could not be read, needs approval |
 | `acme/approval/mail.cedar` | `external-email-needs-approval` | A message to anyone outside `acme.test`, or to a recipient that is not one plain address, needs approval |
+| `default/access/rule_of_two.cedar` | `deny-critical-when-tainted` | A session that read an injection never calls a critical tool |
+| `default/approval/rule_of_two.cedar` | `rule-of-two` | A session that has read untrusted and sensitive data asks before it calls a tool with an external effect |
+| | `tainted-external-effect` | A tainted session asks before it calls a tool with an external effect |
+
+The Rule of Two (plan section 3.5) is the last three rows. A session should not combine all of
+these without a person: it processes untrusted input, it has access to sensitive data, and it
+changes state or sends data out. The first two are the session's flags (`reads_untrusted` and
+`reads_sensitive`, from the tags of the tools it called) and the third is the tag `external_effect`
+on the tool being called. So an operator who reads an email and then sends one in the same session
+is asked about the second, whoever the mail goes to, and one whose session read an injection is
+asked before any external effect and cannot call a critical tool. Both are ordinary Cedar, so a
+tenant reads and tightens them like the rest. A new MCP session starts clean. A script that reads
+mail and then sends it should send first, or use a session of its own for each step.
 
 Risk comes from the upstream config, so in the local stack `mail__send_email` and
 `bank__transfer` are high risk: support (alice) is refused both with `default-deny`, and an
@@ -1394,7 +1416,8 @@ seconds. The Approvals entry in the menu shows how many are waiting, from any pa
 - the session's flags, and the time left in minutes and seconds, counted from the server's figure
   and not the browser's clock;
 - the last calls of the session, loaded when the card's list is opened and read again every 5
-  seconds while it is.
+  seconds while it is. Each row has the scan of its output (`0.88 annotate`: the score and what
+  Keystone did to the output), so the call that brought an injection in is the one marked.
 
 Approve takes an optional note. Reject needs one, because the agent is told it. The card leaves the
 list at once and comes back if the decision cannot be sent. A 409 (someone else decided it, or it

@@ -175,6 +175,42 @@ test("lists the recent calls of the session when the card is opened", async () =
   expect(within(table).getByText("KS_APPROVAL_PENDING")).toBeVisible();
 });
 
+test("shows what the scanner made of the calls the session has read", async () => {
+  const api = approvalsApi([approval({ tainted: true, flags: ["reads_untrusted"] })], {
+    recent: [
+      record({ seq: 222, tool_name: "mail__read_email", outcome: "ok", reject_code: null }),
+      record({
+        seq: 221,
+        tool_name: "mail__read_email",
+        outcome: "ok",
+        effect: "allow",
+        reject_code: null,
+        scan_score: "0.880000",
+        scan_action: "annotate",
+      }),
+      record({
+        seq: 220,
+        tool_name: "mail__list_emails",
+        outcome: "ok",
+        effect: "allow",
+        reject_code: null,
+        scan_score: "0.000000",
+        scan_action: "pass",
+      }),
+    ],
+  });
+  renderApp({ path: "/approvals", session: PEOPLE.lena, api });
+  const card = await cardFor();
+
+  await userEvent.click(within(card).getByRole("button", { name: /Recent calls in this session/ }));
+
+  const table = await within(card).findByRole("table", { name: /last calls of this session/ });
+  expect(within(table).getByRole("columnheader", { name: "Scan" })).toBeVisible();
+  expect(within(table).getByText("0.88 annotate")).toBeVisible();
+  expect(within(table).getByText("0.00 pass")).toBeVisible();
+  expect(within(table).getByText("not scanned")).toBeVisible();
+});
+
 test("outlines the request that a link points at and says when it is gone", async () => {
   const api = approvalsApi([approval()]);
   const { unmount } = renderApp({
