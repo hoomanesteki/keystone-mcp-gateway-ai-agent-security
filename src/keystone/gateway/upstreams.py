@@ -8,6 +8,9 @@ session. They borrow the open one.
 A call is only resent when the upstream refused it before running the tool (its session was
 gone). A call that died in flight is not resent, because the tool may already have run and a
 second transfer or email would be a second effect.
+
+A connection attempt that meets 401 or 403 is not retried either (KS-391): the same credential
+gets the same answer, and the backoff would only make the agent wait about 4 s for it.
 """
 
 from __future__ import annotations
@@ -44,6 +47,11 @@ HEALTH_TIMEOUT_S = 3.0
 CLOSE_TIMEOUT_S = 5.0
 MAX_LIST_PAGES = 100
 MAX_POOL_CLIENTS = 100
+# What the agent is told when an upstream does not accept the credential. It names no header,
+# value or address.
+AUTH_REFUSED_MESSAGE = "the upstream server refused the credentials Keystone sent"
+# The statuses that mean "this credential is not accepted". Asking again gets the same answer.
+AUTH_REFUSED_STATUSES = frozenset({401, 403})
 
 # What a server says when it no longer knows our session id (an upstream restart).
 _SESSION_LOST = {"Session not found", "Session terminated"}
@@ -51,9 +59,24 @@ _INVALID_REQUEST = -32600
 
 Protocol_ = Literal["auto", "legacy"]
 
+
+class AuthWatch:
+    """Notes whether an upstream answered a request with 401 or 403. The SDK's HTTP transport turns
+    every error status into the same protocol error, so the status is only visible on the
+    response itself, where `on_response` is hooked in."""
+
+    def __init__(self) -> None:
+        self.refused = False
+
+    async def on_response(self, response: httpx2.Response) -> None:
+        if response.status_code in AUTH_REFUSED_STATUSES:
+            self.refused = True
+
+
 # Opens a transport and closes it again when the context ends, so that whatever the transport owns
-# (an HTTP client, a child process) is released by the task that opened it.
-OpenTransport = Callable[[], AbstractAsyncContextManager[Any]]
+# (an HTTP client, a child process) is released by the task that opened it. The watch belongs to
+# one connection attempt, so a refusal seen earlier cannot colour a later attempt.
+OpenTransport = Callable[[AuthWatch], AbstractAsyncContextManager[Any]]
 
 
 class UpstreamTool(BaseModel, frozen=True):
@@ -85,6 +108,7 @@ class _Connection:
         self.open_transport = open_transport
         self.protocol = protocol
         self.client: Client | None = None
+        self.auth = AuthWatch()
         self.ready = anyio.Event()
         self.closing = anyio.Event()
         self.done = anyio.Event()
@@ -98,7 +122,7 @@ class _Connection:
     async def run(self) -> None:
         try:
             with self.scope:
-                async with self.open_transport() as transport:
+                async with self.open_transport(self.auth) as transport:
                     mode: Any = self.protocol
                     async with Client(transport, mode=mode) as client:
                         self.client = client
@@ -265,6 +289,9 @@ class _SessionClient:
                 if opened.client is not None:
                     self._connection = opened
                     return opened.client
+                if opened.auth.refused:
+                    log.warning("upstream_credentials_refused", upstream=self.upstream_id)
+                    raise Reject(Code.UPSTREAM_ERROR, AUTH_REFUSED_MESSAGE)
             raise Reject(Code.UPSTREAM_ERROR, "the upstream server is not reachable")
 
     async def _open(self) -> _Connection:
@@ -293,11 +320,14 @@ class _SessionClient:
 
 
 @asynccontextmanager
-async def _http_transport(url: str, headers: Mapping[str, str]) -> AsyncIterator[Any]:
+async def _http_transport(
+    url: str, headers: Mapping[str, str], watch: AuthWatch
+) -> AsyncIterator[Any]:
     async with httpx2.AsyncClient(
         headers=dict(headers),
         timeout=httpx2.Timeout(CONNECT_TIMEOUT_S, read=300.0),
         follow_redirects=False,
+        event_hooks={"response": [watch.on_response]},
     ) as http:
         yield streamable_http_client(url, http_client=http)
 
@@ -318,7 +348,7 @@ class HttpUpstreamClient(_SessionClient):
         fixed = dict(headers or {})
         inject_trace_headers(fixed)
         super().__init__(
-            lambda: _http_transport(url, fixed),
+            lambda watch: _http_transport(url, fixed, watch),
             task_group,
             upstream_id=upstream_id,
             protocol=protocol,
@@ -380,7 +410,7 @@ class StdioUpstreamClient(_SessionClient):
         self.command = tuple(command)
         params = clean_launch(self.command, env or {})
         super().__init__(
-            lambda: _stdio_transport(params),
+            lambda _watch: _stdio_transport(params),
             task_group,
             upstream_id=upstream_id,
             protocol=protocol,
