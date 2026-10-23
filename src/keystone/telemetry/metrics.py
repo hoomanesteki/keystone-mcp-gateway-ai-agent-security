@@ -56,6 +56,8 @@ LATENCY_BUCKETS = (
 # The policy engine decides in well under a millisecond.
 POLICY_BUCKETS = (0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.1)
 SCORE_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+# What can fail in a scan: the classifier, the rules, and the action on a flagged output.
+SCAN_STAGES = ("rules", "classifier", "action")
 
 
 @dataclass(frozen=True)
@@ -161,6 +163,12 @@ class Metrics:
         self.scan_score = self._histogram(
             "keystone_scan_score", "Injection scanner scores (Phase 7)", ["tenant"], SCORE_BUCKETS
         )
+        # The stages are a fixed set (SCAN_STAGES).
+        self.scan_errors = self._counter(
+            "keystone_scan_errors",
+            "Scans that failed and were worked around, by stage (Phase 7)",
+            ["stage"],
+        )
         self.rate_limited = self._counter(
             "keystone_rate_limited", "Calls refused by a rate limit (Phase 8)", ["tenant", "scope"]
         )
@@ -197,6 +205,10 @@ class Metrics:
         return list(self._declared)
 
     # -- recording
+
+    def scan_failed(self, stage: str) -> None:
+        """A scan that failed and was worked around: the classifier, the rules or an action."""
+        self.scan_errors.labels(stage=stage if stage in SCAN_STAGES else OTHER).inc()
 
     def call_finished(
         self,

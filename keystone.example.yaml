@@ -136,5 +136,9 @@ scanner:
   classifier: protectai-deberta-v2
   classifier_timeout_ms: 300
   thresholds: {suspicious: 0.5, injection: 0.85}
+  # What is done to an output that scored suspicious or injection, by the risk of the tool: pass,
+  # annotate (a warning and markers round it), redact (cut what hides or leaks, then annotate) or
+  # block (withhold it).
+  actions: {low: annotate, medium: annotate, high: redact, critical: block}
   allowed_domains: []
   max_scan_chars: 200000
