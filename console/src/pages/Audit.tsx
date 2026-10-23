@@ -14,8 +14,10 @@ import {
   paramsFromDraft,
 } from "../lib/auditFilters";
 import { useDebounced } from "../lib/useDebounced";
+import { usePageTitle } from "../lib/usePageTitle";
 
 export function Audit() {
+  usePageTitle("Audit");
   const [params, setParams] = useSearchParams();
   const [draft, setDraft] = useState(() => draftFromParams(params));
   // Text is sent to the server when the person pauses, not on every key.

@@ -2,6 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test } from "vitest";
 import { fakeApi, json, PEOPLE } from "./test/fakes";
+import { approval, approvalsApi } from "./test/fixtures";
 import { renderApp } from "./test/render";
 
 function menu() {
@@ -84,4 +85,14 @@ test("goes to the sign-in page once when several calls are refused for an expire
     expect(api.calls.length).toBeGreaterThanOrEqual(2);
   });
   expect(signIn).toHaveBeenCalledTimes(1);
+});
+
+test("names the page and the number of waiting requests in the tab title", async () => {
+  const api = approvalsApi([approval(), approval({ id: "01SECOND" })]);
+
+  renderApp({ path: "/approvals", session: PEOPLE.lena, api });
+
+  await waitFor(() => {
+    expect(document.title).toBe("(2) Approvals - Keystone console");
+  });
 });
