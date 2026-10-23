@@ -96,8 +96,8 @@ def require_dispatch_decision(ctx: CallContext) -> None:
     """Raise Reject(DENIED) unless ctx holds a decision that lets the call reach the upstream:
     `allow`, or `require_approval` with an approval id (structural invariant I1, KS-191).
 
-    The approval interceptor (Phase 6) must set `ctx.approval_id` only after `consume` succeeded
-    on an approved request. Setting it on any other path turns a pending approval into an allow.
+    The approval interceptor (KS-602) sets `ctx.approval_id` only after `consume` succeeded on an
+    approved request. Setting it on any other path turns a pending approval into an allow.
     """
     decision = ctx.decision
     if decision is not None and (

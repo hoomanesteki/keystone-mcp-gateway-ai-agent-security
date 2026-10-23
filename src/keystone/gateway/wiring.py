@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from keystone.gateway.interceptors.approval import ApprovalGate, ApprovalInterceptor
 from keystone.gateway.interceptors.credentials import CredentialInterceptor, HeaderSource
 from keystone.gateway.interceptors.pinning import PinningInterceptor, ToolStateLookup
 from keystone.gateway.interceptors.policy import PolicyInterceptor
 from keystone.gateway.pipeline import AuditSink, Dispatcher, Interceptor, Pipeline
+from keystone.gateway.stubs import ApprovalInterceptor as StubApprovalInterceptor
 from keystone.gateway.stubs import (
-    ApprovalInterceptor,
     BudgetInterceptor,
     MeteringInterceptor,
     OutputScanInterceptor,
@@ -51,6 +52,9 @@ class PipelineDeps:
     # The engine that decides every call. The app always passes one. Without one the slot is the
     # Phase 1 stub that allows everything, which only the unit tests of the pipeline want.
     policy: PolicyEngine | None = None
+    # Where a call that needs approval is stored and waited for (KS-602). Without one the slot is
+    # the stub that refuses it: the unit tests of the pipeline, and an app with no master key.
+    approvals: ApprovalGate | None = None
 
 
 def build_pipeline(
@@ -69,7 +73,11 @@ def build_pipeline(
         "pinning": PinningInterceptor(deps.tool_states),
         "budget": BudgetInterceptor(),
         "policy": PolicyInterceptor(deps.policy) if deps.policy else StubPolicyInterceptor(),
-        "approval": ApprovalInterceptor(),
+        "approval": (
+            ApprovalInterceptor(deps.approvals, wait_seconds=settings.approvals.wait_seconds)
+            if deps.approvals is not None
+            else StubApprovalInterceptor()
+        ),
         "credential": CredentialInterceptor(deps.vault),
         "output_scan": OutputScanInterceptor(),
         "session_flags": SessionFlagsInterceptor(),

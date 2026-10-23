@@ -167,6 +167,7 @@ def create_app(
             tool_states=registry,
             vault=vault,
             policy=policy_engine,
+            approvals=approvals,
         ),
         interceptors,
     )
