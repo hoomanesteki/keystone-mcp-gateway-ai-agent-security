@@ -55,8 +55,11 @@ class RegistryService:
         *,
         cache_ttl_s: float = DEFAULT_CACHE_TTL_S,
         clock: Callable[[], float] = time.monotonic,
+        on_load: Callable[[str, dict[str, ToolRef]], None] | None = None,
     ) -> None:
         self.syncer = syncer
+        # Called with a tenant id and its tools each time they are read from the database.
+        self._on_load = on_load
         self._ttl = cache_ttl_s
         self._clock = clock
         self._cache: dict[str, _Snapshot] = {}
@@ -156,7 +159,16 @@ class RegistryService:
             if generation == self._generation:
                 self._cache[tenant_id] = _Snapshot(tools, self._clock())
             self._note_visible(tenant_id, tools)
+            self._report(tenant_id, tools)
             return tools
+
+    def _report(self, tenant_id: str, tools: dict[str, ToolRef]) -> None:
+        if self._on_load is None:
+            return
+        try:
+            self._on_load(tenant_id, tools)
+        except Exception as exc:
+            log.warning("tool_load_report_failed", error=type(exc).__name__)
 
     def _note_visible(self, tenant_id: str, tools: dict[str, ToolRef]) -> None:
         seen = frozenset(

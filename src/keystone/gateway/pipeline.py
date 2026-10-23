@@ -27,6 +27,7 @@ from jsonschema.exceptions import best_match
 from keystone.core.canonical import canonical_json
 from keystone.core.errors import Code, Reject, to_tool_result
 from keystone.core.types import CallContext, Effect, ToolResult
+from keystone.telemetry.metrics import Metrics
 from keystone.telemetry.tracing import SpanHandle, Tracer
 
 log = structlog.get_logger()
@@ -126,12 +127,14 @@ class Pipeline:
         tracer: Tracer,
         *,
         fail_closed: bool = False,
+        metrics: Metrics | None = None,
     ) -> None:
         self.interceptors = interceptors
         self.dispatcher = dispatcher
         self.audit = audit
         self.tracer = tracer
         self.fail_closed = fail_closed
+        self.metrics = metrics
         # A plain counter until Phase 5 adds a metric.
         self.audit_failures = 0
 
@@ -139,6 +142,7 @@ class Pipeline:
         reject: Reject | None = None
         # A cancelled call (the client went away) never reaches a line that sets the outcome.
         outcome: Outcome = "error"
+        started = time.perf_counter()
         with self.tracer.tool_call(ctx) as span:
             try:
                 try:
@@ -163,18 +167,32 @@ class Pipeline:
                 return ctx.result
             finally:
                 self._describe(span, ctx, outcome, reject)
+                self._count(ctx, outcome, reject, started)
                 await self._audit(ctx, outcome, reject)
 
     async def reject(self, ctx: CallContext, reject: Reject) -> ToolResult:
         """Refuse a call that cannot enter the pipeline (a tool that does not exist). The
         refusal is still audited, so every call leaves one record (invariant I2)."""
+        started = time.perf_counter()
         with self.tracer.tool_call(ctx) as span:
             try:
                 ctx.result = to_tool_result(reject, ctx.call_id)
                 return ctx.result
             finally:
                 self._describe(span, ctx, "rejected", reject)
+                self._count(ctx, "rejected", reject, started)
                 await self._audit(ctx, "rejected", reject)
+
+    def _count(
+        self, ctx: CallContext, outcome: Outcome, reject: Reject | None, started: float
+    ) -> None:
+        """The call's counters and total time. A metric that fails to write never fails a call."""
+        if self.metrics is None:
+            return
+        try:
+            self.metrics.call_finished(ctx, outcome, reject, time.perf_counter() - started)
+        except Exception:
+            log.error("metrics_failed", call_id=ctx.call_id, exc_info=True)
 
     @staticmethod
     def _describe(
@@ -239,6 +257,7 @@ class Pipeline:
         finally:
             elapsed = (time.perf_counter() - started) * 1000
             ctx.timings_ms[interceptor.name] = ctx.timings_ms.get(interceptor.name, 0.0) + elapsed
+            self._observe_stage(interceptor.name, elapsed / 1000)
 
     async def _dispatch(self, ctx: CallContext) -> ToolResult:
         started = time.perf_counter()
@@ -252,9 +271,11 @@ class Pipeline:
                     span.set("keystone.reject_code", refusal.code.value)
                     if is_failure(refusal):
                         span.fail(UPSTREAM_FAILED)
+                        self._upstream_failed(ctx, upstream_error_kind(ctx, refusal))
                     raise
                 except Exception:
                     span.fail(UPSTREAM_FAILED)
+                    self._upstream_failed(ctx, "error")
                     raise
         except Reject:
             raise
@@ -263,7 +284,25 @@ class Pipeline:
             log.exception("dispatch_failed", call_id=ctx.call_id, tool=ctx.tool.name)
             raise Reject(Code.UPSTREAM_ERROR, "the upstream server failed to answer") from None
         finally:
-            ctx.timings_ms["dispatch"] = (time.perf_counter() - started) * 1000
+            elapsed = time.perf_counter() - started
+            ctx.timings_ms["dispatch"] = elapsed * 1000
+            self._observe_stage("upstream", elapsed)
+
+    def _observe_stage(self, stage: str, seconds: float) -> None:
+        if self.metrics is None:
+            return
+        try:
+            self.metrics.stage(stage, seconds)
+        except Exception:
+            log.error("metrics_failed", stage=stage, exc_info=True)
+
+    def _upstream_failed(self, ctx: CallContext, kind: str) -> None:
+        if self.metrics is None:
+            return
+        try:
+            self.metrics.upstream_error(ctx.tool.upstream_id, kind)
+        except Exception:
+            log.error("metrics_failed", upstream=ctx.tool.upstream_id, exc_info=True)
 
     async def _audit(self, ctx: CallContext, outcome: Outcome, reject: Reject | None) -> None:
         # Shielded: a cancelled call still owes the audit trail its one record.
@@ -273,6 +312,14 @@ class Pipeline:
             except Exception:
                 self.audit_failures += 1
                 log.error("audit_record_failed", call_id=ctx.call_id, exc_info=True)
+
+
+def upstream_error_kind(ctx: CallContext, reject: Reject) -> str:
+    """How an upstream failed, for the metric: it timed out, it was refused without a try because
+    it is marked down (the dispatcher clears `dispatched` for that), or it answered badly."""
+    if reject.code is Code.UPSTREAM_TIMEOUT:
+        return "timeout"
+    return "error" if ctx.dispatched else "down"
 
 
 def is_failure(reject: Reject) -> bool:
