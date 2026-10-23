@@ -7,8 +7,10 @@ else is "other" or "unknown"), and the rest are fixed sets: effect, outcome, rej
 failure kind. There is no label for a user, a session or an argument. Metrics are often less
 protected than logs, and a user label would also make the series count grow with the user base.
 
-The metrics of Phases 6 to 8 (approvals, the scanner, rate limits, budgets, LLM tokens) are
-declared here and nothing sets them yet, so the dashboard can name them from the start.
+The metrics of Phases 6 to 8 (approvals, the scanner, rate limits, budgets, LLM tokens) were
+declared before anything set them, so the dashboard could name them from the start. Approvals
+(KS-604) and the scanner (KS-704) are set now; rate limits, budgets and LLM tokens wait for
+Phase 8.
 """
 
 from __future__ import annotations
@@ -156,19 +158,25 @@ class Metrics:
         self.approvals_pending = self._gauge(
             "keystone_approvals_pending", "Approvals waiting for a decision", ["tenant"]
         )
-        # Declared for later phases. Nothing sets these yet.
+        # The output slot sets these (KS-704). The stages are a fixed set (SCAN_STAGES).
         self.sessions_tainted = self._counter(
-            "keystone_sessions_tainted", "Sessions marked tainted (Phase 7)", ["tenant"]
+            "keystone_sessions_tainted",
+            "Sessions an injection tainted: one for each output that scored as an injection in a "
+            "session that was not tainted yet",
+            ["tenant"],
         )
         self.scan_score = self._histogram(
-            "keystone_scan_score", "Injection scanner scores (Phase 7)", ["tenant"], SCORE_BUCKETS
+            "keystone_scan_score",
+            "Injection scanner scores, one for each output that was scanned",
+            ["tenant"],
+            SCORE_BUCKETS,
         )
-        # The stages are a fixed set (SCAN_STAGES).
         self.scan_errors = self._counter(
             "keystone_scan_errors",
-            "Scans that failed and were worked around, by stage (Phase 7)",
+            "Scans that failed and were worked around, by stage",
             ["stage"],
         )
+        # Declared for Phase 8. Nothing sets these yet.
         self.rate_limited = self._counter(
             "keystone_rate_limited", "Calls refused by a rate limit (Phase 8)", ["tenant", "scope"]
         )
@@ -209,6 +217,15 @@ class Metrics:
     def scan_failed(self, stage: str) -> None:
         """A scan that failed and was worked around: the classifier, the rules or an action."""
         self.scan_errors.labels(stage=stage if stage in SCAN_STAGES else OTHER).inc()
+
+    def scan_scored(self, tenant: str, score: float) -> None:
+        """The score of one output that was scanned. A scan that failed has no score and is not
+        observed: it is counted by `scan_failed`."""
+        self.scan_score.labels(tenant=self._tenant(tenant)).observe(score)
+
+    def session_tainted(self, tenant: str) -> None:
+        """An injection tainted a session that was not tainted when the call began."""
+        self.sessions_tainted.labels(tenant=self._tenant(tenant)).inc()
 
     def call_finished(
         self,

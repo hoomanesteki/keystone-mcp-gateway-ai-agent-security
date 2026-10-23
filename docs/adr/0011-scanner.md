@@ -147,7 +147,7 @@ goes on as the same object, so what an agent reads is byte for byte what the ups
   rules: ...). Call id <id>.`, with `is_error` set, the code and the call id in `_meta`, and no
   structured content.
 
-**The scanner cannot crash a call.** `OutputScanner` is what the pipeline will call (KS-704), and it
+**The scanner cannot crash a call.** `OutputScanner` is what the pipeline calls (KS-704), and it
 does not raise:
 
 | What fails | What happens | Recorded |
@@ -163,6 +163,43 @@ scan that failed costs the taint of that one call, which KS-704 sets from the la
 flags that the Rule of Two reads come from the tags of the tools and not from the scanner (KS-705).
 Cancellation is not an error and is not caught. The log says which stage failed and the name of the
 exception, and not what the scanner was reading, which is the content of a tool output.
+
+**The output slot (KS-704).** Two slots of the pipeline use the scanner, in this order: `output_scan`,
+then `session_flags`. The scanner arrived in the pipeline here.
+
+- `output_scan` scans the output of every tool of an upstream, writes the scan on the call (the audit
+  record's `scan_score` and `scan_action`), puts in place of the output what the action for the
+  tool's risk made of it, and observes the score in `keystone_scan_score`. Keystone's own tools are
+  not scanned: what they return is Keystone's. A result with `is_error` is scanned, and here I read
+  the story ("skip virtual tools and error results") more narrowly than it is written. The text of
+  an error can quote what an attacker wrote (the mail server's "no email with id ..." repeats the
+  id it was asked for), and an error is the way a hostile upstream would hand a payload to an agent
+  past a scanner that skips it. A scanned error adds no flag and is not counted, which is what the
+  acceptance criterion asks for.
+- An output that scores `injection` (0.85 and up) taints the session, whatever the action did to it
+  and whatever the tool's tags are. A blocked output taints as well: the session met a hostile
+  source, even though the agent never read the text. The taint is `mark_tainted` on the store, then
+  `catch_up` on the call's copy (ADR-0015). `keystone_sessions_tainted_total` counts the injections
+  that turned a session that was not tainted when the call began, so two outputs of one session in
+  flight at once can count twice.
+- `session_flags` adds the tags `reads_untrusted` and `reads_sensitive` of the tool to the
+  session's flags (`add_flags`) and counts the call (`incr_calls`), after a result that is not an
+  error. `external_effect` and `code_exec` are not recorded: the Rule of Two reads its third leg
+  off the tool being called, and a session that sent mail has not read anything untrusted. Plan
+  section 3.5 says the slot adds "the tags of every tool"; the story names these two, and I
+  followed the story. Keystone's own tools are not counted: the await tool runs the call that
+  waited through the pipeline again, and that call is counted when it returns.
+- The slot repeats the second fault rule for a scanner that raises out of `inspect` (another
+  guard, a bug): the output goes on, `action="error"`, `keystone_scan_errors_total{stage="rules"}`.
+  A session store that cannot record the taint or a flag is not caught. The pipeline then withholds
+  the output (`KS_OUTPUT_BLOCKED`, audit outcome `error`), because an output that was found to be
+  an injection and could not be recorded as one must not reach the agent.
+- A failed scan has no score, so it is not observed in the histogram. `scanner.enabled: false`
+  leaves a slot that scans nothing and records no scan, so that an audit record never says `pass`
+  for a text no one read; the flags slot still works.
+- The gateway loads the model in the background when it starts (`warm_up`), so the first calls do
+  not find it still loading. An app with `env=test` does not, and the model loads at its first
+  scan: the tests start hundreds of apps.
 
 **A contract changes.** `ScanResult.action` (plan section 3.6) gains `"error"` beside `pass`,
 `annotate`, `redact` and `block`, so that the audit record can say `scan_action="error"`. Nothing
@@ -195,6 +232,12 @@ else in `core` changes. The audit column is text and takes the value as it is.
   the false-positive rate on hard negatives apart from the overall rate.
 - The first scans after a start find the model still loading (3.4 s from the cache, 10 to 13 s on a
   busy machine) and fall back to the rules. `warm()` is for the start-up code to call.
+- The taint belongs to an MCP session. A client that opens another session starts clean, and
+  nothing in the gateway can tell a model that asked its host to reconnect from an agent that
+  restarted. The binding of a session to its principal stops one user from using another's session,
+  and does not stop a client from forgetting its own state.
+- The taint reaches the next call, not one that is past the policy slot already (ADR-0015). A call
+  issued before the output came back could not have been steered by it.
 - A scan that fails open leaves an attacker one way to get past the scanner: make it fail. The
   rules are fixed patterns with bounded repeats, and the longest scan I could make them take was
   about 25 ms in 200,000 characters (`docs/spikes/scanner.md`), so a crafted output costs time and

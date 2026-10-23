@@ -436,6 +436,24 @@ def load_classifier(cfg: ScannerSettings) -> Classifier | None:
     return HFClassifier(spec.model_id, spec.labels, name=spec.key, revision=spec.revision)
 
 
+async def warm_up(classifier: Classifier) -> None:
+    """Load the model in the background when the gateway starts, so that the first scans of a
+    call do not find it still loading and fall back to the rules (ADR-0011). A classifier with no
+    `warm` has nothing to load. A model that cannot be loaded is logged once and never stops the
+    gateway: each scan then reports `model: "error"` and the rules decide."""
+    warm = getattr(classifier, "warm", None)
+    if warm is None:
+        return
+    try:
+        await warm()
+    except Exception as error:
+        log.error(
+            "scanner_classifier_not_ready", classifier=classifier.name, error=type(error).__name__
+        )
+        return
+    log.info("scanner_classifier_ready", classifier=classifier.name)
+
+
 def fetch_model(spec: ClassifierSpec) -> str:
     """Download the files of the model into the Hugging Face cache and return where they are.
     The Docker build runs this, so that the container never goes to the network for them."""

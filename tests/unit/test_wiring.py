@@ -3,11 +3,16 @@ import pytest
 from keystone.audit.sink import InMemoryAuditSink
 from keystone.core.types import CallContext, Effect, ToolResult
 from keystone.gateway.interceptors.approval import ApprovalInterceptor as RealApprovalInterceptor
+from keystone.gateway.interceptors.flags import SessionFlagsInterceptor
 from keystone.gateway.interceptors.policy import PolicyInterceptor
+from keystone.gateway.interceptors.scan import OutputScanInterceptor
+from keystone.gateway.sessions import InMemorySessionStore
 from keystone.gateway.stubs import ApprovalInterceptor
+from keystone.gateway.stubs import OutputScanInterceptor as StubOutputScanInterceptor
 from keystone.gateway.wiring import INTERCEPTOR_ORDER, PipelineDeps, build_pipeline
-from keystone.settings import Settings
+from keystone.settings import ScannerSettings, Settings
 from tests.fixtures.calls import make_ctx
+from tests.fixtures.scan import guard
 
 
 class Echoing:
@@ -110,3 +115,53 @@ def test_with_an_approval_service_the_approval_slot_is_the_real_interceptor(
     slot = INTERCEPTOR_ORDER.index("approval")
     assert isinstance(real.interceptors[slot], RealApprovalInterceptor)
     assert type(stub.interceptors[slot]) is ApprovalInterceptor  # the stub, which refuses
+
+
+@pytest.mark.phase(7)
+def test_with_a_scanner_the_output_slot_is_the_real_interceptor(settings: Settings) -> None:
+    real = build_pipeline(
+        settings,
+        PipelineDeps(dispatcher=Echoing(), audit=InMemoryAuditSink(), scanner=guard()),
+    )
+    stub = build_pipeline(settings, deps())
+
+    slot = INTERCEPTOR_ORDER.index("output_scan")
+    assert isinstance(real.interceptors[slot], OutputScanInterceptor)
+    assert type(stub.interceptors[slot]) is StubOutputScanInterceptor  # scans nothing
+
+
+@pytest.mark.phase(7)
+async def test_a_scanner_that_is_switched_off_leaves_a_slot_that_records_no_scan(
+    settings: Settings,
+) -> None:
+    off = settings.model_copy(update={"scanner": ScannerSettings(enabled=False)})
+    ctx = make_ctx({"text": "hi"})
+
+    pipeline = build_pipeline(
+        off, PipelineDeps(dispatcher=Echoing(), audit=InMemoryAuditSink(), scanner=guard())
+    )
+    await pipeline.run(ctx)
+
+    # The audit record of a call that was not scanned has no score, and does not say "pass".
+    assert isinstance(
+        pipeline.interceptors[INTERCEPTOR_ORDER.index("output_scan")], OutputScanInterceptor
+    )
+    assert ctx.scan is None
+
+
+@pytest.mark.phase(7)
+async def test_the_flags_slot_is_the_real_interceptor_with_or_without_a_store(
+    settings: Settings,
+) -> None:
+    slot = INTERCEPTOR_ORDER.index("session_flags")
+
+    without = build_pipeline(settings, deps())
+    with_store = build_pipeline(
+        settings,
+        PipelineDeps(
+            dispatcher=Echoing(), audit=InMemoryAuditSink(), sessions=InMemorySessionStore()
+        ),
+    )
+
+    assert isinstance(without.interceptors[slot], SessionFlagsInterceptor)
+    assert isinstance(with_store.interceptors[slot], SessionFlagsInterceptor)

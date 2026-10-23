@@ -649,7 +649,7 @@
       "id": 18,
       "type": "timeseries",
       "title": "Sessions tainted per second",
-      "description": "Phase 7. No data until the scanner arrives.",
+      "description": "Sessions an injection tainted, by tenant. In each of them the Rule of Two now asks a person before an external effect.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -695,7 +695,7 @@
       "id": 19,
       "type": "timeseries",
       "title": "Scanner score p95",
-      "description": "Phase 7. No data until the scanner arrives.",
+      "description": "The 95th percentile of the scores of the outputs the scanner read (0 to 1). A session is tainted at 0.85.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -738,6 +738,52 @@
       ]
     },
     {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Scans that failed per second",
+      "description": "A scan that failed and was worked around, by stage: the classifier (the rules decided), the rules (the output went through unscanned) or an action (the output was withheld).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 61
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (stage) (rate(keystone_scan_errors_total[5m]))",
+          "legendFormat": "{{stage}}"
+        }
+      ]
+    },
+    {
       "id": 20,
       "type": "timeseries",
       "title": "Rate limited per second",
@@ -749,8 +795,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 61
+        "x": 0,
+        "y": 69
       },
       "fieldConfig": {
         "defaults": {
@@ -795,7 +841,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
+        "x": 12,
         "y": 69
       },
       "fieldConfig": {
@@ -841,8 +887,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 69
+        "x": 0,
+        "y": 77
       },
       "fieldConfig": {
         "defaults": {
