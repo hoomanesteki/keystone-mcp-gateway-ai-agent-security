@@ -19,6 +19,7 @@ upstreams and Keystone, and waits until every container reports healthy. Cold st
 | `make test-e2e` | The end-to-end tests against the running stack. The nightly workflow runs `make up` and then this |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit count is off |
+| `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 13 tools; olivia's transfer of 900 shows `require_approval` / `approve-transfer-over-500` in the audit and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 20 seconds. |
 | `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), alice's 15 tools, bob's 3 globex tools and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
 | `bash scripts/smoke/phase_2.sh` | Lists the 15 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
 
@@ -350,7 +351,8 @@ KEYSTONE_TOKEN=$(scripts/get_token.sh bob support-agent) \
 ## Policies
 
 The rules that decide a call are Cedar policies kept in files, read when Keystone starts, checked
-before they are used, and identified by a version. Everything is under one directory (`policy.root`):
+before they are used, and identified by a version. `docs/policies.md` explains how to write them,
+with examples and the usual mistakes. Everything is under one directory (`policy.root`):
 
 | Path | What it holds |
 |---|---|
@@ -388,6 +390,24 @@ set with no rule that allows anything denies every call with `default-deny` (inv
 `GET /_dev/audit` shows each recent call's `effect` and `reasons`, so the decision can be read
 without a database.
 
+### The default pack
+
+| File | Policy | What it does |
+|---|---|---|
+| `default/access/base.cedar` | `same-tenant-low-medium` | Anyone may list and call low and medium risk tools of their own tenant |
+| | `operators-high` | Members of `operators` may also use high risk tools of their tenant |
+| | `admins-critical` | Members of `admins` may use critical tools of their tenant |
+| | `deny-cross-tenant` | No one uses another tenant's tool, whatever else allows it |
+| `demo/approval/bank.cedar` | `approve-transfer-over-500` | A transfer over 500, or one whose amount could not be read, needs approval |
+| `acme/approval/mail.cedar` | `external-email-needs-approval` | A message to anyone outside `acme.test`, or to a recipient that is not one plain address, needs approval |
+
+Risk comes from the upstream config, so in the local stack `mail__send_email` and
+`bank__transfer` are high risk: support (alice) is refused both with `default-deny`, and an
+operator (olivia) is allowed `bank__transfer` up to 500 and `mail__send_email` to `acme.test`
+(`operators-high`), and asked about the rest. Until Phase 6 a call that needs approval is refused
+by the approval stub (`KS_DENIED`, "approval not available") and nothing is sent or moved.
+`scripts/smoke/phase_4.sh` runs the demo.
+
 ### The tool list
 
 `tools/list` shows a caller only the tools whose `list_tool` the policy allows. In the local stack
@@ -420,7 +440,8 @@ A set with any problem is refused whole, and every problem is listed with the fi
   `approval/`, `base.cdar` instead of `base.cedar`, a directory that is not `default`, `demo` or
   a configured tenant, a `.cedar` file outside `access/` and `approval/`. A rule that silently does
   not load is a rule someone believes is in force. Hidden files (`.DS_Store`, editor swap files)
-  are ignored.
+  are ignored. With no tenant configured nothing can be served, so tenant directories are not
+  read and not checked.
 
 Starting with a set that has a problem stops Keystone, and `keystone serve` prints each problem. A
 reload with one is refused and the set in force stays in force.
