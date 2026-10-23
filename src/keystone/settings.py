@@ -96,6 +96,9 @@ class AuditSettings(BaseModel):
     # action with no record is what an audit log exists to prevent. Unset means true, except when
     # env is dev, where a stopped Postgres should not stop the demo.
     fail_closed: bool | None = None
+    # Argument keys whose values are replaced in the log, besides the ones that look like secrets
+    # (secret, token, password, api key, authorization). Compared whole, without regard to case.
+    redact_keys: list[str] = Field(default_factory=list)
 
 
 class HealthSettings(BaseModel):

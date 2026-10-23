@@ -32,6 +32,7 @@ from sqlalchemy.exc import DataError, DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from keystone.audit.chain import GENESIS, Outcome, compute_hash, record_fields
+from keystone.audit.redact import RedactionConfig
 from keystone.core.errors import Reject
 from keystone.core.types import CallContext
 from keystone.db.models import AuditEvent
@@ -147,6 +148,7 @@ class PostgresAuditSink:
         sessions: async_sessionmaker[AsyncSession],
         *,
         metrics: Metrics | None = None,
+        redaction: RedactionConfig | None = None,
         queue_size: int = QUEUE_SIZE,
         batch_size: int = BATCH_SIZE,
         flush_interval_s: float = FLUSH_INTERVAL_S,
@@ -158,6 +160,7 @@ class PostgresAuditSink:
     ) -> None:
         self._sessions = sessions
         self._metrics = metrics if metrics is not None else Metrics()
+        self._redaction = redaction
         self._queue_size = queue_size
         self._batch_size = batch_size
         self._flush_interval_s = flush_interval_s
@@ -223,7 +226,7 @@ class PostgresAuditSink:
             self._count("not_running")
             raise AuditUnavailable("the audit writer is not running")
         try:
-            row = record_fields(ctx, outcome, reject)
+            row = record_fields(ctx, outcome, reject, redaction=self._redaction)
         except Exception:
             # A call this process cannot describe would fail the same way again. It is counted and
             # logged here, and the pipeline logs it once more as a failed audit.

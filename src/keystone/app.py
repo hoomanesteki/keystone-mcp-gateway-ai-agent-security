@@ -11,6 +11,7 @@ from redis.asyncio import Redis
 from keystone import __version__
 from keystone.admin.api import create_admin_router
 from keystone.admin.auth import AdminAuth, AdminRefused, admin_refused_handler
+from keystone.audit.redact import RedactionConfig
 from keystone.audit.sink import PostgresAuditSink
 from keystone.db.session import create_engine, make_sessionmaker
 from keystone.db.tenants import upsert_tenants
@@ -110,7 +111,9 @@ def create_app(
         service_headers=service_headers,
     )
     metrics = Metrics()
-    audit = audit or PostgresAuditSink(sessions, metrics=metrics)
+    audit = audit or PostgresAuditSink(
+        sessions, metrics=metrics, redaction=RedactionConfig.of(settings.audit.redact_keys)
+    )
     dispatcher: Dispatcher = UpstreamDispatcher(pool, health)
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
