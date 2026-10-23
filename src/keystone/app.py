@@ -9,8 +9,9 @@ from fastapi.responses import JSONResponse, Response
 from redis.asyncio import Redis
 
 from keystone import __version__
-from keystone.admin.api import create_admin_router
-from keystone.admin.auth import AdminAuth, AdminRefused, admin_refused_handler
+from keystone.admin.api import PREFIX, AdminDeps, create_admin_app
+from keystone.admin.auth import AdminAuth
+from keystone.admin.tools import ToolAdmin
 from keystone.audit.redact import RedactionConfig
 from keystone.audit.sink import PostgresAuditSink
 from keystone.db.session import create_engine, make_sessionmaker
@@ -21,7 +22,12 @@ from keystone.gateway.interceptors.policy import MemoryListCache, PolicyToolFilt
 from keystone.gateway.pipeline import AuditSink, Dispatcher, Interceptor
 from keystone.gateway.server import Gateway, mount_mcp
 from keystone.gateway.session_repo import SessionRepo
-from keystone.gateway.sessions import InMemorySessionStore, RedisSessionStore, SessionStore
+from keystone.gateway.sessions import (
+    InMemorySessionStore,
+    RedisSessionStore,
+    SessionDirectory,
+    SessionStore,
+)
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
 from keystone.gateway.wiring import PipelineDeps, build_pipeline
 from keystone.health import check_dependencies, upstream_statuses
@@ -204,7 +210,16 @@ def create_app(
             with anyio.CancelScope(shield=True), anyio.move_on_after(TRACER_SHUTDOWN_S):
                 await anyio.to_thread.run_sync(tracer.shutdown)
 
-    app = FastAPI(title="Keystone", version=__version__, lifespan=lifespan)
+    # No schema or docs for the app as a whole: the admin API serves its own at
+    # /admin/api/v1/openapi.json, and the rest is not described to strangers.
+    app = FastAPI(
+        title="Keystone",
+        version=__version__,
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.state.settings = settings
     app.state.engine = engine
     app.state.sessionmaker = sessions
@@ -216,8 +231,20 @@ def create_app(
     app.state.authenticator = authenticator
     app.state.vault = vault
     app.state.policies = policies
-    app.add_exception_handler(AdminRefused, admin_refused_handler)
-    app.include_router(create_admin_router(AdminAuth(authenticator), policies))
+    # The admin API is an app of its own under a prefix: its own schema, errors and CORS rule.
+    admin_api = create_admin_app(
+        AdminDeps(
+            auth=AdminAuth(authenticator),
+            sessions=sessions,
+            tools=ToolAdmin(sessions, on_change=registry.invalidate),
+            policies=policies,
+            console_origin=settings.console_origin,
+            session_directory=session_store
+            if isinstance(session_store, SessionDirectory)
+            else None,
+        )
+    )
+    app.mount(PREFIX, admin_api)
     manager = mount_mcp(app, gateway, authenticator)
     add_metadata_route(app, settings)
 

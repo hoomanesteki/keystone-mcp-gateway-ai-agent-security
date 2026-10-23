@@ -30,3 +30,23 @@ async def test_the_least_recently_used_session_is_dropped_at_the_cap() -> None:
     assert await store.get("b") is None
     assert await store.get("a") is not None
     assert await store.get("c") is not None
+
+
+@pytest.mark.phase(5)
+async def test_the_sessions_of_one_tenant_are_listed_newest_first() -> None:
+    store = InMemorySessionStore()
+    other = OLIVIA.model_copy(update={"tenant_id": "globex", "user_id": "bob"})
+    await store.create("a", OLIVIA)
+    await store.create("x", other)
+    await store.create("b", OLIVIA)
+    await store.create("c", OLIVIA)
+    await store.get("a")  # a was used last
+
+    mine = await store.list_for_tenant("acme", 10)
+    theirs = await store.list_for_tenant("globex", 10)
+    few = await store.list_for_tenant("acme", 2)
+
+    assert [s.session_id for s in mine] == ["a", "c", "b"]
+    assert [s.session_id for s in theirs] == ["x"]
+    assert [s.session_id for s in few] == ["a", "c"]
+    assert await store.list_for_tenant("nobody", 10) == []

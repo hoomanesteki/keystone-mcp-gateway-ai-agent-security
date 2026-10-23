@@ -17,7 +17,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from keystone.audit.chain import GENESIS
+from keystone.audit.chain import GENESIS, record_fields
 from keystone.audit.sink import AuditUnavailable, PostgresAuditSink
 from keystone.core.canonical import canonical_json
 from keystone.core.errors import Code, Reject
@@ -515,3 +515,21 @@ async def test_the_app_stores_the_arguments_of_a_call_masked(
     assert first["args_digest"] == hashlib.sha256(canonical_json(secret_call)).hexdigest()
     assert second["args_redacted"] == {"payload": "[redacted]"}
     assert "4111" not in str(app.audit.records)
+
+
+async def test_a_row_hashed_without_the_normalization_is_caught_on_the_way_back(
+    sessionmaker: Sessionmaker,
+) -> None:
+    # The drift the normalization prevents, made to happen: a float with no fraction goes into
+    # jsonb as 1e+22 and comes back as an integer, so a hash taken of what was written does not
+    # match what a SELECT returns. If the round-trip tests could not see that, they would prove
+    # nothing.
+    sink = PostgresAuditSink(sessionmaker)
+    row = record_fields(call(0), "ok", None)
+    row["args_redacted"] = {"big": 1e22}  # not passed through stable_json
+
+    await sink._insert([row])
+
+    rows = await rows_of(sessionmaker)
+    assert rows[0]["args_redacted"] == {"big": 10**22}
+    assert chain_problems(rows) == ["seq 1 does not match its own hash"]
