@@ -133,6 +133,7 @@ the "Found" list at the end.
 
 | ID | Title | Pts | Status | PR | Notes |
 |---|---|---|---|---|---|
+| KS-792 | Detector combination and document recall | 5 | todo | | Found at gate 7. M4 missed (0.59 best recall at FPR 0.05). Try a rules-first combination, per-window scoring and Prompt Guard 2. Tune on dev, score test once, publish what is measured. Runs before KS-907. |
 | KS-901 | Red-team scenario suite | 5 | todo | | |
 | KS-902 | Red-team runner and report | 8 | todo | | |
 | KS-903 | Performance harness | 5 | todo | | |
