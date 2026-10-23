@@ -30,11 +30,22 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     extra=""; if [ "$WITH_SCANNER" = "1" ]; then extra="--extra scanner"; fi; \
     uv sync --locked --no-dev --no-editable $extra
 
-# The model, pinned to a revision (keystone.defense.classifier.SPECS), into /opt/hf-cache. The
-# directory exists either way so that the runtime stage can copy it.
-RUN mkdir -p /opt/hf-cache \
+# The model, pinned to a revision (keystone.defense.classifier.SPECS), into /opt/hf-cache. What is
+# downloaded stays in a build cache, as uv's does, so that an edit in src does not fetch the 738 MB
+# again. Only the files of the pinned revision are copied out of it, as files and not as the links
+# of the cache (they point into a store of blobs that is shared by every model in it).
+# /opt/hf-cache exists either way so that the runtime stage can copy it.
+RUN --mount=type=cache,target=/var/cache/keystone-hf \
+    mkdir -p /opt/hf-cache \
     && if [ "$WITH_SCANNER" = "1" ]; then \
-         /app/.venv/bin/python -m keystone.defense.classifier fetch protectai-deberta-v2; \
+         snapshot="$(HF_HOME=/var/cache/keystone-hf \
+           /app/.venv/bin/python -m keystone.defense.classifier fetch protectai-deberta-v2)" \
+         && test -d "$snapshot" \
+         && echo "$snapshot" \
+         && model="$(basename "$(dirname "$(dirname "$snapshot")")")" \
+         && mkdir -p "/opt/hf-cache/hub/$model/snapshots" \
+         && cp -aL "$snapshot" "/opt/hf-cache/hub/$model/snapshots/" \
+         && find "/opt/hf-cache/hub/$model/snapshots" -name '*.safetensors' -size +1M | grep -q .; \
        fi \
     && chmod -R a+rX /opt/hf-cache
 
