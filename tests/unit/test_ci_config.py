@@ -1,3 +1,4 @@
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -26,6 +27,7 @@ def test_workflow_has_the_planned_jobs() -> None:
         "unit",
         "policy",
         "integration",
+        "console",
         "security",
         "docker",
         "commits",
@@ -81,3 +83,37 @@ def test_publish_releases_rejects_an_unknown_tag_and_a_missing_report(tmp_path: 
     assert unknown.returncode == 2
     assert missing.returncode == 1
     assert "docs/gates/phase-3.md" in missing.stderr
+
+
+@pytest.mark.phase(6)
+def test_the_console_job_takes_its_node_and_pnpm_versions_from_the_package() -> None:
+    steps = WORKFLOW["jobs"]["console"]["steps"]
+    node = next(step for step in steps if step.get("uses", "").startswith("actions/setup-node@"))
+    pnpm = next(step for step in steps if step.get("uses", "").startswith("pnpm/action-setup@"))
+    package = json.loads((ROOT / "console" / "package.json").read_text())
+
+    assert node["with"]["node-version-file"] == "console/.nvmrc"
+    assert re.fullmatch(r"\d+", (ROOT / "console" / ".nvmrc").read_text().strip())
+    assert pnpm["with"]["package_json_file"] == "console/package.json"
+    assert re.fullmatch(r"pnpm@\d+\.\d+\.\d+", package["packageManager"])
+
+
+@pytest.mark.phase(6)
+def test_the_console_job_fails_when_the_generated_types_are_behind_the_api() -> None:
+    commands = [step["run"] for step in WORKFLOW["jobs"]["console"]["steps"] if "run" in step]
+    drift = next(command for command in commands if "make console-types" in command)
+
+    assert "git diff --exit-code -- console/src/api/schema.d.ts" in drift
+    assert any("--frozen-lockfile" in command for command in commands)
+
+
+@pytest.mark.phase(6)
+def test_every_console_script_the_ci_job_and_the_makefile_call_exists() -> None:
+    scripts = json.loads((ROOT / "console" / "package.json").read_text())["scripts"]
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text() + (ROOT / "Makefile").read_text()
+
+    called = set(re.findall(r"pnpm --dir console (?:run )?([a-z][\w:-]*)", text))
+    called -= {"install", "exec"}
+
+    assert called, "no console scripts found"
+    assert called <= set(scripts), called - set(scripts)

@@ -109,6 +109,59 @@ jobs:
       - name: pytest
         run: uv run pytest tests/integration tests/invariants -m "not e2e and not slow"
 
+  console:
+    name: console
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      # The generated types are compared with the API's own schema, so Python runs here too.
+      - uses: astral-sh/setup-uv@v10.3.1
+        with:
+          enable-cache: true
+      - run: uv sync
+      # pnpm's version is the `packageManager` field of console/package.json, and Node's is the
+      # major in console/.nvmrc, so a developer and CI run the same ones.
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: console/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: console/.nvmrc
+          cache: pnpm
+          cache-dependency-path: console/pnpm-lock.yaml
+      - name: install
+        run: pnpm --dir console install --frozen-lockfile
+      # The console's types are generated from the API. A change to a route or a model that was
+      # not followed by `make console-types` leaves the committed file behind the API.
+      - name: generated types match the API
+        run: |
+          make console-types
+          if ! git diff --exit-code -- console/src/api/schema.d.ts; then
+            echo "::error file=console/src/api/schema.d.ts::out of date with the admin API, run make console-types and commit the result"
+            exit 1
+          fi
+      - name: eslint
+        run: |
+          status=0
+          pnpm --dir console exec eslint . --format json --output-file "$RUNNER_TEMP/eslint.json" || status=$?
+          jq -r '.[] | .filePath as $f | .messages[]
+            | "::\(if .severity == 2 then "error" else "warning" end) file=\($f | sub(env.GITHUB_WORKSPACE + "/"; "")),line=\(.line),col=\(.column)::\(.ruleId // "eslint"): \(.message | gsub("\n"; "%0A"))"' \
+            "$RUNNER_TEMP/eslint.json"
+          exit "$status"
+      - name: prettier
+        run: |
+          pnpm --dir console exec prettier --check . 2>&1 \
+            | sed -E 's#^\[warn\] ([^ ]+)$#::error file=console/\1::prettier would change this file#'
+      - name: tsc
+        run: |
+          pnpm --dir console exec tsc -b 2>&1 \
+            | sed -E 's#^(.+)\(([0-9]+),([0-9]+)\): error (TS[0-9]+): (.*)$#::error title=tsc,file=console/\1,line=\2,col=\3::\4 \5#'
+      - name: unit tests
+        run: pnpm --dir console test
+      - name: build
+        run: pnpm --dir console build
+
   security:
     name: security
     runs-on: ubuntu-24.04
