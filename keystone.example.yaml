@@ -23,14 +23,19 @@ upstreams:
   - {id: bank, tenant: acme, transport: http, url: "http://localhost:8103/mcp"}
   - {id: echo, tenant: acme, transport: http, url: "http://localhost:8104/mcp"}
 
+# Sign-in. KEYSTONE_OIDC_ISSUER is the `iss` of valid tokens (required); see docs/runbook.md for the
+# other OIDC variables. `mode: none` skips the check and makes every caller the dev principal. It is
+# refused unless env is dev or test.
+auth:
+  mode: oidc
+  allow_unknown_agents: false
+
 # The agents (OAuth clients, the token's `azp`) that may connect, and how far each is trusted:
 # low, standard or high. An agent that is not listed is refused with 403 unless
 # auth.allow_unknown_agents is true, and then it gets trust low.
 agents:
   support-agent: {trust: standard}
   ops-agent: {trust: high}
-auth:
-  allow_unknown_agents: false
 
 # How the tool list is kept current. All three can be set with KEYSTONE_REGISTRY__<NAME>.
 registry:
