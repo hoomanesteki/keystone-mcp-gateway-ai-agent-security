@@ -5,10 +5,7 @@ Do one story at a time. The story block in docs/PLAN.md is the spec.
 
 ## Commands
 - make up / make down / make reset      local stack (postgres, redis, keycloak, jaeger, prometheus, grafana, demo upstreams)
-- make check                            lint, types, unit, integration, invariants, console
-- make console-check                    the console's lint, unit tests and build (Node and pnpm, see console/.nvmrc)
-- make console-types                    regenerate the console's API types after an admin API change
-- make console-e2e                      the browser test of the approval loop (starts the stack if it is not up)
+- make check                            lint, types, unit, integration, invariants
 - make gate PHASE=N                     everything a phase gate runs
 - uv run pytest path::test -x           one test
 - uv run keystone --help                admin CLI
