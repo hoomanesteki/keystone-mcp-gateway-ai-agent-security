@@ -372,3 +372,39 @@ def test_the_console_origin_must_be_an_origin(value: str, monkeypatch: pytest.Mo
 
     with pytest.raises(ValueError, match="console_origin"):
         Settings()
+
+
+@pytest.mark.phase(6)
+def test_approval_settings_have_defaults_and_come_from_env_or_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    defaults = Settings().approvals
+    assert (defaults.wait_seconds, defaults.ttl_seconds) == (60, 900)
+    assert (defaults.sweep_interval_s, defaults.poll_interval_s) == (30, 2)
+
+    config = tmp_path / "keystone.yaml"
+    config.write_text("approvals:\n  wait_seconds: 20\n  ttl_seconds: 600\n")
+    assert Settings(config_path=config).approvals.wait_seconds == 20
+
+    monkeypatch.setenv("KEYSTONE_APPROVALS__WAIT_SECONDS", "1.5")
+    monkeypatch.setenv("KEYSTONE_APPROVALS__SWEEP_INTERVAL_S", "0.25")
+    settings = Settings(config_path=config)
+    assert (settings.approvals.wait_seconds, settings.approvals.ttl_seconds) == (1.5, 600)
+    assert settings.approvals.sweep_interval_s == 0.25
+
+
+@pytest.mark.phase(6)
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"wait_seconds": -1},
+        {"wait_seconds": 301},
+        {"ttl_seconds": 0},
+        {"sweep_interval_s": 0},
+        {"poll_interval_s": 0},
+        {"wait_secnods": 5},  # a misspelled key must fail, not quietly do nothing
+    ],
+)
+def test_approval_settings_are_checked(bad: dict[str, float]) -> None:
+    with pytest.raises(ValueError, match="approvals"):
+        Settings(approvals=bad)  # type: ignore[arg-type]

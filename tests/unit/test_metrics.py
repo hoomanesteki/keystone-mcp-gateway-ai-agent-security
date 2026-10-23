@@ -282,3 +282,22 @@ def test_the_text_format_names_counters_with_total() -> None:
     text = metrics.render().decode()
 
     assert re.search(r'^keystone_audit_failures_total\{reason="flush_failed"\} 1.0$', text, re.M)
+
+
+@pytest.mark.phase(6)
+def test_the_pending_gauge_is_set_for_every_known_tenant_and_returns_to_zero() -> None:
+    metrics = Metrics(tenants=["acme", "globex"])
+
+    def pending(tenant: str) -> float | None:
+        return metrics.registry.get_sample_value("keystone_approvals_pending", {"tenant": tenant})
+
+    metrics.approvals_changed({"acme": 3})
+    assert (pending("acme"), pending("globex")) == (3, 0)
+
+    metrics.approvals_changed({})  # the last request was decided
+    assert (pending("acme"), pending("globex")) == (0, 0)
+
+    # A tenant the config does not list shares one series, so a made-up id cannot make more.
+    metrics.approvals_changed({"made-up-1": 1, "made-up-2": 2})
+    assert pending("other") == 3
+    assert pending("made-up-1") is None

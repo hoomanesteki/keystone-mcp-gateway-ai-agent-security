@@ -4,3 +4,7 @@
 # commit:file:rule:line.
 06ae64455b2215e0ab7e3c8babf983135a00f5b3:tests/unit/test_redact.py:private-key:21
 06ae64455b2215e0ab7e3c8babf983135a00f5b3:tests/unit/test_redact.py:curl-auth-header:35
+
+# A made-up API key in the approval service test, as first committed (an argument whose name
+# triggers masking, put there to be masked). The test builds the value at run time now.
+f5a5384f50bbd8acf99fa4f415716ad1533c3f03:tests/integration/test_approvals_service.py:generic-api-key:396

@@ -101,6 +101,27 @@ class AuditSettings(BaseModel):
     redact_keys: list[str] = Field(default_factory=list)
 
 
+class ApprovalSettings(BaseModel):
+    """How a call that needs a person's approval is held (KS-601, ADR-0010)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # How long a call that needs approval is held in line before the agent gets KS_APPROVAL_PENDING
+    # and an id to wait on with keystone__await_approval. Most requests in a staffed queue are
+    # decided in under a minute, so the agent sees a slow call. 0 never holds a call. An HTTP
+    # request that waits much longer than a few minutes meets timeouts nobody here controls.
+    wait_seconds: float = Field(default=60.0, ge=0, le=300)
+    # How long a request can be decided and used, counted from the request.
+    ttl_seconds: float = Field(default=900.0, gt=0, le=7 * 24 * 3600)
+    # Seconds between marking requests that ran out of time as expired. Nothing depends on it for
+    # safety (a decision or a use of an expired request is refused either way); it keeps the
+    # queue, the pending gauge and the waiting calls current.
+    sweep_interval_s: float = Field(default=30.0, gt=0)
+    # Seconds between looks at a request that a waiter is waiting for, when no message from Redis
+    # woke it first.
+    poll_interval_s: float = Field(default=2.0, gt=0)
+
+
 class HealthSettings(BaseModel):
     """How the gateway watches its upstreams (KS-209)."""
 
@@ -160,6 +181,7 @@ class Settings(BaseSettings):
     registry: RegistrySettings = Field(default_factory=RegistrySettings)
     health: HealthSettings = Field(default_factory=HealthSettings)
     audit: AuditSettings = Field(default_factory=AuditSettings)
+    approvals: ApprovalSettings = Field(default_factory=ApprovalSettings)
     policy: PolicySettings = Field(default_factory=PolicySettings)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
     auth: AuthSettings = Field(default_factory=AuthSettings)

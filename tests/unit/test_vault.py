@@ -294,3 +294,35 @@ def test_a_ciphertext_nobody_wrote_is_a_vault_error() -> None:
     for token in (not_json, not_an_object, not_strings):
         with pytest.raises(VaultError, match="not what the vault wrote"):
             cipher.decrypt(token)
+
+
+@pytest.mark.phase(6)
+def test_a_json_value_round_trips_and_is_not_readable_in_the_ciphertext() -> None:
+    cipher = Cipher(fresh_key())
+    arguments = {"from_account": "CHK-001", "amount": 900.5, "nested": {"to": ["SAV-002", None]}}
+
+    sealed = cipher.encrypt_json(arguments)
+
+    assert cipher.decrypt_json(sealed) == arguments
+    assert b"CHK-001" not in sealed and b"900.5" not in sealed
+    # Nothing here is a credential, so the log scrubber learns none of it.
+    assert SECRETS.redact("CHK-001 900.5") == "CHK-001 900.5"
+
+
+@pytest.mark.phase(6)
+def test_a_json_value_opens_with_any_master_key_and_with_no_other() -> None:
+    old, new = fresh_key(), fresh_key()
+    sealed = Cipher(old).encrypt_json({"amount": 900})
+
+    assert Cipher(f"{new},{old}").decrypt_json(sealed) == {"amount": 900}
+    with pytest.raises(VaultError, match="cannot be decrypted"):
+        Cipher(new).decrypt_json(sealed)
+    with pytest.raises(VaultError, match="cannot be decrypted"):
+        Cipher(old).decrypt_json(b"not a token")
+
+
+@pytest.mark.phase(6)
+def test_the_vault_hands_out_its_cipher() -> None:
+    vault, _ = vault_with(fresh_key())
+
+    assert vault.cipher.decrypt_json(vault.cipher.encrypt_json([1, 2])) == [1, 2]
