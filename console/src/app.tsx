@@ -33,6 +33,21 @@ function shouldRetry(count: number, error: unknown): boolean {
   return count < 2;
 }
 
+/**
+ * Several calls are in flight at once, and each of them can be refused for the same expired token.
+ * One trip to the sign-in page is enough.
+ */
+function signInOnce(auth: AuthClient): () => void {
+  let started = false;
+  return () => {
+    if (started) return;
+    started = true;
+    auth.signIn(`${window.location.pathname}${window.location.search}`).catch(() => {
+      started = false;
+    });
+  };
+}
+
 /** The whole console. The router is the caller's, so tests can start at any address. */
 export function App({ auth, fetch: fetchImpl, queries: given }: AppProps) {
   const [api] = useState(() =>
@@ -40,9 +55,7 @@ export function App({ auth, fetch: fetchImpl, queries: given }: AppProps) {
       baseUrl: config.apiBase,
       getToken: () => auth.accessToken(),
       // A token the API refuses is one that was revoked or expired: sign in again.
-      onUnauthorized: () => {
-        void auth.signIn(`${window.location.pathname}${window.location.search}`);
-      },
+      onUnauthorized: signInOnce(auth),
       ...(fetchImpl ? { fetch: fetchImpl } : {}),
     }),
   );
