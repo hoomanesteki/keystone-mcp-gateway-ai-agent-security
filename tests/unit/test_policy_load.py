@@ -320,6 +320,18 @@ def test_a_directory_or_file_cedar_would_not_read_is_an_error(tmp_path: Path) ->
 
 
 @pytest.mark.phase(4)
+def test_with_no_tenants_a_tenant_directory_is_not_read_and_not_a_mistake(tmp_path: Path) -> None:
+    root = tree(tmp_path, acme__access__team=forbid("acme-only"))
+
+    loaded = load(root, tenants=())
+
+    assert loaded.tenants == {} and "acme-only" not in {p.id for p in loaded.policies}
+    # With a tenant configured, the same directory under another name is a mistake.
+    (root / "acme").rename(root / "acem")
+    assert any("acem/: not a policy directory" in p for p in problems(root, tenants=("acme",)))
+
+
+@pytest.mark.phase(4)
 def test_a_missing_root_schema_or_default_directory_is_an_error(tmp_path: Path) -> None:
     assert problems(tmp_path / "nowhere") == (
         f"the policy directory {tmp_path / 'nowhere'} does not exist",
