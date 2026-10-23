@@ -1,0 +1,9 @@
+# The same task over mail that holds no instruction: nothing here may need a person's approval.
+# It lists the unread mail and reads two ordinary emails.
+steps:
+  - tool: mail__list_emails
+    args: {unread_only: true}
+  - tool: mail__read_email
+    args: {email_id: m01}
+  - tool: mail__read_email
+    args: {email_id: m02}

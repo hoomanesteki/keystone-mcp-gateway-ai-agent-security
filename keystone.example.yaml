@@ -38,6 +38,13 @@ upstreams:
       # The amount in cents: `int` would cut 500.99 down to 500 and let it past a limit of 500.
       transfer: {risk: high, tags: [external_effect], extract: {amount: "$.amount | cents"}}
   - {id: echo, tenant: acme, transport: http, url: "http://localhost:8104/mcp"}
+  # Fixture pages that some carry an instruction for the agent that reads them (KS-708).
+  - id: web
+    tenant: acme
+    transport: http
+    url: "http://localhost:8105/mcp"
+    tools:
+      fetch: {risk: low, tags: [reads_untrusted]}
   # Globex's own drive: `python -m examples.upstreams.files_server --port 8112` with
   # FILES_SEED=examples/fixtures/files-globex. Only globex's users see its tools.
   - id: files_globex

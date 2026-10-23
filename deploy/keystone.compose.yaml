@@ -28,7 +28,7 @@ agents:
   support-agent: {trust: standard}
   ops-agent: {trust: high}
 
-# The four HTTP upstreams require an API key. `credential_env` names the variable that holds it
+# The HTTP upstreams require an API key. `credential_env` names the variable that holds it
 # (docker-compose.yml sets them); Keystone stores the value encrypted in its vault at startup and
 # adds it to every call, so no agent and no file here holds it.
 upstreams:
@@ -68,6 +68,17 @@ upstreams:
     url: "http://echo-mcp:8104/mcp"
     credential_mode: static
     credential_env: {X-Api-Key: ECHO_API_KEY}
+  # Pages from the web (KS-708). What a page says was written by someone outside the company, so
+  # fetching one is a read of untrusted text: the tool is tagged reads_untrusted. The server keeps
+  # fixture pages and never reaches the network.
+  - id: web
+    tenant: acme
+    transport: http
+    url: "http://web-mcp:8105/mcp"
+    credential_mode: static
+    credential_env: {X-Api-Key: WEB_API_KEY}
+    tools:
+      fetch: {risk: low, tags: [reads_untrusted]}
   # Globex's own drive. An upstream id is unique across tenants, so it is not called `files`.
   - id: files_globex
     tenant: globex
