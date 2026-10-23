@@ -1,7 +1,9 @@
 import asyncio
 import json
+import os
+import sys
 from collections.abc import Awaitable, Callable
-from datetime import UTC
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any
 
@@ -20,7 +22,9 @@ from keystone.db.models import Tool, Upstream
 from keystone.db.session import create_engine, make_sessionmaker
 from keystone.defense.description_check import check_description
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
+from keystone.identity.credential_repo import CredentialRepo
 from keystone.identity.middleware import AuthConfigError
+from keystone.identity.vault import Cipher, UnknownUpstream, Vault, VaultError
 from keystone.logging import configure_logging
 from keystone.registry.config import stdio_environments, tool_overrides
 from keystone.registry.naming import check_upstream_id
@@ -57,6 +61,10 @@ tool_app = typer.Typer(
 app.add_typer(tool_app, name="tool")
 agent_app = typer.Typer(help="Agents that may connect.", no_args_is_help=True, add_completion=False)
 app.add_typer(agent_app, name="agent")
+cred_app = typer.Typer(
+    help="Upstream credentials in the vault.", no_args_is_help=True, add_completion=False
+)
+app.add_typer(cred_app, name="cred")
 log = structlog.get_logger()
 
 
@@ -605,3 +613,134 @@ def agent_list(
     else:
         typer.echo("no agents configured")
     typer.echo(f"\nunknown agents: {policy}")
+
+
+def open_vault(settings: Settings, sessions: Sessionmaker) -> Vault:
+    if settings.master_keys is None or not settings.master_keys.get_secret_value().strip():
+        raise CliError("KEYSTONE_MASTER_KEYS is not set")
+    try:
+        cipher = Cipher(settings.master_keys, refuse_published=settings.env == "prod")
+    except VaultError as exc:
+        raise CliError(str(exc)) from exc
+    return Vault(cipher, CredentialRepo(sessions))
+
+
+def read_secret(from_env: str | None) -> str:
+    """The credential value, from an environment variable, a hidden prompt on a terminal, or
+    standard input. Never from the command line, where a process list would show it."""
+    if from_env:
+        value = os.environ.get(from_env, "")
+        if not value:
+            raise CliError(f"{from_env} is not set")
+    elif sys.stdin.isatty():
+        value = typer.prompt("Value", hide_input=True)
+    else:
+        value = sys.stdin.read()
+    value = value.rstrip("\r\n")
+    if not value:
+        raise CliError("the value is empty")
+    return value
+
+
+@cred_app.command("set")
+def cred_set(
+    upstream: Annotated[str, typer.Option("--upstream", help="Upstream id, for example mail.")],
+    header: Annotated[str, typer.Option("--header", help="Header to send, for example X-Api-Key.")],
+    user: Annotated[
+        str | None,
+        typer.Option("--user", help="Only for this user (per_user upstreams). Default: for all."),
+    ] = None,
+    from_env: Annotated[
+        str | None,
+        typer.Option("--from-env", help="Read the value from this variable, not standard input."),
+    ] = None,
+) -> None:
+    """Store the credential of an upstream, replacing the one there. The value is read from
+    standard input (or --from-env), never from an argument."""
+    try:
+        value = read_secret(from_env)
+    except CliError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from None
+
+    async def action(settings: Settings, sessions: Sessionmaker) -> str:
+        row = await UpstreamRepo(sessions).get(upstream)
+        if row is None:
+            raise CliError(f"there is no upstream {upstream!r}")
+        vault = open_vault(settings, sessions)
+        try:
+            await vault.set(row.tenant_id, upstream, {header: value}, user)
+        except (ValueError, UnknownUpstream) as exc:
+            raise CliError(str(exc)) from exc
+        if row.credential_mode == "none":
+            typer.echo(f"warning: {upstream} has credential_mode none; it is never sent", err=True)
+        elif user and row.credential_mode == "static":
+            typer.echo(f"warning: {upstream} is static; a per-user credential is unused", err=True)
+        owner = f"user {user}" if user else "all callers"
+        return f"stored the credential of {upstream} for {owner}"
+
+    typer.echo(run_with_database(action))
+
+
+@cred_app.command("list")
+def cred_list(
+    as_json: Annotated[bool, typer.Option("--json", help="Print JSON instead of a table.")] = False,
+) -> None:
+    """List stored credentials: whom they are for and when they were written. Nothing that could
+    reveal a value."""
+
+    def stamp(moment: datetime | None) -> str | None:
+        return moment.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%SZ") if moment else None
+
+    async def action(settings: Settings, sessions: Sessionmaker) -> list[dict[str, Any]]:
+        return [
+            {
+                "tenant": info.tenant_id,
+                "upstream": info.upstream_id,
+                "user": info.user_id,
+                "key_id": info.key_id,
+                "created_at": stamp(info.created_at),
+                "rotated_at": stamp(info.rotated_at),
+            }
+            for info in await CredentialRepo(sessions).infos()
+        ]
+
+    rows = run_with_database(action)
+    if as_json:
+        typer.echo(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        typer.echo("no credentials stored")
+        return
+    table = [("TENANT", "UPSTREAM", "USER", "KEY ID", "CREATED", "ROTATED")] + [
+        (
+            r["tenant"],
+            r["upstream"],
+            r["user"] or "-",
+            r["key_id"],
+            r["created_at"],
+            r["rotated_at"] or "-",
+        )
+        for r in rows
+    ]
+    widths = [max(len(line[i]) for line in table) for i in range(6)]
+    for line in table:
+        typer.echo("  ".join(cell.ljust(w) for cell, w in zip(line, widths, strict=True)).rstrip())
+
+
+@cred_app.command("rotate-keys")
+def cred_rotate_keys() -> None:
+    """Re-encrypt every credential under the first key of KEYSTONE_MASTER_KEYS. Put the new key
+    first and keep the old one until this has run; then remove the old one."""
+
+    async def action(settings: Settings, sessions: Sessionmaker) -> tuple[str, bool]:
+        report = await open_vault(settings, sessions).rotate_keys()
+        text = f"rotated {report.rotated}, already under the first key {report.unchanged}"
+        if report.failed:
+            text += f", could not decrypt {len(report.failed)}: {', '.join(report.failed)}"
+        return text, not report.failed
+
+    text, ok = run_with_database(action)
+    typer.echo(text)
+    if not ok:
+        raise typer.Exit(1)

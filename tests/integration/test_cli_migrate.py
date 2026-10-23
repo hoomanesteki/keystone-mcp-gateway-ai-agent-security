@@ -38,6 +38,7 @@ def test_db_upgrade_creates_the_schema_and_can_run_twice() -> None:
         second = runner.invoke(cli, ["db", "upgrade"], env={"KEYSTONE_DATABASE_URL": url})
 
         assert (first.exit_code, second.exit_code) == (0, 0), first.output + second.output
-        assert {"tenants", "upstreams", "tools", "sessions"} <= asyncio.run(tables(url))
+        expected = {"tenants", "upstreams", "tools", "sessions", "credentials"}
+        assert expected <= asyncio.run(tables(url))
     finally:
         drop_database(admin_url, SCRATCH)

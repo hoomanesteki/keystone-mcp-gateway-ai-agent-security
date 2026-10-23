@@ -279,3 +279,18 @@ def test_oidc_settings_have_defaults_and_come_from_env(monkeypatch: pytest.Monke
 def test_urls_must_be_http_or_https(field: str, value: str) -> None:
     with pytest.raises(ValueError, match=field):
         Settings(**{field: value})  # type: ignore[arg-type]
+
+
+@pytest.mark.phase(3)
+def test_master_keys_are_a_secret_that_settings_never_print(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = "FpAPqO9j92_C-qEbO6vqkdH2olOR4ZHKzRqM7OhjSE0="
+    assert Settings().master_keys is None
+
+    monkeypatch.setenv("KEYSTONE_MASTER_KEYS", f"{key},another")
+    settings = Settings()
+
+    assert settings.master_keys is not None
+    assert settings.master_keys.get_secret_value() == f"{key},another"
+    assert key not in repr(settings) and key not in settings.model_dump_json()
