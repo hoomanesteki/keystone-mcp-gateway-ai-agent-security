@@ -92,6 +92,12 @@ and the call goes on; the next write brings the row up to date.
   approval run a second time (`Pipeline.run_before`, ADR-0010). The policy then decides on the
   taint as it is when the call is dispatched, and not on the copy from before the wait.
   `PipelineDeps.sessions` is how the pipeline reaches the store.
+- The await tool does the same (KS-705). `keystone__await_approval` can wait up to two minutes for a
+  person, holding the session it read when it began, and then runs the call that waited through
+  the pipeline as a call of its own. It reads the session again (`refresh`) just before it does,
+  so that call is decided on the taint as it is then. Without that, an approval given for a
+  critical tool before an injection was read would run the tool after it (invariant I8). If the
+  session cannot be read, the await ends with `KS_DENIED` and the approval stays unused.
 - `InMemorySessionStore` hands out copies, as Redis does, so a test of a merge there tests the
   same thing. Both stores run the same contract (`tests/fixtures/session_contract.py`).
 

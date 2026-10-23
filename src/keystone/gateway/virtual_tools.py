@@ -30,6 +30,7 @@ from keystone.core.errors import Code, Reject
 from keystone.core.ids import new_id
 from keystone.core.types import CallContext, Principal, Risk, ToolRef, ToolResult
 from keystone.gateway.interceptors.approval import NOT_VALID, pending_rejection
+from keystone.gateway.sessions import SessionStore, refresh
 from keystone.registry.naming import SEPARATOR, VIRTUAL_UPSTREAM, is_virtual
 
 log = structlog.get_logger()
@@ -108,11 +109,14 @@ class VirtualTools:
         self._approvals = approvals
         self._registry = registry
         self._pipeline: Runner | None = None
+        self._sessions: SessionStore | None = None
 
-    def bind(self, pipeline: Runner) -> None:
-        """Give the await tool the pipeline it runs the waiting call through. The pipeline holds
-        the dispatcher and the dispatcher holds this, so it is set after both are built."""
+    def bind(self, pipeline: Runner, sessions: SessionStore | None = None) -> None:
+        """Give the await tool the pipeline it runs the waiting call through, and the store it
+        reads the session from again before it does (KS-705). The pipeline holds the dispatcher
+        and the dispatcher holds this, so it is set after both are built."""
         self._pipeline = pipeline
+        self._sessions = sessions
 
     def tools_for(self, principal: Principal) -> list[ToolRef]:
         """Every caller sees the tools that work: the await tool only where there are approvals."""
@@ -215,6 +219,7 @@ class VirtualTools:
             raise Reject(Code.TOOL_NOT_FOUND, f"there is no tool named {record.tool_name!r}")
         if self._pipeline is None:
             raise RuntimeError("the virtual tools are not bound to a pipeline")
+        await self._read_the_session_again(ctx)
         # The same principal and session, new call id and time, the original arguments, and the
         # id as a claim: the approval slot uses it, or refuses the call.
         inner = CallContext(
@@ -227,3 +232,18 @@ class VirtualTools:
             approval_id=record.id,
         )
         return await self._pipeline.run(inner)
+
+    async def _read_the_session_again(self, ctx: CallContext) -> None:
+        """The session this call carries was read when the await began, and the await may have
+        waited for two minutes. In that time another call of the session can have read an
+        injection, and the call that runs now is decided on the session as it is now, not as it
+        was: a critical tool that a person approved before the taint does not run after it
+        (invariant I8, ADR-0015). A session that cannot be read stops the call, and the approval
+        stays unused."""
+        if self._sessions is None:
+            return
+        try:
+            await refresh(self._sessions, ctx.session)
+        except Exception:
+            log.error("session_store_failed", call_id=ctx.call_id, exc_info=True)
+            raise Reject(Code.DENIED, "session state is unavailable") from None
