@@ -117,3 +117,13 @@ def test_every_console_script_the_ci_job_and_the_makefile_call_exists() -> None:
 
     assert called, "no console scripts found"
     assert called <= set(scripts), called - set(scripts)
+
+
+@pytest.mark.phase(6)
+def test_ci_local_runs_the_console_steps_of_the_ci_job() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    recipe = makefile[makefile.index("\nci-local:") :].split("\n\n")[0]
+
+    assert "$(MAKE) console-types" in recipe
+    assert "git diff --exit-code -- console/src/api/schema.d.ts" in recipe
+    assert "$(MAKE) console-check" in recipe

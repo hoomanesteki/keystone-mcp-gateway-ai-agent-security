@@ -63,6 +63,9 @@ migrate: ## apply database migrations to KEYSTONE_DATABASE_URL
 ci-local: up-core ## the same steps as CI, run locally
 	uv sync --locked
 	$(MAKE) lint type policy test-unit test-int
+	$(MAKE) console-types
+	git diff --exit-code -- console/src/api/schema.d.ts
+	$(MAKE) console-check
 	gitleaks git --no-banner --redact .
 	@req=$$(mktemp) && uv export --no-emit-project -o $$req >/dev/null \
 		&& $(RUN) pip-audit -r $$req --no-deps --disable-pip; rc=$$?; rm -f $$req; exit $$rc
