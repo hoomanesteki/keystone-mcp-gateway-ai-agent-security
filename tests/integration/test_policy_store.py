@@ -107,7 +107,6 @@ async def test_serve_prints_every_problem_and_exits(
 ) -> None:
     root = own_policies(tmp_path)
     (root / "default" / "access" / "a.cedar").write_text("permit (principal")
-    (root / "acme" / "approval").mkdir(parents=True)
     (root / "acme" / "approval" / "b.cedar").write_text(forbid("a-forbid"))
     environment = {
         "KEYSTONE_ENV": "test",

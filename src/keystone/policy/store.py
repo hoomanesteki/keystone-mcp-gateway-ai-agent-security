@@ -265,7 +265,9 @@ def load_policies(root: Path, tenants: Collection[str], *, include_demo: bool = 
             problems.append(f"{SCHEMA_FILE}: {exc}")
 
     allowed = {DEFAULT_DIR, DEMO_DIR, *tenant_ids}
-    for directory in _directories(root):
+    # With no tenant configured nothing can be served and no tenant directory is used, so none
+    # can be a mistake about which tenant it is for: only default/ and demo/ are checked.
+    for directory in _directories(root) if tenant_ids else []:
         if directory.name not in allowed:
             problems.append(
                 f"{directory.name}/: not a policy directory; use default, demo or the id of a "
