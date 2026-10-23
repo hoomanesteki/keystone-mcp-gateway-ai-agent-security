@@ -269,6 +269,9 @@ services:
       KEYSTONE_ALLOWED_HOSTS: '["127.0.0.1:*", "localhost:*", "[::1]:*", "keystone:*"]'
     volumes:
       - ./keystone.compose.yaml:/etc/keystone/keystone.yaml:ro
+      # The policies of this checkout, so an edit on the host takes effect on the next reload
+      # (keystone policy reload, or SIGHUP). keystone.compose.yaml names this path.
+      - ../policies:/etc/keystone/policies:ro
     ports:
       - "${KEYSTONE_PORT:-8080}:8080"
     depends_on:

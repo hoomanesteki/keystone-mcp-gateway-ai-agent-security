@@ -24,6 +24,9 @@ COPY --from=build /app/.venv /app/.venv
 # The stdio demo upstream (`python -m examples.upstreams.echo_server`) runs from /app.
 WORKDIR /app
 COPY examples ./examples
+# The policies Keystone starts with, read from /app/policies unless policy.root says otherwise.
+# Compose mounts the working copy over them, so an edit on the host is a reload away.
+COPY policies ./policies
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1
 USER keystone
