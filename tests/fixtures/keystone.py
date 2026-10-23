@@ -129,6 +129,7 @@ def keystone_app_factory(
     fake_idp: FakeIdp,  # noqa: F811
     clean_env: None,
     test_database_url: str,
+    app_database_url: str,
     clean_db: None,
     test_redis_url: str,  # noqa: F811 - the re-exported fixtures above
     redis: Redis,  # noqa: F811
@@ -173,7 +174,7 @@ def keystone_app_factory(
         options: dict[str, Any] = {
             "env": "test",
             "registry": registry or RegistrySettings(),
-            "database_url": SecretStr(test_database_url),
+            "database_url": SecretStr(app_database_url),
             "redis_url": SecretStr(test_redis_url),
             "tenants": tenants,
             "allow_private_upstreams": True,
@@ -203,6 +204,7 @@ def start_keystone(
     fake_idp: FakeIdp,  # noqa: F811
     clean_env: None,
     test_database_url: str,
+    app_database_url: str,
     clean_db: None,
     test_redis_url: str,  # noqa: F811
     redis: Redis,  # noqa: F811
@@ -220,7 +222,7 @@ def start_keystone(
     ) -> KeystoneApp:
         settings = Settings(
             env="test",
-            database_url=SecretStr(test_database_url),
+            database_url=SecretStr(app_database_url),
             redis_url=SecretStr(test_redis_url),
             tenants=[TenantConfig(id="acme", name="Acme Corp")],
             allow_private_upstreams=True,

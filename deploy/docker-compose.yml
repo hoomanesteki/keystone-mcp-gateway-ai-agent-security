@@ -248,7 +248,12 @@ services:
       # Seconds between upstream health probes. scripts/smoke/phase_2.sh sets a short one.
       KEYSTONE_HEALTH__INTERVAL_S: "${KEYSTONE_HEALTH_INTERVAL_S:-30}"
       KEYSTONE_CONFIG: /etc/keystone/keystone.yaml
-      KEYSTONE_DATABASE_URL: postgresql+asyncpg://keystone:keystone@postgres:5432/keystone
+      # Keystone runs as keystone_app, which may only add and read audit records (KS-503). The
+      # migration at start-up runs as the owner of the tables, and it creates the role with the
+      # password below. DEVELOPMENT ONLY: the password repeats .env.example.
+      KEYSTONE_DATABASE_URL: "postgresql+asyncpg://keystone_app:${KEYSTONE_APP_DB_PASSWORD:-keystone-app-dev-password}@postgres:5432/keystone"
+      KEYSTONE_MIGRATE_DATABASE_URL: postgresql+asyncpg://keystone:keystone@postgres:5432/keystone
+      KEYSTONE_APP_DB_PASSWORD: "${KEYSTONE_APP_DB_PASSWORD:-keystone-app-dev-password}"
       KEYSTONE_REDIS_URL: redis://redis:6379/0
       # Sign-in (KS-304). Tokens name the address a browser on this machine uses as their issuer.
       # Keystone fetches the discovery document and the keys from the Keycloak container.
