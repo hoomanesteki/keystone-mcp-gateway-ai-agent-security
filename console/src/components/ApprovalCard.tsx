@@ -95,12 +95,12 @@ export function ApprovalCard({
         </p>
 
         <div className="mt-5 grid gap-6 md:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-          <section aria-labelledby={`${ids}-arguments`}>
+          <div role="group" aria-labelledby={`${ids}-arguments`}>
             <Heading id={`${ids}-arguments`}>Arguments</Heading>
             <ArgumentsView value={item.arguments} masked={item.arguments_masked} />
-          </section>
+          </div>
           <div className="space-y-5">
-            <section aria-labelledby={`${ids}-reasons`}>
+            <div role="group" aria-labelledby={`${ids}-reasons`}>
               <Heading id={`${ids}-reasons`}>Why it needs approval</Heading>
               {item.reasons.length > 0 ? (
                 <ul className="space-y-1">
@@ -113,8 +113,8 @@ export function ApprovalCard({
               ) : (
                 <p className="text-fg-muted">No policy is named.</p>
               )}
-            </section>
-            <section aria-labelledby={`${ids}-session`}>
+            </div>
+            <div role="group" aria-labelledby={`${ids}-session`}>
               <Heading id={`${ids}-session`}>Session</Heading>
               <div className="flex flex-wrap gap-1.5">
                 {item.tainted ? <TaintBadge /> : null}
@@ -127,7 +127,7 @@ export function ApprovalCard({
                   <span className="text-fg-muted">No flags on this session.</span>
                 ) : null}
               </div>
-            </section>
+            </div>
           </div>
         </div>
       </div>
