@@ -825,7 +825,7 @@ Upstream credentials. User data inside tool outputs. The integrity of the audit 
 
 | Threat | Mitigation | Verified by |
 |---|---|---|
-| Spoofing: agent uses another user's token on an existing session | Session is bound to principal at initialize; mismatch returns 401 | KS-304 tests |
+| Spoofing: agent uses another user's token on an existing session | Session is bound to principal at initialize; mismatch returns 403 | KS-304 tests |
 | Spoofing: forged JWT | JWKS signature check, `alg` allowlist, `iss`/`aud`/`exp` checks | KS-303 tests |
 | Tampering: audit row edited | Hash chain; `keystone audit verify` | KS-503 tamper test, invariant I2 |
 | Tampering: tool description changed upstream | Hash pinning; quarantine until approved | KS-205 tests, invariant I4 |

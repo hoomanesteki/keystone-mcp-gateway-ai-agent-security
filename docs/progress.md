@@ -64,6 +64,8 @@ the "Found" list at the end.
 
 | ID | Title | Pts | Status | PR | Notes |
 |---|---|---|---|---|---|
+| KS-391 | Upstream authentication failures fail fast | 1 | todo | | Found at gate 3. A 401 or 403 from an upstream maps to `KS_UPSTREAM_ERROR` at once, without the reconnect backoff. |
+| KS-392 | Scrub registered secrets from tool results | 2 | todo | | Found at gate 3. An upstream that echoes its credential must not hand it to the agent. |
 | KS-401 | Spike: cedarpy capabilities | 2 | todo | | |
 | KS-402 | Cedar schema and entity builder | 5 | todo | | |
 | KS-403 | Policy store with validation and reload | 5 | todo | | |
