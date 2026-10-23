@@ -190,6 +190,29 @@ services:
       timeout: 3s
       retries: 20
 
+  # The globex tenant's own files server: another drive (examples/fixtures/files-globex) and its
+  # own API key. The server reads its key from FILES_API_KEY, like the acme files server.
+  files-globex-mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.upstreams
+    image: keystone-upstreams:dev
+    command: ["examples.upstreams.files_server", "--host", "0.0.0.0", "--port", "8112"]
+    environment:
+      FILES_API_KEY: "${FILES_GLOBEX_API_KEY:-dev-globex-key-5a7c28e6}"
+      FILES_SEED: /app/examples/fixtures/files-globex
+    ports:
+      - "${FILES_GLOBEX_PORT:-8112}:8112"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.urlopen('http://127.0.0.1:8112/healthz', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   echo-mcp:
     build:
       context: ..
@@ -241,6 +264,7 @@ services:
       FILES_API_KEY: "${FILES_API_KEY:-dev-files-key-81b2e04f}"
       BANK_API_KEY: "${BANK_API_KEY:-dev-bank-key-c6d57a92}"
       ECHO_API_KEY: "${ECHO_API_KEY:-dev-echo-key-0e4b9d13}"
+      FILES_GLOBEX_API_KEY: "${FILES_GLOBEX_API_KEY:-dev-globex-key-5a7c28e6}"
       # Other containers reach Keystone by its service name.
       KEYSTONE_ALLOWED_HOSTS: '["127.0.0.1:*", "localhost:*", "[::1]:*", "keystone:*"]'
     volumes:
@@ -261,6 +285,8 @@ services:
       bank-mcp:
         condition: service_healthy
       echo-mcp:
+        condition: service_healthy
+      files-globex-mcp:
         condition: service_healthy
     healthcheck:
       test:
