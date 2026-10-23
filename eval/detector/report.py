@@ -3,6 +3,11 @@
     python -m eval.detector.report                # all three configs on the test split
     python -m eval.detector.report --limit 200    # a sample: printed, no report written
     python -m eval.detector.report --note "why"   # the reason goes into the log line of the run
+    python -m eval.detector.report --render eval/results/detector-<date>.json
+                                                  # docs/results.md again from a saved report
+
+`--render` scores nothing and logs nothing: it writes the same numbers in the words that the code
+has now, so a change to the text of the report does not need another look at the test split.
 
 Every run reads the test split, a sample too, and so every run is logged in
 `eval/results/test-runs.jsonl` (`run.log_test_run`). The report says how many runs there were
@@ -79,6 +84,11 @@ def table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
 def configs_of(document: Mapping[str, Any]) -> dict[str, Any]:
     found: dict[str, Any] = document["result"]["configs"]
     return found
+
+
+def short(path: Path) -> Path:
+    """A path relative to the repository when it is in it, for a line of output."""
+    return path.relative_to(REPO) if path.is_relative_to(REPO) else path
 
 
 def plural(count: int, noun: str) -> str:
@@ -521,8 +531,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--offline", action="store_true", help="do not download the public parts")
     parser.add_argument("--no-docs", action="store_true", help="do not touch docs/results.md")
     parser.add_argument("--note", default="", help="why this run was made, for its line of the log")
+    parser.add_argument(
+        "--render",
+        type=Path,
+        default=None,
+        help="write docs/results.md from this saved report; nothing is scored or logged",
+    )
     args = parser.parse_args(argv)
 
+    if args.render:
+        saved = json.loads(args.render.read_text(encoding="utf-8"))
+        update_results(RESULTS_DOC, render_section(saved))
+        print(f"wrote {short(RESULTS_DOC)}")
+        return 0
     data = build(download=not args.offline)
     document = build_document(data, limit=args.limit)
     # The test split was read, so the run is logged, a sample or not.
@@ -536,7 +557,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     target.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if not args.no_docs:
         update_results(RESULTS_DOC, render_section(document))
-    print(f"wrote {target.relative_to(REPO) if target.is_relative_to(REPO) else target}")
+    print(f"wrote {short(target)}")
     return 0
 
 

@@ -37,6 +37,8 @@ from keystone.defense.classifier import FakeClassifier
 
 pytestmark = pytest.mark.phase(7)
 
+ROOT = Path(__file__).resolve().parents[2]
+
 
 @pytest.fixture
 def document(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
@@ -403,3 +405,40 @@ def test_the_counts_of_the_dataset_add_up_to_what_the_text_says() -> None:
         facts["counts"]["synthetic"] - kinds["hard_negative"]
         == kinds["indirect"] + kinds["negative"]
     )
+
+
+def test_a_saved_report_is_rendered_again_without_scoring_or_logging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, document: dict[str, Any]
+) -> None:
+    saved = tmp_path / "detector-2026-10-23.json"
+    saved.write_text(json.dumps(document))
+    doc = tmp_path / "results.md"
+    monkeypatch.setattr(report, "RESULTS_DOC", doc)
+    monkeypatch.setattr(run, "RUN_LOG", tmp_path / "runs.jsonl")
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the test split was read")
+
+    monkeypatch.setattr(report, "build", refuse)
+    monkeypatch.setattr(report, "build_document", refuse)
+
+    status = report.main(["--render", str(saved)])
+
+    assert status == 0
+    assert render_section(document).strip() in doc.read_text()
+    assert not (tmp_path / "runs.jsonl").exists()
+
+
+def test_the_committed_results_document_is_what_the_tool_renders_from_the_committed_report() -> (
+    None
+):
+    latest = sorted((ROOT / "eval" / "results").glob("detector-*.json"))[-1]
+    document = json.loads(latest.read_text(encoding="utf-8"))
+    text = (ROOT / "docs" / "results.md").read_text(encoding="utf-8")
+
+    assert text.count(START) == 1 and text.count(END) == 1
+    between = text.split(START)[1].split(END)[0]
+    # A hand edit of the document, or of the report, or of the code that words it, shows here.
+    # `python -m eval.detector.report --render <report>` writes the document again.
+    assert between.strip() == render_section(document).strip()
+    assert "Measured on " in between and " at commit `" in between
