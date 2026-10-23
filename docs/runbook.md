@@ -1150,9 +1150,10 @@ pnpm install             # pnpm 12, from "packageManager" in package.json
 pnpm dev                 # http://localhost:5173
 ```
 
-Open `http://localhost:5173` (the realm allows that address and not `127.0.0.1`) and the console sends you to Keycloak. Sign in as `lena` (approver) to see the
-Approvals page only, or as `root` (admin) to see Approvals, Audit and Tools. A user with neither
-role gets a page that says to ask for one. The menu only hides what the API would refuse (the
+Open `http://localhost:5173` (the realm allows that address and not `127.0.0.1`) and the console
+sends you to Keycloak. Sign in as `lena` (approver) to see the Approvals page only, or as `root`
+(admin) to see Approvals, Audit and Tools. A user with neither role gets a page that says to ask
+for one. The menu only hides what the API would refuse (the
 approvals routes take an approver or an admin, every other route an admin); the API makes the real
 decision.
 
@@ -1173,9 +1174,11 @@ the realm file allows both.
   cookie) is alive. Only the state of a sign-in in progress (the PKCE verifier) goes to
   `sessionStorage`, because it must survive the trip to the sign-in page.
 - **The access token is renewed with the refresh token** about a minute before it expires (the
-  realm gives it five minutes), and again on demand if a call finds it about to run out. A renewal
-  that fails does not end the session by itself: the token works until it expires, and then the
-  person is sent to sign in.
+  realm gives it five minutes), and again on demand if a call finds it about to run out. The
+  renewal is a `refresh_token` request to Keycloak's token endpoint, which the client's web origin
+  allows; there is no hidden iframe, so it does not depend on third-party cookies. A renewal that
+  fails does not end the session by itself: the token works until it expires, and then the person
+  is sent to sign in. If Keycloak's own session is gone, that sign-in shows the login form.
 - **The menu and the header come from the ID token** (`roles`, `tenant`, `name`). The API reads the
   access token, which carries the same claims and the audience `keystone`.
 - **Sign-out** ends the Keycloak session (with `id_token_hint`) and returns to `/signed-out`.
@@ -1277,12 +1280,12 @@ start the stack takes about 75.
 
 The run asks the browser for reduced motion, which the console honors, so that colors are at rest
 when axe reads them. A stopped stack, a missing `uv` or a bank that does not reset stops the run
-before the browser opens, with the reason. Requests of earlier runs that nobody decided stay in the queue until they
-expire (15 minutes); the test takes the newest card.
+before the browser opens, with the reason. Requests of earlier runs that nobody decided stay in the
+queue until they expire (15 minutes); the test takes the newest card.
 
 ### Settings
 
-Vite reads these when it starts. Only the `VITE_` ones reach the browser.
+Vite reads these from the environment or from `console/.env` (not committed) when it starts. Only the `VITE_` ones reach the browser.
 
 | Variable | Default | What it does |
 |---|---|---|
