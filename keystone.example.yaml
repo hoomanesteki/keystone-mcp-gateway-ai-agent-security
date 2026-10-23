@@ -142,3 +142,6 @@ scanner:
   actions: {low: annotate, medium: annotate, high: redact, critical: block}
   allowed_domains: []
   max_scan_chars: 200000
+  # A new tool is held for review when the rules score its description, or the description of a
+  # field of its input schema, at or above this. The model is not used for descriptions.
+  description_threshold: 0.5

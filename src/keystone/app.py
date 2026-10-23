@@ -20,6 +20,7 @@ from keystone.audit.sink import PostgresAuditSink
 from keystone.db.session import create_engine, make_sessionmaker
 from keystone.db.tenants import upsert_tenants
 from keystone.defense.classifier import Classifier, load_classifier, warm_up
+from keystone.defense.description_check import Screener
 from keystone.defense.scanner import build_scanner_guard
 from keystone.gateway.dispatch import UpstreamDispatcher
 from keystone.gateway.health import UpstreamHealth
@@ -129,6 +130,9 @@ def create_app(
         recorder=PolicyVersionRepo(sessions),
     )
     policies.start()
+    # What holds a new tool whose description, or the description of a field of its schema, reads
+    # like an instruction (KS-706). The admin API shows what it finds.
+    screener = Screener.from_settings(settings.scanner)
     directory = UpstreamDirectory()
     pool = UpstreamPool(
         directory_client_factory(directory, health_timeout_s=settings.health.timeout_s)
@@ -142,6 +146,7 @@ def create_app(
         timeout_s=settings.registry.sync_timeout_s,
         environments=stdio_environments(settings.upstreams),
         service_headers=service_headers,
+        screener=screener,
     )
     registry = RegistryService(
         syncer, cache_ttl_s=settings.registry.cache_ttl_s, on_load=metrics.tools_loaded
@@ -306,6 +311,7 @@ def create_app(
             auth=AdminAuth(authenticator),
             sessions=sessions,
             tools=ToolAdmin(sessions, on_change=registry.invalidate),
+            screener=screener,
             policies=policies,
             console_origin=settings.console_origin,
             session_directory=session_store

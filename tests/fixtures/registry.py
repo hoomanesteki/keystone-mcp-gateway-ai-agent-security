@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from keystone.core.types import ToolResult
 from keystone.db.tenants import upsert_tenants
+from keystone.defense.description_check import Screener
 from keystone.gateway.upstreams import (
     ClientFactory,
     UpstreamClient,
@@ -108,9 +109,11 @@ async def running_registry(
     timeout_s: float = 5.0,
     cache_ttl_s: float = 60.0,
     clock: Callable[[], float] = time.monotonic,
+    screener: Screener | None = None,
 ) -> AsyncIterator[RegistryEnv]:
     """Seed the tenant and one upstream row per fake (or per URL), and enter the pool. With
-    `fleet` the clients are fakes; with `urls` they are real HTTP clients."""
+    `fleet` the clients are fakes; with `urls` they are real HTTP clients. Without a `screener` a
+    new tool's description is read by the first check of Phase 2 alone."""
     await upsert_tenants(sessions, [TenantConfig(id=tenant, name=tenant.title())])
     upstreams = UpstreamRepo(sessions)
     tools = ToolRepo(sessions)
@@ -125,7 +128,13 @@ async def running_registry(
         await upstreams.upsert(UpstreamSpec(id=name, tenant_id=tenant, url=url))
     pool = UpstreamPool(factory)
     syncer = RegistrySyncer(
-        upstreams, tools, pool, directory, overrides=overrides or {}, timeout_s=timeout_s
+        upstreams,
+        tools,
+        pool,
+        directory,
+        overrides=overrides or {},
+        timeout_s=timeout_s,
+        screener=screener or Screener(),
     )
     service = RegistryService(syncer, cache_ttl_s=cache_ttl_s, clock=clock)
     async with pool:

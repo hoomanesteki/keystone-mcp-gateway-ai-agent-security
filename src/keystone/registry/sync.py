@@ -21,7 +21,7 @@ from keystone.core.canonical import canonical_json, sha256_hex
 from keystone.core.errors import Reject
 from keystone.core.types import Risk, ToolRef, ToolStatus, ToolTag
 from keystone.db.models import Tool, Upstream
-from keystone.defense.description_check import check_description
+from keystone.defense.description_check import Screener
 from keystone.gateway.upstreams import (
     UpstreamDirectory,
     UpstreamPool,
@@ -131,6 +131,9 @@ class RegistrySyncer:
     environments: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
     # Where to get the upstream's own credential. Without it the tool list is read unauthenticated.
     service_headers: ServiceHeaders | None = None
+    # What reads a new tool's description and the descriptions in its schema (KS-706). Without one
+    # only the first check of Phase 2 reads the description, as before the scanner.
+    screener: Screener = field(default_factory=Screener)
 
     async def learn(self, rows: Iterable[Upstream]) -> None:
         """Tell the directory where the upstreams are, and drop pooled clients whose address
@@ -248,11 +251,11 @@ class RegistrySyncer:
     async def _create(self, ref: ToolRef, report: SyncReport) -> None:
         """Store a tool seen for the first time. One whose description trips the screening is
         stored quarantined, so it never reaches a model before a person has read it."""
-        hits = check_description(ref.description)
-        if not hits:
+        screening = self.screener.screen(ref.description, ref.input_schema)
+        if not screening.flagged:
             await self.tools.upsert(ref)
         else:
-            reason = f"{SUSPICIOUS}:{','.join(hits)}"
+            reason = f"{SUSPICIOUS}:{screening.reason()}"
             held = ref.model_copy(update={"status": ToolStatus.QUARANTINED})
             await self.tools.upsert(held, quarantine_reason=reason)
             report.quarantined.append(ref.name)
