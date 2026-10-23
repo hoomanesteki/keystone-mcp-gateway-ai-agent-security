@@ -17,6 +17,8 @@ upstreams and Keystone, and waits until every container reports healthy. Cold st
 | `make reset` | Stop the stack and delete its volumes |
 | `scripts/get_token.sh alice support-agent` | Print an access token for a Keycloak user (see Identity) |
 | `make test-e2e` | The end-to-end tests against the running stack. The nightly workflow runs `make up` and then this |
+| `make console-check` | The console's lint (ESLint with type information, Prettier), unit tests and production build. `make check` runs it |
+| `make console-types` | Write the admin API's schema (`scripts/dump_openapi.py`) and generate `console/src/api/schema.d.ts` from it |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit log (read through the admin API) does not hold one new record for each call |
 | `bash scripts/smoke/phase_6.sh` | Three agents run as olivia and lena decides through the admin API: a transfer of 900 is held, approved and completed (a second decision is 409 and olivia's own is 403); one of 700 is rejected with a note that the agent gets; one of 600 times out as `KS_APPROVAL_PENDING`, is approved late and is awaited. Then the audit log and `keystone_approvals_pending` are checked. About 20 seconds: the third request waits out the 10 s hold. |
@@ -44,7 +46,7 @@ Tests never use these ports. They start their own services on free ports.
 | Files for globex | 8112 | the globex tenant's own drive, service `files-globex-mcp` |
 | Web | 8105 | later phase |
 | Fake LLM | 8199 | later phase |
-| Console | 5173 | later phase |
+| Console | 5173 | the Vite dev server (`pnpm dev` in `console/`), which `make console-e2e` also starts. The port is fixed because the Keycloak client `console` allows `http://localhost:5173/*` only |
 
 The credentials above are for local development only. Nothing in compose is meant to be exposed
 beyond the machine.
@@ -1130,6 +1132,86 @@ curl -H "Authorization: Bearer $TOKEN" 'http://localhost:8080/admin/api/v1/audit
 Browsers may call it from `KEYSTONE_CONSOLE_ORIGIN` only. The CORS rule allows `GET` and `POST`
 with the `authorization` and `content-type` headers; it does not allow cookies, because the API
 takes a bearer token.
+
+## Console
+
+The console is a React app in `console/` (Vite, TypeScript in strict mode, Tailwind, React Router and
+TanStack Query). It is for people: approvers decide requests, and admins read the audit log and
+review changed tools. Agents never use it. It runs on Vite's dev server at
+`http://localhost:5173`; there is no production image of it yet. Why React and not a server-rendered
+page is in ADR-0013.
+
+```bash
+make up                  # Keycloak and Keystone, which the console talks to
+cd console
+nvm use                  # Node 26, from console/.nvmrc
+pnpm install             # pnpm 12, from "packageManager" in package.json
+pnpm dev                 # http://localhost:5173
+```
+
+Open the address and the console sends you to Keycloak. Sign in as `lena` (approver) to see the
+Approvals page only, or as `root` (admin) to see Approvals, Audit and Tools. A user with neither
+role gets a page that says to ask for one. The menu only hides what the API would refuse (the
+approvals routes take an approver or an admin, every other route an admin); the API makes the real
+decision.
+
+| Role | Pages |
+|---|---|
+| `approver` | Approvals |
+| `admin` | Approvals, Audit, Tools |
+
+### Sign-in
+
+The console is a public Keycloak client (`console`) and signs in with the authorization code flow
+and PKCE (S256), through `oidc-client-ts`. The redirect address is
+`http://localhost:5173/auth/callback` and the sign-out address `http://localhost:5173/signed-out`;
+the realm file allows both.
+
+- **Tokens stay in memory.** Nothing that can be used as a credential goes to `localStorage` or a
+  cookie. A reload signs in again, and without a password prompt while the Keycloak session (its
+  cookie) is alive. Only the state of a sign-in in progress (the PKCE verifier) goes to
+  `sessionStorage`, because it must survive the trip to the sign-in page.
+- **The access token is renewed with the refresh token** about a minute before it expires (the
+  realm gives it five minutes), and again on demand if a call finds it about to run out. A renewal
+  that fails does not end the session by itself: the token works until it expires, and then the
+  person is sent to sign in.
+- **The menu and the header come from the ID token** (`roles`, `tenant`, `name`). The API reads the
+  access token, which carries the same claims and the audience `keystone`.
+- **Sign-out** ends the Keycloak session (with `id_token_hint`) and returns to `/signed-out`.
+- The address after sign-in must be a path of the console: `//host`, `https://host` and a
+  backslash are refused (a test covers this).
+
+### Calling the API
+
+The browser calls `/admin/api/v1` on the console's own origin, and the dev server proxies `/admin`
+to Keystone (`KEYSTONE_URL`, `http://localhost:8080` by default). There is no cross-origin request,
+so the API's CORS rule (`KEYSTONE_CONSOLE_ORIGIN`) is not involved in this setup.
+
+`console/src/api/schema.d.ts` is generated from the API's own schema and is committed. After a
+route or a model changes, run `make console-types` and commit the result. The `console` job of CI
+runs the same command and fails if the file differs, so the console cannot drift from the API. The
+client in `src/api/client.ts` takes its routes, parameters and answers from that file, so a change
+that breaks a call fails the build, not a page.
+
+### Settings
+
+Vite reads these when it starts. Only the `VITE_` ones reach the browser.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `VITE_OIDC_AUTHORITY` | `http://localhost:8180/realms/keystone` | The realm, as a browser reaches it |
+| `VITE_OIDC_CLIENT_ID` | `console` | The public client to sign in with |
+| `VITE_JAEGER_URL` | `http://localhost:16686` | Where the Jaeger UI is, for the trace links of the audit page |
+| `KEYSTONE_URL` | `http://localhost:8080` | Where the dev server forwards `/admin` |
+
+### Checks
+
+`make console-check` runs ESLint (with type information and the accessibility rules), Prettier,
+the unit tests (Vitest with Testing Library) and the production build, which type checks first.
+The `console` job of CI runs the same steps, one by one so that a failure is annotated on the line.
+
+The look follows the system: light and dark themes come from `prefers-color-scheme`, the colors are
+custom properties in `console/src/index.css`, and the text pairs were checked against WCAG AA.
 
 ## The MCP endpoint
 
