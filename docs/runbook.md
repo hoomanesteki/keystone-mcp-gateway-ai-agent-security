@@ -213,6 +213,8 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_MASTER_KEYS` | unset | Fernet keys for the credential vault, comma separated. The first encrypts, all decrypt. Needed by `keystone cred ...` and, from KS-306, by the gateway. |
 | `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is when `KEYSTONE_AUTH__MODE=none`. Refused in any other mode. |
 | `KEYSTONE_AUTH__ALLOW_UNKNOWN_AGENTS` | `false` | Let an agent that is not under `agents` in with trust `low`. Also `auth.allow_unknown_agents` in the YAML. |
+| `KEYSTONE_POLICY__ROOT` | `policies` | The directory with the schema and the policies (see Policies). A relative path is read from the working directory; the image has its own copy at `/app/policies`, and compose mounts this checkout's at `/etc/keystone/policies`. Also `policy.root` in the YAML. |
+| `KEYSTONE_POLICY__INCLUDE_DEMO` | `false` | Also read `demo/`, the rules that go with the demo upstreams. Compose turns it on. |
 
 Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
 
@@ -343,6 +345,74 @@ KEYSTONE_TOKEN=$(scripts/get_token.sh bob support-agent) \
   uv run python scripts/smoke/mcp_probe.py call bank__get_balance '{"account": "CHK-001"}'
 # error=true code=KS_TOOL_NOT_FOUND
 ```
+
+## Policies
+
+The rules that decide a call are Cedar policies kept in files, read when Keystone starts, checked
+before they are used, and identified by a version. Everything is under one directory (`policy.root`):
+
+| Path | What it holds |
+|---|---|
+| `schema.cedarschema` | The schema, the one source for entities and context (plan section 3.8) |
+| `default/access/*.cedar`, `default/approval/*.cedar` | Rules for every tenant |
+| `<tenant>/access/*.cedar`, `<tenant>/approval/*.cedar` | Rules for one tenant, named by its id |
+| `demo/access/*.cedar`, `demo/approval/*.cedar` | Rules for the demo upstreams, read when `policy.include_demo` is on |
+
+A tenant's access set is `default/` plus `demo/` (if on) plus its own directory, and so is its
+approval set. The access set is standard Cedar: a call is denied unless a permit matches and no
+forbid does. The approval set holds permits only, and is asked after access allowed: a permit that
+matches means a person has to approve the call. Phase 4 builds the engine in steps. At this point
+the files are loaded, checked and reloadable, and the gateway still allows every call; the
+interceptor that decides with them comes with KS-406.
+
+### What a load checks
+
+A set with any problem is refused whole, and every problem is listed with the file it is in:
+
+- The schema parses, and every policy validates against it. A misspelled attribute, an optional
+  attribute read without `has`, a type error and an unknown entity type or action are all caught.
+- Every policy has `@id("kebab-case-name")`. The id is what the audit log shows as the reason for
+  a decision, so it is required, unique within a tenant's combined set (access and approval
+  together), and not one of the names the engine uses itself (`default-deny`, `policy-error`).
+- The approval set has no `forbid`. A policy there can ask for approval but cannot block a call,
+  so a forbid would not do what its author expects.
+- Policy templates (`?principal`) are refused: they do nothing until linked.
+- A directory or file that Cedar would never read is an error too: `aproval/` instead of
+  `approval/`, `base.cdar` instead of `base.cedar`, a directory that is not `default`, `demo` or
+  a configured tenant, a `.cedar` file outside `access/` and `approval/`. A rule that silently does
+  not load is a rule someone believes is in force. Hidden files (`.DS_Store`, editor swap files)
+  are ignored.
+
+Starting with a set that has a problem stops Keystone, and `keystone serve` prints each problem. A
+reload with one is refused and the set in force stays in force.
+
+### Versions
+
+The version of a set is the sha256 of its files, the schema included, taken as sorted
+`(relative path, content)` pairs. It does not depend on timestamps or on the order the files were
+written, so the same files give the same version on every start. Each version that is loaded is
+recorded in `policy_versions` with every file's path, sha256 and content, so the rules in force at
+the time of a decision can be read back from the version the audit record names.
+
+### Reloading
+
+| How | What it does |
+|---|---|
+| `keystone policy reload` | Calls the endpoint below. `--url` (or `KEYSTONE_ADMIN_URL`, default `http://localhost:8080`) is the running Keystone, and `--token` (or `KEYSTONE_ADMIN_TOKEN`) is an access token of a user with the `admin` role. Exits 1 and prints every problem when the set is refused. |
+| `POST /admin/api/v1/policies/reload` | Needs the `admin` role. 200: `{"version", "previous", "changed"}`. 422: `{"error": "invalid_policies", "errors": [...], "version": <the version still in force>}`. 401, 403 and 503 are as for `/mcp`. |
+| `kill -HUP <pid>` | The same reload in the process that gets the signal. A refused set is logged as `policy_sighup_refused` and nothing changes. |
+
+```bash
+export KEYSTONE_ADMIN_TOKEN=$(scripts/get_token.sh root keystone-cli)
+uv run keystone policy reload
+# policies reloaded: version 4f0c8a1d92b3 (unchanged)
+```
+
+The admin API checks the token with the code that checks it for `/mcp`, but the caller does not
+have to be a listed agent: `keystone-cli` is how the CLI signs in, and it is not under `agents`.
+What lets a caller in is the `admin` role (user `root` in the local realm). A reload runs one at a
+time. It records the new version before it puts the set in force, so a set that could not be
+recorded is not used.
 
 ## Upstreams
 
