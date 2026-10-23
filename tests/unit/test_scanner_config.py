@@ -143,3 +143,21 @@ def test_a_short_name_that_is_not_a_classifier_is_refused(
 
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_the_default_actions_follow_the_risk_of_the_tool() -> None:
+    assert ScannerSettings().actions.model_dump() == {
+        "low": "annotate",
+        "medium": "annotate",
+        "high": "redact",
+        "critical": "block",
+    }
+
+
+def test_an_action_can_be_changed_for_one_risk(tmp_path: Path, clean_env: None) -> None:
+    path = tmp_path / "keystone.yaml"
+    path.write_text("scanner:\n  actions: {high: block}\n")
+
+    config = Settings(config_path=path).scanner
+
+    assert config.actions.high == "block" and config.actions.low == "annotate"

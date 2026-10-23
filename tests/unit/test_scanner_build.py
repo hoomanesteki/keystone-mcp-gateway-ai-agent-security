@@ -52,6 +52,20 @@ def test_the_dockerfile_installs_the_extra_and_the_model_only_when_asked() -> No
     assert "HF_HOME=" in dockerfile
 
 
+def test_the_model_download_stays_in_a_build_cache_so_an_edit_does_not_fetch_it_again() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    joined = re.sub(r"\\\n\s*", " ", dockerfile).splitlines()
+    [step] = [line for line in joined if line.startswith("RUN ") and "classifier fetch" in line]
+
+    cache = re.match(r"RUN --mount=type=cache,target=(\S+) ", step)
+    assert cache, "the step that fetches the model has no cache mount"
+    # The download goes to the cache, and the files of the pinned revision are copied into the
+    # image as files (-L): the links in the cache point into a store of blobs outside the folder
+    # of the model, and a copy of the folder alone would leave the weights behind.
+    assert f"HF_HOME={cache.group(1)}" in step
+    assert "cp -aL" in step and "/opt/hf-cache/hub/" in step
+
+
 def test_compose_builds_keystone_with_the_scanner() -> None:
     compose = yaml.safe_load((ROOT / "deploy" / "docker-compose.yml").read_text())
 

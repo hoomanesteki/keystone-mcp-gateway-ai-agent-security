@@ -1,32 +1,38 @@
 """The scanner: read what a tool result says, and judge whether it is an instruction (KS-701).
 
 `extract` turns a result into the text a reader of it would see. `CompositeScanner` scores that
-text with the rules (`rules.py`) and gives it a label. What is done with a flagged output is
-decided elsewhere, by the tool's risk (KS-703), and where the scanner sits in the pipeline is
-KS-704. The scanner changes nothing it is given.
+text with the rules (`rules.py`) and, when there is one, a classifier (`classifier.py`), and gives
+it a label. `OutputScanner` is what the pipeline will call (KS-704): it scans a tool result and
+applies the action for the tool's risk (`actions.py`), and it cannot raise. The scanner itself
+changes nothing it is given.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
 import anyio
+import structlog
 
 from keystone.core.types import ScanResult, ToolRef, ToolResult
+from keystone.defense import actions
 from keystone.defense.classifier import Classifier
 from keystone.defense.rules import Rule, analyze, combine, default_rules, prepare, reveal_tags
 from keystone.settings import ScannerSettings, ScannerThresholds
+
+log = structlog.get_logger()
 
 Label = Literal["benign", "suspicious", "injection"]
 
 # Text that is JSON is read as the strings in it. Beyond this size it is read as it is.
 MAX_JSON_CHARS = 5_000_000
-# What `model` says when the classifier was asked and gave no answer in time.
+# What `model` says when the classifier was asked and gave no answer in time, and when it raised.
 TIMEOUT = "timeout"
+FAILED = "error"
 
 
 @dataclass(frozen=True)
@@ -136,17 +142,27 @@ class CompositeScanner:
     """Scores a text with the rules and, when there is one, a classifier. The final score is the
     higher of the two: the rules are cheap and exact about what they name, and the classifier sees
     what no pattern names. A classifier that does not answer within `classifier_timeout_ms` is left
-    out of that scan, which is then the rules alone, and `model` says "timeout"."""
+    out of that scan, which is then the rules alone, and `model` says "timeout". A classifier that
+    raises is left out the same way, `model` says "error", and `on_error("classifier")` is called.
+    The rules are not guarded here: an exception in them reaches the caller, which is
+    `OutputScanner`."""
 
     def __init__(
         self,
         rules: Sequence[Rule],
         classifier: Classifier | None = None,
         cfg: ScannerSettings | None = None,
+        *,
+        on_error: Callable[[str], None] | None = None,
     ) -> None:
         self._rules = list(rules)
         self._classifier = classifier
         self._cfg = cfg or ScannerSettings()
+        self._on_error = on_error
+
+    @property
+    def rules(self) -> list[Rule]:
+        return list(self._rules)
 
     async def scan(self, text: str, *, tool: ToolRef) -> ScanResult:
         started = time.perf_counter()
@@ -155,13 +171,13 @@ class CompositeScanner:
         classifier = self._classifier
         if classifier is not None:
             view = prepare(reveal_tags(window))[0]
-            answer = await self._ask(classifier, view)
+            answer, model = await self._ask(classifier, view)
             score = details.score if answer is None else max(details.score, round(answer, 6))
             details = details.model_copy(
                 update={
                     "score": score,
                     "label": label_for(score, self._cfg.thresholds),
-                    "model": TIMEOUT if answer is None else classifier.name,
+                    "model": model,
                     "classifier_score": None if answer is None else round(answer, 6),
                 }
             )
@@ -189,10 +205,23 @@ class CompositeScanner:
             rule_score=score,
         )
 
-    async def _ask(self, classifier: Classifier, view: str) -> float | None:
-        with anyio.move_on_after(self._cfg.classifier_timeout_ms / 1000):
-            return await classifier.score(view)
-        return None
+    async def _ask(self, classifier: Classifier, view: str) -> tuple[float | None, str]:
+        """The classifier's score and the name for `model`: its own, or "timeout", or "error"."""
+        try:
+            with anyio.move_on_after(self._cfg.classifier_timeout_ms / 1000):
+                answer = await classifier.score(view)
+                return (answer, classifier.name) if answer is not None else (None, TIMEOUT)
+        except Exception as error:
+            # Cancellation is not an Exception, so it goes through. What the model was asked is
+            # not logged: it is the content of a tool output.
+            log.error(
+                "scanner_classifier_failed", classifier=classifier.name, error=type(error).__name__
+            )
+            log.debug("scanner_classifier_failed_detail", exc_info=True)
+            if self._on_error is not None:
+                self._on_error("classifier")
+            return None, FAILED
+        return None, TIMEOUT
 
     def _window(self, text: str) -> tuple[str, bool]:
         """The text, or its two ends when it is longer than the limit."""
@@ -205,3 +234,84 @@ class CompositeScanner:
 
 def build_scanner(cfg: ScannerSettings, classifier: Classifier | None = None) -> CompositeScanner:
     return CompositeScanner(default_rules(cfg.allowed_domains), classifier, cfg)
+
+
+@dataclass(frozen=True)
+class Inspection:
+    """What `OutputScanner.inspect` found and what goes on. `result` is the same object when
+    nothing was done to it."""
+
+    result: ToolResult
+    scan: ScanResult
+    images_skipped: int = 0
+
+
+class OutputScanner:
+    """Scans the result of a tool call and applies the action for the tool's risk. It is what the
+    output slot of the pipeline calls (KS-704), and it never raises, because a scanner that can
+    crash a call is a scanner people turn off:
+
+    - the rules raise: the output goes on as it is, the scan says `action="error"`, and
+      `on_error("rules")` is called. Nothing is flagged because nothing could be judged.
+    - the classifier raises or is slow: the rules alone decide (`CompositeScanner`).
+    - an action raises on an output that was flagged: the output is withheld, because it was found
+      to be suspect and could not be made safe, and `on_error("action")` is called.
+
+    A benign output is returned as the object it came in.
+    """
+
+    def __init__(
+        self,
+        scanner: CompositeScanner,
+        cfg: ScannerSettings,
+        *,
+        on_error: Callable[[str], None] | None = None,
+    ) -> None:
+        self._scanner = scanner
+        self._cfg = cfg
+        self._on_error = on_error
+
+    async def inspect(self, result: ToolResult, tool: ToolRef, call_id: str) -> Inspection:
+        try:
+            extracted = extract(result)
+            scan = await self._scanner.scan(extracted.text, tool=tool)
+        except Exception as error:
+            log.error("scanner_rules_failed", error=type(error).__name__, call_id=call_id)
+            log.debug("scanner_rules_failed_detail", exc_info=True)
+            self._report("rules")
+            return Inspection(result, ScanResult(score=0.0, label="benign", action="error"))
+        if scan.label == "benign":
+            return Inspection(result, scan, extracted.images_skipped)
+        action: actions.Action = getattr(self._cfg.actions, tool.risk.value)
+        try:
+            changed = actions.apply(
+                action, result, scan, call_id=call_id, rules=self._scanner.rules
+            )
+        except Exception as error:
+            log.error(
+                "scanner_action_failed", action=action, error=type(error).__name__, call_id=call_id
+            )
+            log.debug("scanner_action_failed_detail", exc_info=True)
+            self._report("action")
+            action = "block"
+            changed = actions.block(scan.model_copy(update={"action": action}), call_id)
+        return Inspection(
+            changed, scan.model_copy(update={"action": action}), extracted.images_skipped
+        )
+
+    def _report(self, stage: str) -> None:
+        if self._on_error is not None:
+            self._on_error(stage)
+
+
+def build_scanner_guard(
+    cfg: ScannerSettings,
+    classifier: Classifier | None = None,
+    *,
+    on_error: Callable[[str], None] | None = None,
+) -> OutputScanner:
+    """The scanner of a configuration with its actions, ready for the pipeline's output slot."""
+    scanner = CompositeScanner(
+        default_rules(cfg.allowed_domains), classifier, cfg, on_error=on_error
+    )
+    return OutputScanner(scanner, cfg, on_error=on_error)

@@ -96,7 +96,10 @@ class ScanResult(BaseModel):
     score: float  # 0..1, higher = more likely injection
     label: Literal["benign", "suspicious", "injection"]
     rule_hits: list[str] = []
-    action: Literal["pass", "annotate", "redact", "block"]
+    # "error" is the scan that could not be made: the rules raised and the output went through as
+    # it was (KS-703, ADR-0011). It was added to the plan's four so that the audit record can say
+    # so.
+    action: Literal["pass", "annotate", "redact", "block", "error"]
     model: str | None = None
     latency_ms: float = 0.0
 

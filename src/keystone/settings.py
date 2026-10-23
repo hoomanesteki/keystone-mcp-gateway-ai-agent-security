@@ -174,6 +174,19 @@ HOST = re.compile(
 
 
 Classifier = Literal["protectai-deberta-v2", "prompt-guard-2-86m", "none"]
+ScanAction = Literal["pass", "annotate", "redact", "block"]
+
+
+class ScannerActions(BaseModel):
+    """What is done to an output that scored `suspicious` or `injection`, by the risk of the tool
+    that made it (KS-703). `pass` leaves it alone and still records the score."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    low: ScanAction = "annotate"
+    medium: ScanAction = "annotate"
+    high: ScanAction = "redact"
+    critical: ScanAction = "block"
 
 
 class ScannerSettings(BaseModel):
@@ -190,6 +203,7 @@ class ScannerSettings(BaseModel):
     # of that scan, which is then scored by the rules alone (`model` says "timeout").
     classifier_timeout_ms: int = Field(default=300, ge=1, le=10_000)
     thresholds: ScannerThresholds = Field(default_factory=ScannerThresholds)
+    actions: ScannerActions = Field(default_factory=ScannerActions)
     # Hosts a markdown image may point to without a mark against it. An image anywhere else, or any
     # markdown link or image with a long query string, is how a conversation leaves in a URL.
     allowed_domains: list[str] = Field(default_factory=list)
