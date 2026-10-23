@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from keystone import __version__
+from keystone.admin.tools import ToolAdmin, ToolConflict, ToolNotFound
 from keystone.app import create_app
 from keystone.audit.verify import Verdict, export_records, verify_chain
 from keystone.core.types import ToolStatus
@@ -36,14 +37,11 @@ from keystone.policy.testrunner import run as run_policy_cases
 from keystone.registry.config import stdio_environments, tool_overrides
 from keystone.registry.naming import check_upstream_id
 from keystone.registry.pinning import (
-    OPERATOR_DISABLED,
-    REMOVED,
     pending_fingerprint,
     schema_text,
     unified_diff,
 )
 from keystone.registry.repo import (
-    PinningError,
     Sessionmaker,
     ToolRepo,
     UpstreamRepo,
@@ -560,17 +558,11 @@ def tool_approve_change(
     async def action(settings: Settings, sessions: Sessionmaker) -> str:
         found = await find_tool(settings, sessions, name, tenant)
         try:
-            row = await ToolRepo(sessions).approve_change(found.tenant_id, name, expect_hash=expect)
-        except PinningError as exc:
+            row = await ToolAdmin(sessions).approve_change(
+                found.tenant_id, name, expect=expect, note=note
+            )
+        except (ToolConflict, ToolNotFound) as exc:
             raise CliError(str(exc)) from exc
-        log.warning(
-            "tool_change_approved",
-            tool=name,
-            tenant=found.tenant_id,
-            was=found.quarantine_reason,
-            description_hash=row.description_hash,
-            note=note,
-        )
         return f"approved {name}: active with description sha256 {row.description_hash[:12]}"
 
     typer.echo(run_with_database(action))
@@ -585,13 +577,10 @@ def tool_disable(
 
     async def action(settings: Settings, sessions: Sessionmaker) -> str:
         found = await find_tool(settings, sessions, name, tenant)
-        if found.status == ToolStatus.QUARANTINED.value:
-            # It is out of service already. Disabling it would lose the fact that it awaits a
-            # review, and `enable` would then put it back without one.
-            raise CliError(f"{name} is quarantined and cannot be called; review it with tool show")
-        await ToolRepo(sessions).set_status(
-            found.tenant_id, name, ToolStatus.DISABLED, reason=OPERATOR_DISABLED
-        )
+        try:
+            await ToolAdmin(sessions).disable(found.tenant_id, name)
+        except (ToolConflict, ToolNotFound) as exc:
+            raise CliError(str(exc)) from exc
         return f"disabled {name}"
 
     typer.echo(run_with_database(action))
@@ -606,19 +595,11 @@ def tool_enable(
 
     async def action(settings: Settings, sessions: Sessionmaker) -> str:
         found = await find_tool(settings, sessions, name, tenant)
-        if found.status == ToolStatus.ACTIVE.value:
-            return f"{name} is already active"
-        if found.status == ToolStatus.QUARANTINED.value:
-            raise CliError(f"{name} is quarantined: review it, then use approve-change")
-        if found.quarantine_reason != OPERATOR_DISABLED:
-            why = (
-                "its upstream no longer lists it"
-                if found.quarantine_reason == REMOVED
-                else "it was not disabled by an operator"
-            )
-            raise CliError(f"{name} cannot be enabled by hand: {why}")
-        await ToolRepo(sessions).set_status(found.tenant_id, name, ToolStatus.ACTIVE)
-        return f"enabled {name}"
+        try:
+            _, changed = await ToolAdmin(sessions).enable(found.tenant_id, name)
+        except (ToolConflict, ToolNotFound) as exc:
+            raise CliError(str(exc)) from exc
+        return f"enabled {name}" if changed else f"{name} is already active"
 
     typer.echo(run_with_database(action))
 
