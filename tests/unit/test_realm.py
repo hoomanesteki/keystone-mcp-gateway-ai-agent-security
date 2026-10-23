@@ -89,6 +89,19 @@ def test_agent_clients_are_confidential_and_the_console_is_public_with_pkce() ->
     assert console["attributes"]["pkce.code.challenge.method"] == "S256"
 
 
+@pytest.mark.phase(6)
+def test_the_console_can_sign_out_and_come_back_to_itself() -> None:
+    """The console signs in with the redirect `http://localhost:5173/auth/callback` and signs out to
+    `http://localhost:5173/signed-out`; it reads the tenant and the roles from the ID token."""
+    console = clients()["console"]
+    mappers = {m["name"]: m for m in console["protocolMappers"]}
+
+    assert console["webOrigins"] == ["http://localhost:5173"]
+    assert console["attributes"]["post.logout.redirect.uris"] == "http://localhost:5173/*"
+    for name in ("tenant", "roles"):
+        assert mappers[name]["config"]["id.token.claim"] == "true", name
+
+
 @pytest.mark.phase(3)
 def test_every_client_maps_audience_tenant_groups_and_roles() -> None:
     for name, client in clients().items():
