@@ -49,7 +49,9 @@ export interface RecordedCall {
   authorization: string | null;
 }
 
-type Responder = (call: RecordedCall, params: Record<string, string>) => unknown;
+export type Responder = (call: RecordedCall, params: Record<string, string>) => unknown;
+/** A fixed answer (an array or an object), or a function that makes one from the call. */
+export type Route = Responder | object;
 
 export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -63,7 +65,7 @@ export function json(body: unknown, status = 200): Response {
  * answer, or to a function that makes it. A function may return a `Response` for an error. Every
  * call is recorded, and a call with no route answers 404 so a missing fake shows up in the test.
  */
-export function fakeApi(routes: Record<string, unknown> = {}) {
+export function fakeApi(routes: Record<string, Route> = {}) {
   const compiled = Object.entries(routes).map(([key, handler]) => {
     const [method = "GET", pattern = "/"] = key.split(" ");
     const source = pattern.replace(/:(\w+)/g, "(?<$1>[^/]+)");

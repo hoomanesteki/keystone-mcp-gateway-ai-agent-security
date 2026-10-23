@@ -83,3 +83,24 @@ export function TaintBadge() {
     </Badge>
   );
 }
+
+type Outcome = "ok" | "rejected" | "error";
+type Effect = "allow" | "deny" | "require_approval";
+
+/** What became of a call. A call that is waiting for a person ends as a rejection with the code
+ * KS_APPROVAL_PENDING, which is not a refusal, so it is shown as waiting. */
+export function OutcomeBadge({ outcome, code }: { outcome: Outcome; code?: string | null }) {
+  if (outcome === "ok") return <Badge tone="ok">ok</Badge>;
+  if (outcome === "rejected" && code === "KS_APPROVAL_PENDING") {
+    return <Badge tone="warn">waiting</Badge>;
+  }
+  return <Badge tone="danger">{outcome}</Badge>;
+}
+
+/** What the policy decided. */
+export function EffectBadge({ effect }: { effect: Effect | null }) {
+  if (effect === "allow") return <Badge tone="ok">allow</Badge>;
+  if (effect === "deny") return <Badge tone="danger">deny</Badge>;
+  if (effect === "require_approval") return <Badge tone="warn">needs approval</Badge>;
+  return <Badge>no decision</Badge>;
+}

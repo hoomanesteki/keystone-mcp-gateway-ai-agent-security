@@ -1,4 +1,5 @@
 import { NavLink, Outlet, useLocation } from "react-router";
+import { usePendingApprovals } from "../api/queries";
 import { pagesFor, roleLabels, type PAGES } from "../auth/roles";
 import { useAuthClient, useSignedIn } from "../auth/context";
 import type { Session } from "../auth/types";
@@ -12,6 +13,19 @@ const ICONS: Record<(typeof PAGES)[number]["page"], IconName> = {
   audit: "audit",
   tools: "tools",
 };
+
+/** How many requests wait, beside the menu entry: an approver sees it from any page. */
+function PendingCount() {
+  const pending = usePendingApprovals();
+  const count = pending.data?.length ?? 0;
+  if (count === 0) return null;
+  return (
+    <span className="ml-auto rounded-full bg-accent px-2 text-xs leading-5 font-semibold text-accent-fg tabular-nums">
+      <span aria-hidden="true">{count}</span>
+      <span className="sr-only">{count} waiting</span>
+    </span>
+  );
+}
 
 function Sidebar({ pages }: { pages: ReturnType<typeof pagesFor> }) {
   return (
@@ -32,6 +46,7 @@ function Sidebar({ pages }: { pages: ReturnType<typeof pagesFor> }) {
           >
             <Icon name={ICONS[page]} className="size-[18px]" />
             {label}
+            {page === "approvals" ? <PendingCount /> : null}
           </NavLink>
         ))}
       </nav>
