@@ -1150,7 +1150,7 @@ pnpm install             # pnpm 12, from "packageManager" in package.json
 pnpm dev                 # http://localhost:5173
 ```
 
-Open the address and the console sends you to Keycloak. Sign in as `lena` (approver) to see the
+Open `http://localhost:5173` (the realm allows that address and not `127.0.0.1`) and the console sends you to Keycloak. Sign in as `lena` (approver) to see the
 Approvals page only, or as `root` (admin) to see Approvals, Audit and Tools. A user with neither
 role gets a page that says to ask for one. The menu only hides what the API would refuse (the
 approvals routes take an approver or an admin, every other route an admin); the API makes the real
@@ -1357,7 +1357,7 @@ a 1 second limit each and returns 503 if either is down.
 | Keystone does not start: "KEYSTONE_APPROVALS_WEBHOOK_SECRET must be set" | `approvals.webhook_url` is set and the signing key is not in the environment. It is never read from the YAML. |
 | `pnpm dev` says port 5173 is in use | Another process holds it, perhaps an earlier `pnpm dev`. The port is fixed because the Keycloak client `console` allows `http://localhost:5173/*` only, so Vite refuses another one. Stop the other process. |
 | The console shows "Cannot reach the sign-in service" | The browser cannot read `VITE_OIDC_AUTHORITY` (`http://localhost:8180/realms/keystone`). Is Keycloak up, and is the port the one in `KEYCLOAK_PORT`? |
-| Keycloak says "Invalid parameter: redirect_uri" for the console | The realm in Keycloak is older than `deploy/keycloak/realm-keystone.json`. It is imported only when it does not exist: `make reset && make up` (see "Changing the realm"). |
+| Keycloak says "Invalid parameter: redirect_uri" for the console | The console was opened at an address other than `http://localhost:5173` (`127.0.0.1` is not allowed), or the realm in Keycloak is older than `deploy/keycloak/realm-keystone.json`. The realm is imported only when it does not exist: `make reset && make up` (see "Changing the realm"). |
 | The console says "Cannot reach Keystone" or its pages answer 502 | The dev server's proxy cannot reach `KEYSTONE_URL` (`http://localhost:8080`). Run `make up`. |
 | The console shows "No console access yet" | The user has neither the `approver` nor the `admin` role. Lena is an approver and root is an admin; see Identity. |
 | The audit page shows "Audit chain not checked" | `/audit/verify` failed (a 5xx or no answer). That is not a clean result: read the Keystone log, and run `keystone audit verify` for the whole log. |
