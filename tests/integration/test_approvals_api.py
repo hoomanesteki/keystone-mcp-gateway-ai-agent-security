@@ -276,6 +276,7 @@ async def test_the_schema_describes_the_approvals_routes(keystone_app: KeystoneA
     assert {"200", "404", "503"} <= set(one["responses"])
     assert "503" in schema["paths"]["/approvals"]["get"]["responses"]
     assert "ApprovalItem" in schema["components"]["schemas"]
+    assert "arguments_masked" in schema["components"]["schemas"]["ApprovalItem"]["properties"]
 
 
 # -- the webhook
@@ -425,3 +426,50 @@ async def test_a_webhook_that_cannot_be_reached_does_not_fail_the_call(
     [approval_id] = await hold_transfers(app, mcp_client, 900)
 
     assert approval_id
+
+
+# -- KS-691
+
+
+async def test_the_api_says_when_the_arguments_shown_are_not_all_of_them(
+    keystone_app_factory: Factory,
+    approval_service: ApprovalService,
+    fake_idp: FakeIdp,
+) -> None:
+    """An approver is shown the arguments as the audit log keeps them: a secret hidden, a long
+    text cut. They must be able to tell, since they approve what runs and not what they saw."""
+    app = keystone_app_factory()
+    transfer = make_tool("bank", "transfer")
+    whole = await approval_service.request(make_ctx(BIG, transfer), ["by-the-rule"])
+    hidden = await approval_service.request(
+        make_ctx({**BIG, "api_key": "not-shown"}, transfer), ["by-the-rule"]
+    )
+    cut = await approval_service.request(
+        make_ctx({**BIG, "memo": "x" * 3000}, transfer), ["by-the-rule"]
+    )
+    lena = fake_idp.token_for("lena")
+
+    listed = {i["id"]: i for i in call(app, "GET", "/approvals", lena).json()}
+
+    assert {key: item["arguments_masked"] for key, item in listed.items()} == {
+        whole: False,
+        hidden: True,
+        cut: True,
+    }
+    assert "not-shown" not in json.dumps(listed[hidden])
+    for approval_id, masked in ((whole, False), (hidden, True), (cut, True)):
+        detail = call(app, "GET", f"/approvals/{approval_id}", lena).json()
+        assert detail["arguments_masked"] is masked, approval_id
+
+
+async def test_an_id_with_a_nul_character_is_a_404_and_not_a_500(
+    keystone_app: KeystoneApp, fake_idp: FakeIdp
+) -> None:
+    lena = fake_idp.token_for("lena")
+
+    for bad in ("%00", "01J%00APPROVAL"):
+        assert call(keystone_app, "GET", f"/approvals/{bad}", lena).status_code == 404, bad
+        decided = call(
+            keystone_app, "POST", f"/approvals/{bad}/decision", lena, json={"approve": True}
+        )
+        assert decided.status_code == 404, bad

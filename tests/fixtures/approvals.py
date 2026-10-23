@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from keystone.approvals.service import ApprovalRecord, ApprovalService
 from keystone.audit.sink import InMemoryAuditSink
 from keystone.core.types import CallContext, Decision, Effect, Principal, ToolResult
-from keystone.gateway.pipeline import Pipeline
+from keystone.gateway.pipeline import Interceptor, Pipeline
 from keystone.gateway.wiring import PipelineDeps, build_pipeline
 from keystone.identity.vault import Cipher
 from keystone.settings import ApprovalSettings, Settings
@@ -125,14 +125,16 @@ def approval_pipeline(
     *,
     wait_seconds: float = 0.0,
     audit: InMemoryAuditSink | None = None,
+    overrides: dict[str, Interceptor] | None = None,
 ) -> Pipeline:
     """The real approval slot over `service`, behind a policy that asks for every call, in front
-    of `dispatcher`. A wait of 0 sends a new call straight to KS_APPROVAL_PENDING."""
+    of `dispatcher`. A wait of 0 sends a new call straight to KS_APPROVAL_PENDING. `overrides`
+    replaces slots by name, the policy's included."""
     configured = settings.model_copy(
         update={"approvals": ApprovalSettings(wait_seconds=wait_seconds)}
     )
     return build_pipeline(
         configured,
         PipelineDeps(dispatcher=dispatcher, audit=audit or InMemoryAuditSink(), approvals=service),
-        {"policy": AsksForApproval()},
+        {"policy": AsksForApproval(), **(overrides or {})},
     )

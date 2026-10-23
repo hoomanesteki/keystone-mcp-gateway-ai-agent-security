@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from keystone.gateway.interceptors.approval import ApprovalGate, ApprovalInterceptor
+from keystone.core.types import CallContext
+from keystone.gateway.interceptors.approval import (
+    ApprovalGate,
+    ApprovalInterceptor,
+    Revalidation,
+)
 from keystone.gateway.interceptors.credentials import CredentialInterceptor, HeaderSource
 from keystone.gateway.interceptors.pinning import PinningInterceptor, ToolStateLookup
 from keystone.gateway.interceptors.policy import PolicyInterceptor
@@ -35,6 +40,11 @@ INTERCEPTOR_ORDER = (
     "session_flags",
     "metering",
 )
+
+
+# What a call that waited for approval is not checked against a second time. The rate limit charges
+# a call once, when it arrives (KS-691). Every other slot ahead of the approval slot runs again.
+NOT_REPEATED = ("rate_limit",)
 
 
 @dataclass(frozen=True)
@@ -68,13 +78,18 @@ def build_pipeline(
     unknown = sorted(set(overrides) - set(INTERCEPTOR_ORDER))
     if unknown:
         raise ValueError(f"unknown interceptor slot: {', '.join(unknown)}")
+    revalidation = Revalidation()
     stubs: dict[str, Interceptor] = {
         "rate_limit": RateLimitInterceptor(),
         "pinning": PinningInterceptor(deps.tool_states),
         "budget": BudgetInterceptor(),
         "policy": PolicyInterceptor(deps.policy) if deps.policy else StubPolicyInterceptor(),
         "approval": (
-            ApprovalInterceptor(deps.approvals, wait_seconds=settings.approvals.wait_seconds)
+            ApprovalInterceptor(
+                deps.approvals,
+                wait_seconds=settings.approvals.wait_seconds,
+                revalidate=revalidation,
+            )
             if deps.approvals is not None
             else StubApprovalInterceptor()
         ),
@@ -84,7 +99,7 @@ def build_pipeline(
         "metering": MeteringInterceptor(),
     }
     interceptors = [overrides.get(slot, stubs[slot]) for slot in INTERCEPTOR_ORDER]
-    return Pipeline(
+    pipeline = Pipeline(
         interceptors,
         deps.dispatcher,
         deps.audit,
@@ -92,3 +107,9 @@ def build_pipeline(
         fail_closed=settings.audit_fail_closed,
         metrics=deps.metrics,
     )
+
+    async def check_again(ctx: CallContext) -> None:
+        await pipeline.run_before(ctx, "approval", skip=NOT_REPEATED)
+
+    revalidation.bind(check_again)
+    return pipeline

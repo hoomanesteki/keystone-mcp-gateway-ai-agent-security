@@ -14,7 +14,7 @@ from keystone.approvals.service import ApprovalRecord, Outcome
 from keystone.audit.redact import args_digest
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, Decision, Effect
-from keystone.gateway.interceptors.approval import ApprovalInterceptor
+from keystone.gateway.interceptors.approval import ApprovalInterceptor, Revalidation
 from tests.fixtures.calls import make_ctx, make_tool
 
 pytestmark = pytest.mark.phase(6)
@@ -105,8 +105,30 @@ def call(gate: Gate, decision: Decision | None = NEEDS_APPROVAL, **fields: Any) 
     return ctx
 
 
-def slot(gate: Gate) -> ApprovalInterceptor:
-    return ApprovalInterceptor(gate, wait_seconds=WAIT)
+class Checks:
+    """Stands in for the pipeline running the slots ahead of the approval slot again. It does what
+    it is told to do to the call: nothing, change the decision, or refuse."""
+
+    def __init__(self, gate: Gate | None = None) -> None:
+        self.gate = gate
+        self.runs = 0
+        self.refuse: Reject | None = None
+        self.decide: Decision | None = None
+
+    async def __call__(self, ctx: CallContext) -> None:
+        self.runs += 1
+        if self.gate is not None:
+            self.gate.calls.append(("revalidate", None))
+        if self.refuse is not None:
+            raise self.refuse
+        if self.decide is not None:
+            ctx.decision = self.decide
+
+
+def slot(gate: Gate, checks: Checks | None = None) -> ApprovalInterceptor:
+    revalidation = Revalidation()
+    revalidation.bind(checks or Checks(gate))
+    return ApprovalInterceptor(gate, wait_seconds=WAIT, revalidate=revalidation)
 
 
 async def test_a_call_that_needs_no_approval_is_left_alone() -> None:
@@ -203,7 +225,9 @@ async def test_an_approval_that_comes_in_the_wait_is_used_and_the_call_goes_on()
     await slot(gate).before_call(ctx)
 
     names = [name for name, _ in gate.calls]
-    assert names == ["request", "wait", "consume"]
+    # What was decided before the wait is old by now, so it is checked again before the approval
+    # is used.
+    assert names == ["request", "wait", "revalidate", "consume"]
     assert gate.id_on_context_at_consume is None
     assert ctx.approval_id == "01JAPPROVAL"
 
@@ -258,3 +282,104 @@ async def test_arguments_that_are_not_json_cannot_be_approved() -> None:
 
     assert refused.value.code is Code.DENIED
     assert gate.calls == []
+
+
+async def test_a_refusal_when_the_call_is_checked_again_leaves_the_approval_unused() -> None:
+    """The tool was quarantined, or the policy now forbids it, while the call waited."""
+    gate = Gate(outcome="approved")
+    checks = Checks(gate)
+    checks.refuse = Reject(Code.QUARANTINED, "held for review")
+    ctx = call(gate)
+
+    with pytest.raises(Reject) as refused:
+        await slot(gate, checks).before_call(ctx)
+
+    assert refused.value.code is Code.QUARANTINED
+    assert "consume" not in [name for name, _ in gate.calls]
+    assert ctx.approval_id is None
+
+
+async def test_when_the_rules_no_longer_ask_the_call_goes_on_without_the_approval() -> None:
+    gate = Gate(outcome="approved")
+    checks = Checks(gate)
+    checks.decide = Decision(effect=Effect.ALLOW, reasons=["operators-high"], source="policy")
+    ctx = call(gate)
+
+    await slot(gate, checks).before_call(ctx)
+
+    assert "consume" not in [name for name, _ in gate.calls]
+    assert ctx.approval_id is None
+    assert ctx.decision is checks.decide  # the allow it will be audited under
+
+
+async def test_when_the_rules_still_ask_the_approval_is_used_under_the_new_decision() -> None:
+    gate = Gate(outcome="approved")
+    checks = Checks(gate)
+    checks.decide = Decision(effect=Effect.REQUIRE_APPROVAL, reasons=["new-rule"], source="policy")
+    ctx = call(gate)
+
+    await slot(gate, checks).before_call(ctx)
+
+    assert ctx.approval_id == "01JAPPROVAL"
+    assert ctx.decision is not None
+    assert ctx.decision.reasons == ["new-rule", "approval:01JAPPROVAL"]
+
+
+async def test_an_executed_call_names_its_approval_in_its_reasons() -> None:
+    """The audit record holds the reasons, so it says which approval the call ran under, and the
+    approval row says who decided it."""
+    claims: list[tuple[Gate, dict[str, Any]]] = [
+        (Gate(outcome="approved"), {}),
+        (Gate(), {"approval_id": "01JCLAIM"}),
+    ]
+    for gate, ctx_fields in claims:
+        ctx = call(gate, **ctx_fields)
+
+        await slot(gate).before_call(ctx)
+
+        assert ctx.decision is not None
+        assert ctx.decision.reasons == ["approve-transfer-over-500", f"approval:{ctx.approval_id}"]
+        assert ctx.decision.effect is Effect.REQUIRE_APPROVAL and ctx.decision.source == "policy"
+    # The decision is replaced and not changed in place: the policy's own object is not ours.
+    assert NEEDS_APPROVAL.reasons == ["approve-transfer-over-500"]
+
+
+async def test_a_claimed_id_is_not_checked_again_because_the_whole_pipeline_just_ran() -> None:
+    checks = Checks()
+    gate = Gate()
+    ctx = call(gate, approval_id="01JCLAIM")
+
+    await slot(gate, checks).before_call(ctx)
+
+    assert checks.runs == 0 and ctx.approval_id == "01JCLAIM"
+
+
+async def test_a_slot_that_cannot_check_again_does_not_use_the_approval() -> None:
+    """Not bound to a pipeline: the call is stopped, and nothing is consumed."""
+    gate = Gate(outcome="approved")
+    unbound = ApprovalInterceptor(gate, wait_seconds=WAIT, revalidate=Revalidation())
+    ctx = call(gate)
+
+    with pytest.raises(RuntimeError, match="not bound"):
+        await unbound.before_call(ctx)
+
+    assert "consume" not in [name for name, _ in gate.calls]
+    assert ctx.approval_id is None
+
+
+async def test_the_approval_is_for_the_arguments_the_call_has_after_the_check_not_before() -> None:
+    """A slot that changes the arguments while the call is checked again leaves the approval
+    unfit for them: it was made for the digest of what was asked, and is used for what runs."""
+    gate = Gate(outcome="approved")
+
+    class Edits(Checks):
+        async def __call__(self, ctx: CallContext) -> None:
+            await super().__call__(ctx)
+            ctx.arguments = {**ctx.arguments, "amount": 90_000}
+
+    ctx = call(gate)
+
+    await slot(gate, Edits(gate)).before_call(ctx)
+
+    [(_, (_, digest, _))] = [c for c in gate.calls if c[0] == "consume"]
+    assert digest == args_digest({**ARGS, "amount": 90_000}) != args_digest(ARGS)

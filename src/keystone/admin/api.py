@@ -55,6 +55,7 @@ from keystone.approvals.service import (
     NotPending,
     OwnRequest,
 )
+from keystone.audit.redact import is_masked
 from keystone.audit.verify import export_record, verify_chain
 from keystone.core.types import Principal, SessionState
 from keystone.db.models import AuditEvent, Tool, Upstream
@@ -258,6 +259,7 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
                     risk=tool.risk if tool else None,
                     tags=sorted(tool.tags) if tool else [],
                     arguments=r.args_redacted,
+                    arguments_masked=is_masked(r.args_redacted),
                     args_digest=r.args_digest,
                     reasons=list(r.reasons),
                     requested_by_user=r.requested_by_user,

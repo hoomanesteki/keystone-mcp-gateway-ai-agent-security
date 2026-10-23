@@ -43,6 +43,8 @@ from keystone.approvals.service import ApprovalRecord
 log = structlog.get_logger()
 
 WEBHOOK_SECRET_ENV = "KEYSTONE_APPROVALS_WEBHOOK_SECRET"  # noqa: S105 - the name, not a secret
+# A signature is only as good as the key. `openssl rand -hex 32` makes one of 64.
+MIN_SECRET_CHARS = 16
 ATTEMPT_TIMEOUT_S = 5.0
 BACKOFF_S: tuple[float, ...] = (1.0, 2.0, 4.0)
 QUEUE_SIZE = 100
@@ -78,12 +80,21 @@ def webhook_payload(record: ApprovalRecord, console_origin: str) -> dict[str, ob
     }
 
 
+def slack_text(text: str) -> str:
+    """Text that Slack shows as written. In a message `<!channel>` pings a room and `<url|text>` is
+    a link that reads as it likes; Slack asks for `&`, `<` and `>` to be escaped. The agent's id,
+    the tool's name and the rules' ids are written by others."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def slack_payload(record: ApprovalRecord, console_origin: str) -> dict[str, str]:
-    reasons = ", ".join(record.reasons) or "no reason given"
+    reasons = slack_text(", ".join(record.reasons) or "no reason given")
     return {
         "text": (
-            f"Approval needed in {record.tenant_id}: {record.requested_by_user} "
-            f"({record.requested_by_agent}) wants to call {record.tool_name} ({reasons}). "
+            f"Approval needed in {slack_text(record.tenant_id)}: "
+            f"{slack_text(record.requested_by_user)} ({slack_text(record.requested_by_agent)}) "
+            f"wants to call {slack_text(record.tool_name)} ({reasons}). "
+            # The link is ours, and stays as it is for Slack to make it clickable.
             f"{console_link(console_origin, record.id)}"
         )
     }
@@ -113,6 +124,15 @@ class ApprovalNotifier:
             raise ApprovalConfigError(
                 f"approvals.webhook_url is set, so {WEBHOOK_SECRET_ENV} must be set: "
                 "an unsigned webhook cannot be told from a forged one"
+            )
+        if (
+            webhook_url
+            and webhook_secret
+            and len(webhook_secret.get_secret_value()) < MIN_SECRET_CHARS
+        ):
+            raise ApprovalConfigError(
+                f"{WEBHOOK_SECRET_ENV} must be at least {MIN_SECRET_CHARS} characters: "
+                "a short secret can be guessed from a signature"
             )
         self._console_origin = console_origin
         self._webhook_url = webhook_url

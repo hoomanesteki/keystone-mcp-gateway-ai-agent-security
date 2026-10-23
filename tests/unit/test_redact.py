@@ -11,6 +11,7 @@ from keystone.audit.redact import (
     RedactionConfig,
     args_digest,
     audit_arguments,
+    is_masked,
     luhn_valid,
     redact,
     redact_string,
@@ -286,3 +287,65 @@ def test_nesting_that_is_too_deep_is_cut() -> None:
 
     assert "[truncated]" in str(shown)
     assert digest is None or len(digest) == 64
+
+
+# -- KS-691: an approver is told when what they are shown is not all of it
+
+
+def nested(levels: int) -> dict[str, Any]:
+    root: dict[str, Any] = {}
+    here = root
+    for _ in range(levels):
+        here["n"] = {}
+        here = here["n"]
+    return root
+
+
+@pytest.mark.phase(6)
+def test_arguments_shown_whole_are_not_masked() -> None:
+    arguments: dict[str, Any] = {
+        "amount": 900,
+        "to": "SAV-002",
+        "items": [1, "two", {"k": None, "ok": True}],
+        "exactly_as_long_as_may_be_kept": "x" * 2048,
+    }
+
+    shown, _ = audit_arguments(arguments)
+
+    assert shown == arguments
+    assert is_masked(shown) is False
+    assert is_masked({}) is False
+
+
+@pytest.mark.phase(6)
+@pytest.mark.parametrize(
+    ("what", "arguments"),
+    [
+        ("a key that looks like a secret", {"api_key": "k"}),
+        ("a secret key deep in a list", {"a": [{"b": {"db_password": {"c": "x"}}}]}),
+        ("a payment card number", {"note": f"charge {CARD} today"}),
+        ("a bearer token", {"h": "Bearer abcdef0123456789"}),
+        ("a social security number", {"who": "ssn 123-45-6789"}),
+        ("an AWS access key id", {"id": "AKIAIOSFODNN7EXAMPLE"}),
+        ("a private key", {"k": pem("RSA PRIVATE KEY")}),
+        ("a string over the limit", {"body": "x" * 2049}),
+        ("a key over the limit", {"k" * 300: 1}),
+        ("nesting over the limit", nested(40)),
+        ("arguments that are too large to keep", {"a": ["x" * 1000] * 20}),
+    ],
+)
+def test_arguments_that_were_hidden_or_cut_are_masked(what: str, arguments: dict[str, Any]) -> None:
+    """Whatever `redact` does to a value, the form it leaves tells an approver that it did."""
+    shown, _ = audit_arguments(arguments)
+
+    assert shown != arguments, what  # something was changed
+    assert is_masked(shown) is True, what
+
+
+@pytest.mark.phase(6)
+def test_a_key_the_operator_listed_is_masked() -> None:
+    config = RedactionConfig.of(["ssn"])
+    shown, _ = audit_arguments({"ssn": "x", "other": 1}, config)
+
+    assert is_masked(shown) is True
+    assert is_masked(audit_arguments({"ssn_checked": True}, config)[0]) is False
