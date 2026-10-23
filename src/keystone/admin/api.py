@@ -55,7 +55,8 @@ PREFIX = "/admin/api/v1"
 DEFAULT_PAGE = 50
 MAX_PAGE = 200
 DEFAULT_VERIFY = 10_000
-MAX_VERIFY = 1_000_000
+# A request that checks more than this takes too long to wait for; the CLI checks the whole log.
+MAX_VERIFY = 100_000
 MAX_SESSIONS = 200
 
 

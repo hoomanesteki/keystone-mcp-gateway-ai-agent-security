@@ -372,4 +372,6 @@ async def test_the_verify_endpoint_reports_the_chain(
     assert bad["ok"] is False and bad["broken_seq"] == 3 and bad["problem"] == "hash mismatch"
     assert bad["message"] == "broken at seq 3: hash mismatch"
     assert call(keystone_app, "GET", "/audit/verify", root, params={"last": 2}).json()["ok"] is True
-    assert call(keystone_app, "GET", "/audit/verify", root, params={"last": 0}).status_code == 422
+    for refused in (0, 100_001):
+        response = call(keystone_app, "GET", "/audit/verify", root, params={"last": refused})
+        assert response.status_code == 422, refused
