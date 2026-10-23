@@ -68,6 +68,7 @@ class Reason(StrEnum):
     KEYS_UNAVAILABLE = "keys_unavailable"
     MISSING_TENANT = "missing_tenant"
     INVALID_TENANT = "invalid_tenant"
+    UNKNOWN_TENANT = "unknown_tenant"
     MISSING_AGENT = "missing_agent"
     UNKNOWN_AGENT = "unknown_agent"
 

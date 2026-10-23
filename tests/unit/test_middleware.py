@@ -6,7 +6,7 @@ from starlette.requests import Request
 
 from keystone.app import create_app
 from keystone.core.types import Principal
-from keystone.identity.jwt import AuthError
+from keystone.identity.jwt import AuthError, Forbidden
 from keystone.identity.metadata import metadata_url, protected_resource_metadata, public_origin
 from keystone.identity.middleware import (
     AuthConfigError,
@@ -16,7 +16,8 @@ from keystone.identity.middleware import (
     bearer_token,
     check_auth_settings,
 )
-from keystone.settings import Settings
+from keystone.settings import AgentConfig, Settings, TenantConfig
+from tests.fixtures.fake_idp import FakeIdp
 
 ALICE = Principal(tenant_id="acme", user_id="alice", agent_id="support-agent")
 ISSUER = "https://idp.test/realms/keystone"
@@ -174,3 +175,26 @@ def test_the_metadata_document_names_the_resource_and_the_issuer() -> None:
         "authorization_servers": [ISSUER],
         "bearer_methods_supported": ["header"],
     }
+
+
+@pytest.mark.phase(3)
+async def test_a_sound_token_for_a_tenant_the_config_does_not_list_is_forbidden(
+    fake_idp: FakeIdp,
+) -> None:
+    settings = Settings(
+        env="test",
+        oidc_issuer=fake_idp.issuer,
+        agents={"support-agent": AgentConfig()},
+        tenants=[TenantConfig(id="acme", name="Acme Corp")],
+    )
+    authenticator = Authenticator(settings)
+
+    def with_token(user: str) -> Headers:
+        return headers(f"Bearer {fake_idp.token_for(user)}")
+
+    alice = await authenticator.principal(with_token("alice"))
+    with pytest.raises(Forbidden) as raised:
+        await authenticator.principal(with_token("bob"))  # globex is not configured here
+
+    assert alice.tenant_id == "acme"
+    assert (raised.value.reason, raised.value.status) == ("unknown_tenant", 403)

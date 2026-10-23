@@ -8,7 +8,7 @@ import pytest
 from mcp import Client, StdioServerParameters
 from mcp.client.streamable_http import streamable_http_client
 
-from examples.upstreams import _common, echo_server, mail_server
+from examples.upstreams import _common, echo_server, files_server, mail_server
 from tests.fixtures.mcp_results import many, one, texts
 from tests.fixtures.servers import ServerThread
 from tests.fixtures.upstreams import NAMES, DemoUpstreams
@@ -337,6 +337,27 @@ async def test_a_server_without_a_key_reports_none_arrived(demo_upstreams: DemoU
     await call(demo_upstreams, "mail", "list_emails")
 
     assert demo_upstreams.state("mail")["api_key_received"] is False
+
+
+@pytest.mark.phase(3)
+async def test_a_files_server_can_start_from_another_seed(tmp_path: Path) -> None:
+    seed = ROOT / "examples" / "fixtures" / "files-globex"
+    server = files_server.create_server(tmp_path / "workspace", tmp_path / "files.db", seed=seed)
+    thread = ServerThread(server.streamable_http_app()).start()
+    try:
+        async with Client(f"{thread.url}/mcp") as client:
+            listing = many(await client.call_tool("list_files", {"path": "."}))
+            readme = texts(await client.call_tool("read_file", {"path": "README.txt"}))[0]
+            await client.call_tool("write_file", {"path": "README.txt", "content": "changed"})
+        httpx2.post(f"{thread.url}/_reset", timeout=10)
+        async with Client(f"{thread.url}/mcp") as client:
+            again = texts(await client.call_tool("read_file", {"path": "README.txt"}))[0]
+    finally:
+        thread.stop()
+
+    assert [entry["name"] for entry in listing] == ["README.txt", "finance", "projects"]
+    assert "Globex shared drive" in readme
+    assert again == readme  # reset goes back to that seed, not to the default one
 
 
 @pytest.mark.phase(1)

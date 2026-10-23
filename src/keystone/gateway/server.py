@@ -98,7 +98,10 @@ class Gateway:
         return types.ListToolsResult(
             tools=[
                 types.Tool(name=t.name, description=t.description, input_schema=t.input_schema)
+                # The registry is asked for this tenant only. A tool of another tenant that came
+                # back anyway is not shown (invariant I5).
                 for t in tools
+                if t.tenant_id == tenant_id
             ]
         )
 
@@ -115,6 +118,8 @@ class Gateway:
             # is still refused through the pipeline so that it leaves its audit record.
             log.error("session_store_failed", error=type(exc).__name__)
         tool = await self.registry.get(principal.tenant_id, params.name)
+        if tool is not None and tool.tenant_id != principal.tenant_id:
+            tool = None  # as above: another tenant's tool does not exist for this caller
         call = CallContext(
             call_id=new_id(),
             received_at=datetime.now(UTC),
