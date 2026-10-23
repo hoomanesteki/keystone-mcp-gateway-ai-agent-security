@@ -133,6 +133,9 @@ services:
       dockerfile: deploy/Dockerfile.upstreams
     image: keystone-upstreams:dev
     command: ["examples.upstreams.mail_server", "--host", "0.0.0.0", "--port", "8101"]
+    environment:
+      # Requests to /mcp need this key in X-Api-Key. Keystone holds it in its vault.
+      MAIL_API_KEY: "${MAIL_API_KEY:-dev-mail-key-3f9a1c7d}"
     ports:
       - "${MAIL_PORT:-8101}:8101"
     healthcheck:
@@ -151,6 +154,9 @@ services:
       dockerfile: deploy/Dockerfile.upstreams
     image: keystone-upstreams:dev
     command: ["examples.upstreams.files_server", "--host", "0.0.0.0", "--port", "8102"]
+    environment:
+      # Requests to /mcp need this key in X-Api-Key. Keystone holds it in its vault.
+      FILES_API_KEY: "${FILES_API_KEY:-dev-files-key-81b2e04f}"
     ports:
       - "${FILES_PORT:-8102}:8102"
     healthcheck:
@@ -169,6 +175,9 @@ services:
       dockerfile: deploy/Dockerfile.upstreams
     image: keystone-upstreams:dev
     command: ["examples.upstreams.bank_server", "--host", "0.0.0.0", "--port", "8103"]
+    environment:
+      # Requests to /mcp need this key in X-Api-Key. Keystone holds it in its vault.
+      BANK_API_KEY: "${BANK_API_KEY:-dev-bank-key-c6d57a92}"
     ports:
       - "${BANK_PORT:-8103}:8103"
     healthcheck:
@@ -187,6 +196,9 @@ services:
       dockerfile: deploy/Dockerfile.upstreams
     image: keystone-upstreams:dev
     command: ["examples.upstreams.echo_server", "--host", "0.0.0.0", "--port", "8104"]
+    environment:
+      # Requests to /mcp need this key in X-Api-Key. Keystone holds it in its vault.
+      ECHO_API_KEY: "${ECHO_API_KEY:-dev-echo-key-0e4b9d13}"
     ports:
       - "${ECHO_PORT:-8104}:8104"
     healthcheck:
@@ -221,6 +233,14 @@ services:
       KEYSTONE_OIDC_ISSUER: "http://localhost:${KEYCLOAK_PORT:-8180}/realms/keystone"
       KEYSTONE_OIDC_DISCOVERY_URL: "http://keycloak:8080/realms/keystone/.well-known/openid-configuration"
       KEYSTONE_PUBLIC_BASE_URL: "http://localhost:${KEYSTONE_PORT:-8080}"
+      # The vault (KS-305). DEVELOPMENT ONLY, like the keys below; both repeat .env.example.
+      KEYSTONE_MASTER_KEYS: "${KEYSTONE_MASTER_KEYS:-FpAPqO9j92_C-qEbO6vqkdH2olOR4ZHKzRqM7OhjSE0=}"
+      # The upstream credentials that keystone.compose.yaml takes from the environment (credential_env).
+      # At startup they go into the vault, encrypted. The upstreams above require the same values.
+      MAIL_API_KEY: "${MAIL_API_KEY:-dev-mail-key-3f9a1c7d}"
+      FILES_API_KEY: "${FILES_API_KEY:-dev-files-key-81b2e04f}"
+      BANK_API_KEY: "${BANK_API_KEY:-dev-bank-key-c6d57a92}"
+      ECHO_API_KEY: "${ECHO_API_KEY:-dev-echo-key-0e4b9d13}"
       # Other containers reach Keystone by its service name.
       KEYSTONE_ALLOWED_HOSTS: '["127.0.0.1:*", "localhost:*", "[::1]:*", "keystone:*"]'
     volumes:

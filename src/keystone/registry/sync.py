@@ -10,12 +10,12 @@ alone anyone else's.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 
 import anyio
 import structlog
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from keystone.core.canonical import canonical_json, sha256_hex
 from keystone.core.errors import Reject
@@ -36,6 +36,10 @@ from keystone.registry.repo import ToolRepo, UpstreamRepo
 log = structlog.get_logger()
 
 DEFAULT_TIMEOUT_S = 20.0
+
+# (tenant id, upstream id) -> the headers Keystone sends for itself to that upstream: the
+# credential it holds for listing tools and for health probes. See Vault.service_headers.
+ServiceHeaders = Callable[[str, str], Awaitable[Mapping[str, SecretStr]]]
 
 
 class SyncReport(BaseModel):
@@ -125,6 +129,8 @@ class RegistrySyncer:
     timeout_s: float = DEFAULT_TIMEOUT_S
     # upstream id -> the environment its stdio child gets (from the config file only)
     environments: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    # Where to get the upstream's own credential. Without it the tool list is read unauthenticated.
+    service_headers: ServiceHeaders | None = None
 
     async def learn(self, rows: Iterable[Upstream]) -> None:
         """Tell the directory where the upstreams are, and drop pooled clients whose address
@@ -149,7 +155,7 @@ class RegistrySyncer:
                 return report
             await self.learn([row])
             try:
-                listed = await self._list(upstream_id)
+                listed = await self._list(row)
             except Exception as exc:
                 message = describe_failure(exc)
                 if not isinstance(exc, Reject | TimeoutError):
@@ -184,9 +190,12 @@ class RegistrySyncer:
                 group.start_soon(one, row.id)
         return [reports[row.id] for row in rows]
 
-    async def _list(self, upstream_id: str) -> list[UpstreamTool]:
+    async def _list(self, row: Upstream) -> list[UpstreamTool]:
         with anyio.fail_after(self.timeout_s):
-            async with self.pool.lease(upstream_id) as client:
+            headers = (
+                await self.service_headers(row.tenant_id, row.id) if self.service_headers else {}
+            )
+            async with self.pool.lease(row.id, headers) as client:
                 return await client.list_tools()
 
     async def _apply(self, row: Upstream, listed: list[UpstreamTool], report: SyncReport) -> None:

@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 import httpx2
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
@@ -31,15 +32,39 @@ from tests.fixtures.upstreams import (  # noqa: F401
     NAMES,
     DemoUpstreams,
     _reset_demo_upstreams,
+    canary_secret,
     demo_upstreams,
+    keyed_upstreams,
 )
 
 AGENTS = {"support-agent": AgentConfig(trust="standard"), "ops-agent": AgentConfig(trust="high")}
+# The vault key of every test app. Made when the test run starts and never written anywhere.
+TEST_MASTER_KEY = Fernet.generate_key().decode()
 
 
 def auth_options(idp: FakeIdp) -> dict[str, Any]:
     """Settings that make an app trust tokens from the fake IdP, with the two demo agents."""
-    return {"oidc_issuer": idp.issuer, "oidc_audience": idp.audience, "agents": dict(AGENTS)}
+    return {
+        "oidc_issuer": idp.issuer,
+        "oidc_audience": idp.audience,
+        "agents": dict(AGENTS),
+        "master_keys": SecretStr(TEST_MASTER_KEY),
+    }
+
+
+def credentialed_upstreams(upstreams: DemoUpstreams, tenant: str = "acme") -> list[UpstreamConfig]:
+    """Config for upstreams that require a key: static credentials taken from the environment, in
+    the form the compose config uses. Hand `upstreams.environ()` to create_app as `environ`."""
+    return [
+        UpstreamConfig(
+            id=name,
+            tenant=tenant,
+            url=upstreams.url(name),
+            credential_mode="static",
+            credential_env={"X-Api-Key": f"{name.upper()}_API_KEY"},
+        )
+        for name in NAMES
+    ]
 
 
 @dataclass
@@ -65,6 +90,7 @@ class KeystoneApp:
 
 @pytest.fixture
 def keystone_app_factory(
+    request: pytest.FixtureRequest,
     demo_upstreams: DemoUpstreams,  # noqa: F811 - the re-exported fixture above
     fake_idp: FakeIdp,  # noqa: F811
     clean_env: None,
@@ -75,30 +101,41 @@ def keystone_app_factory(
 ) -> Iterator[Callable[..., KeystoneApp]]:
     """Start Keystone against the test database and Redis database 15. `settings` overrides
     Settings fields, and other keyword arguments go to create_app (a spy dispatcher, an
-    interceptor). Tests that use it need Postgres and Redis, so they carry the `services` marker,
-    and `clean_db` and `redis` empty what the app wrote."""
+    interceptor). `keyed=True` points it at the demo servers that require an API key and gives it
+    their keys through the environment, as compose does. Tests that use it need Postgres and
+    Redis, so they carry the `services` marker, and `clean_db` and `redis` empty what the app
+    wrote."""
     started: list[KeystoneApp] = []
 
     def start(
         *,
         registry: RegistrySettings | None = None,
         settings: Mapping[str, Any] | None = None,
+        keyed: bool = False,
         **app_options: Any,
     ) -> KeystoneApp:
-        built = Settings(
-            env="test",
-            registry=registry or RegistrySettings(),
-            database_url=SecretStr(test_database_url),
-            redis_url=SecretStr(test_redis_url),
-            tenants=[TenantConfig(id="acme", name="Acme Corp")],
-            allow_private_upstreams=True,
-            upstreams=[
+        if keyed:
+            keyed_servers: DemoUpstreams = request.getfixturevalue("keyed_upstreams")
+            keyed_servers.reset()
+            upstreams = credentialed_upstreams(keyed_servers)
+            app_options.setdefault("environ", keyed_servers.environ())
+        else:
+            upstreams = [
                 UpstreamConfig(id=name, tenant="acme", url=demo_upstreams.url(name))
                 for name in NAMES
-            ],
-            **{**auth_options(fake_idp), **(settings or {})},
-        )
-        app = create_app(built, **app_options)
+            ]
+        options: dict[str, Any] = {
+            "env": "test",
+            "registry": registry or RegistrySettings(),
+            "database_url": SecretStr(test_database_url),
+            "redis_url": SecretStr(test_redis_url),
+            "tenants": [TenantConfig(id="acme", name="Acme Corp")],
+            "allow_private_upstreams": True,
+            "upstreams": upstreams,
+            **auth_options(fake_idp),
+        }
+        options.update(settings or {})
+        app = create_app(Settings(**options), **app_options)
         running = KeystoneApp(app, ServerThread(app).start())
         started.append(running)
         return running

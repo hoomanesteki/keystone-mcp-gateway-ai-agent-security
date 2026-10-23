@@ -24,7 +24,12 @@ class UpstreamDispatcher:
             # Refused without a connection attempt, so the call never reached the upstream.
             ctx.dispatched = False
             raise Reject(Code.UPSTREAM_ERROR, f"upstream {upstream_id} is down")
-        async with self.pool.lease(upstream_id, ctx.upstream_headers) as client:
-            return await client.call_tool(
-                ctx.tool.upstream_tool_name, ctx.arguments, ctx.tool.timeout_s
-            )
+        try:
+            async with self.pool.lease(upstream_id, ctx.upstream_headers) as client:
+                return await client.call_tool(
+                    ctx.tool.upstream_tool_name, ctx.arguments, ctx.tool.timeout_s
+                )
+        finally:
+            # The plain values live in the pool's client for as long as it is pooled. The context
+            # does not keep them a moment longer than the call, whatever the call did.
+            ctx.upstream_headers = {}

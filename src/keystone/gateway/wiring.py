@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from keystone.gateway.interceptors.credentials import CredentialInterceptor, HeaderSource
 from keystone.gateway.interceptors.pinning import PinningInterceptor, ToolStateLookup
 from keystone.gateway.pipeline import AuditSink, Dispatcher, Interceptor, Pipeline
 from keystone.gateway.stubs import (
     ApprovalInterceptor,
     BudgetInterceptor,
-    CredentialInterceptor,
     MeteringInterceptor,
     OutputScanInterceptor,
     PolicyInterceptor,
@@ -41,6 +41,8 @@ class PipelineDeps:
     # Where the pinning slot reads a tool's current status. Without one it trusts the tool it was
     # handed, which is what the unit tests want.
     tool_states: ToolStateLookup | None = None
+    # Where the credential slot gets upstream headers. Without one it adds none.
+    vault: HeaderSource | None = None
 
 
 def build_pipeline(
@@ -60,7 +62,7 @@ def build_pipeline(
         "budget": BudgetInterceptor(),
         "policy": PolicyInterceptor(),
         "approval": ApprovalInterceptor(),
-        "credential": CredentialInterceptor(),
+        "credential": CredentialInterceptor(deps.vault),
         "output_scan": OutputScanInterceptor(),
         "session_flags": SessionFlagsInterceptor(),
         "metering": MeteringInterceptor(),

@@ -9,7 +9,7 @@ pointing at nothing.
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -18,6 +18,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from keystone.core.types import Risk, ToolTag
+from keystone.identity.vault import HEADER_NAME, Vault
 from keystone.registry.naming import check_upstream_id
 from keystone.registry.repo import CredentialMode, UpstreamRepo, UpstreamSpec
 from keystone.registry.ssrf import UnsafeUpstreamUrl, check_upstream_url
@@ -61,6 +62,10 @@ class UpstreamConfig(BaseModel):
     # It holds settings, not secrets: this file is not a secret store.
     env: dict[str, str] = Field(default_factory=dict)
     credential_mode: CredentialMode = "none"
+    # Header name -> the environment variable that holds its value. At startup Keystone reads the
+    # variables and stores them in the vault as the upstream's credential, so the secret is in the
+    # environment or the vault and never in this file.
+    credential_env: dict[str, str] = Field(default_factory=dict)
     tools: dict[str, ToolOverride] = Field(default_factory=dict)
 
     @field_validator("id")
@@ -79,6 +84,20 @@ class UpstreamConfig(BaseModel):
                 # Copying Keystone's master key or database URL into a third-party server's
                 # environment is the leak this key exists to prevent.
                 raise ValueError(f"{name} is Keystone's own setting and cannot go to an upstream")
+        return value
+
+    @field_validator("credential_env")
+    @classmethod
+    def _safe_credential_env(cls, value: dict[str, str]) -> dict[str, str]:
+        for header, variable in value.items():
+            if not HEADER_NAME.fullmatch(header):
+                raise ValueError(f"{header!r} is not a usable header name")
+            if not _ENV_NAME.fullmatch(variable):
+                raise ValueError(f"{variable!r} is not a valid environment variable name")
+            if variable.upper().startswith("KEYSTONE_"):
+                # Pointing a credential at the master key or the database URL would hand Keystone's
+                # own secrets to a third party.
+                raise ValueError(f"{variable} is Keystone's own setting and cannot be a credential")
         return value
 
 
@@ -130,6 +149,12 @@ async def _problems(
             problems.append(f"{name} needs a command")
         if upstream.transport == "http" and (upstream.command or upstream.env):
             problems.append(f"{name} is http, so `command` and `env` do not apply")
+        if upstream.credential_env and upstream.transport != "http":
+            problems.append(f"{name} is not http, so it has no headers for `credential_env`")
+        if upstream.credential_env and upstream.credential_mode == "none":
+            problems.append(
+                f"{name} has `credential_env` but credential_mode none, so it is never sent"
+            )
     return problems
 
 
@@ -179,3 +204,26 @@ async def apply_config_upstreams(
             report.disabled.append(row.id)
             log.info("config_upstream_disabled", upstream=row.id)
     return report
+
+
+async def seed_credentials(
+    vault: Vault, upstreams: Sequence[UpstreamConfig], environ: Mapping[str, str]
+) -> list[str]:
+    """Store the credentials the config takes from the environment, through the vault. A variable
+    that is not set leaves the stored credential as it is. Returns the ids it wrote. Call it after
+    `apply_config_upstreams`, because a credential belongs to an upstream row."""
+    written: list[str] = []
+    for upstream in upstreams:
+        if not upstream.credential_env or upstream.tenant is None:
+            continue
+        headers: dict[str, str] = {}
+        for header, variable in upstream.credential_env.items():
+            value = environ.get(variable, "")
+            if value:
+                headers[header] = value
+            else:
+                log.warning("credential_variable_not_set", upstream=upstream.id, variable=variable)
+        if headers and await vault.seed(upstream.tenant, upstream.id, headers):
+            written.append(upstream.id)
+            log.info("credential_seeded", upstream=upstream.id, headers=sorted(headers))
+    return written
