@@ -18,10 +18,19 @@ from eval.detector.report import (
     NOT,
     START,
     count_test_runs,
+    dataset_facts,
+    describe_configs,
+    earlier_runs,
     num,
+    plural,
     rate,
+    reading,
     recall_cell,
     render_section,
+    scored_before,
+    small_groups,
+    tuning_record,
+    tuning_sentence,
     update_results,
 )
 from keystone.defense.classifier import FakeClassifier
@@ -75,7 +84,7 @@ def test_the_section_has_a_table_for_each_thing_the_story_asks_for(
     assert "Measured on 2026-10-23 at commit `0123456789ab`" in section
     assert "TestOS 1.0 (4 CPUs, Python 3.12.0)" in section
     assert "eval/results/detector-2026-10-23.json" in section
-    assert "scored 2 time(s) before this report" in section
+    assert "scored 2 times before this report" in section
 
 
 def test_a_dirty_tree_is_said_and_a_missing_part_is_said(document: dict[str, Any]) -> None:
@@ -190,10 +199,207 @@ def test_a_limited_run_prints_and_writes_no_report_but_is_logged(
     monkeypatch.setattr(run, "RUN_LOG", log)
     monkeypatch.setattr(report, "build_document", lambda data, limit=None: document)
 
-    report.main(["--offline", "--limit", "20"])
+    report.main(["--offline", "--limit", "20", "--note", "a look at the shape"])
 
     assert "## Detector" in capsys.readouterr().out
     assert not (tmp_path / "results").exists() and not (tmp_path / "results.md").exists()
     # It read the test split, so it is on the record, with what it was.
     logged = [json.loads(line) for line in log.read_text().splitlines()]
-    assert len(logged) == 1 and logged[0]["note"] == "report with --limit 20"
+    assert len(logged) == 1
+    assert logged[0]["note"] == "report with --limit 20; a look at the shape"
+
+
+# -- what the text says about the thresholds, the earlier looks and the rows that pull apart
+
+TUNING = {
+    "file": "tuning-2026-10-23-combined.json",
+    "n": 919,
+    "recommended": {"suspicious": 0.5, "injection": None, "precision_floor": 0.95},
+    "precision_floor": 0.95,
+}
+
+
+def test_the_thresholds_are_said_to_be_checked_on_dev_and_what_that_found() -> None:
+    sentence = tuning_sentence(TUNING, 0.5, 0.85)
+
+    assert "flagged at 0.5 and a session is tainted at 0.85" in sentence
+    assert "919 texts, `eval/results/tuning-2026-10-23-combined.json`" in sentence
+    assert "the best F0.5 of the combined score was at 0.5" in sentence
+    assert "no threshold reached a precision of 0.95 for tainting, so they stayed." in sentence
+
+
+def test_a_sweep_that_disagrees_with_the_thresholds_is_said_and_the_thresholds_stay() -> None:
+    wanted = {
+        **TUNING,
+        "recommended": {"suspicious": 0.4, "injection": 0.8, "precision_floor": 0.95},
+    }
+
+    sentence = tuning_sentence(wanted, 0.5, 0.85)
+
+    assert "was at 0.4, not 0.5" in sentence
+    assert "for tainting was 0.8, not 0.85" in sentence
+    assert sentence.endswith("and this report uses the configured ones.")
+
+
+def test_a_sweep_that_agrees_on_both_thresholds_says_so() -> None:
+    agreeing = {
+        **TUNING,
+        "recommended": {"suspicious": 0.5, "injection": 0.85, "precision_floor": 0.95},
+    }
+
+    sentence = tuning_sentence(agreeing, 0.5, 0.85)
+
+    assert "0.85 was the lowest threshold with a precision of 0.95 for tainting" in sentence
+    assert sentence.endswith("so they stayed.")
+
+
+def test_without_a_tuning_record_nothing_is_claimed_about_one() -> None:
+    sentence = tuning_sentence(None, 0.5, 0.85)
+
+    assert "No tuning record is kept" in sentence and "checked on the dev split" not in sentence
+
+
+def test_the_record_of_the_sweep_is_the_latest_one_for_the_combined_score(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(report, "RESULTS", tmp_path)
+    assert tuning_record() is None
+    for date, best in (("2026-10-22", 0.45), ("2026-10-23", 0.5)):
+        body = {
+            "date": date,
+            "n": 919,
+            "recommended": {"suspicious": best, "injection": None, "precision_floor": 0.95},
+            "current": {"suspicious": 0.5, "injection": 0.85},
+        }
+        (tmp_path / f"tuning-{date}-combined.json").write_text(json.dumps(body))
+    (tmp_path / "tuning-2026-10-24-rules.json").write_text("{}")  # not the combined score
+
+    found = tuning_record()
+
+    assert found is not None
+    assert found["file"] == "tuning-2026-10-23-combined.json"
+    assert found["recommended"]["suspicious"] == 0.5 and found["n"] == 919
+
+
+def test_earlier_looks_at_the_test_split_are_listed_with_what_they_were() -> None:
+    document = {
+        "test_runs": 2,
+        "earlier_runs": [
+            {
+                "at": "2026-10-23T17:55:36+00:00",
+                "commit": "755e0cd4cacff21945ce88f84911bfa56e2acdb6",
+                "dirty": True,
+                "n": 200,
+                "configs": ["rules"],
+                "note": "a trial of the nightly command",
+            },
+            {
+                "at": "2026-10-23T20:12:00+00:00",
+                "commit": "d5d61cde64a493eecd241d0a01457dad09fa758b",
+                "dirty": False,
+                "n": 973,
+                "configs": ["classifier", "combined", "combined_300ms", "rules"],
+            },
+        ],
+    }
+
+    lines = scored_before(document).splitlines()
+
+    assert lines[0] == (
+        "The test split was scored 2 times before this report; "
+        "every run is in `eval/results/test-runs.jsonl`:"
+    )
+    assert lines[1] == ""
+    assert lines[2] == (
+        "- 2026-10-23, commit `755e0cd4cacf` with uncommitted changes, 200 texts, rules only: "
+        "a trial of the nightly command."
+    )
+    assert lines[3] == "- 2026-10-23, commit `d5d61cde64a4`, 973 texts, all three configs."
+    assert scored_before({"test_runs": 0}) == (
+        "The test split was scored 0 times before this report; "
+        "every run is in `eval/results/test-runs.jsonl`."
+    )
+    assert plural(1, "time") == "1 time" and plural(2, "time") == "2 times"
+    assert describe_configs(["combined", "rules"]) == "combined, rules"
+
+
+def test_the_log_is_read_line_by_line_and_a_missing_log_is_empty(tmp_path: Path) -> None:
+    assert earlier_runs(tmp_path / "none.jsonl") == []
+    log = tmp_path / "runs.jsonl"
+    log.write_text('{"n": 1}\n\n{"n": 2}\n')
+
+    assert [entry["n"] for entry in earlier_runs(log)] == [1, 2]
+
+
+def configs_with(
+    rules_recall: float, both_recall: float, auc: tuple[float, float, float]
+) -> dict[str, Any]:
+    def one(recall: float, area: float) -> dict[str, Any]:
+        return {
+            "roc_auc": area,
+            "recall_at_fpr_5pct": {"recall": recall},
+            "negatives_by_kind": {"negative": {"count": 11, "of": 197}},
+        }
+
+    return {
+        "rules": one(rules_recall, auc[0]),
+        "classifier": one(0.3, auc[1]),
+        "combined": one(both_recall, auc[2]),
+    }
+
+
+def test_the_reading_says_when_the_best_ranking_is_not_the_best_at_a_low_false_positive_rate() -> (
+    None
+):
+    configs = configs_with(0.59, 0.35, (0.827, 0.833, 0.884))
+
+    lines = reading(configs, ["rules", "classifier", "combined"], 0.5)
+
+    assert len(lines) == 2 and lines[1] == ""
+    assert "The best ROC AUC is that of Rules and model (0.884), but" in lines[0]
+    assert "the rules alone find more attacks (0.59 against 0.35)" in lines[0]
+    assert "11 of 197 harmless documents at 0.5" in lines[0]
+
+
+def test_the_reading_has_nothing_to_add_when_the_rows_agree() -> None:
+    better = configs_with(0.40, 0.55, (0.8, 0.8, 0.9))
+    rules_best = configs_with(0.59, 0.35, (0.95, 0.833, 0.884))
+
+    assert reading(better, ["rules", "classifier", "combined"], 0.5)[0] == (
+        "The best ROC AUC is that of Rules and model (0.900)."
+    )
+    assert reading(rules_best, ["rules", "classifier", "combined"], 0.5)[0] == (
+        "The best ROC AUC is that of Rules (0.950)."
+    )
+    assert reading(better, ["rules"], 0.5) == []
+
+
+def test_the_note_on_small_groups_gives_the_sizes_it_rests_on() -> None:
+    configs = {
+        "rules": {
+            "hard_negatives": {
+                "flag": {"of": 66},
+                "by_family": {"howto": {"of": 16}, "security": {"of": 15}, "business": {"of": 19}},
+            }
+        }
+    }
+
+    assert small_groups(configs, ["rules"]) == [
+        "- The test split has 66 hard negatives, and each kind of them is 15 to 19 texts. "
+        "A rate over so few texts is wide, and the intervals above say how wide."
+    ]
+    assert small_groups(configs, []) == []
+
+
+def test_the_counts_of_the_dataset_add_up_to_what_the_text_says() -> None:
+    facts = dataset_facts(build(download=False))
+
+    # Documents are what is neither a public prompt nor a hard negative, so the three parts of the
+    # text (public, documents and hard negatives) cover the dataset once.
+    kinds = facts["kinds"]
+    assert sum(kinds.values()) == sum(facts["counts"].values())
+    assert kinds["hard_negative"] == 150
+    assert (
+        facts["counts"]["synthetic"] - kinds["hard_negative"]
+        == kinds["indirect"] + kinds["negative"]
+    )

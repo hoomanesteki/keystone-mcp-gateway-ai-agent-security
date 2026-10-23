@@ -1,7 +1,12 @@
 """Write the report of the detector evaluation (KS-707).
 
     python -m eval.detector.report                # all three configs on the test split
-    python -m eval.detector.report --limit 200    # a sample, for a quick look (nothing written)
+    python -m eval.detector.report --limit 200    # a sample: printed, no report written
+    python -m eval.detector.report --note "why"   # the reason goes into the log line of the run
+
+Every run reads the test split, a sample too, and so every run is logged in
+`eval/results/test-runs.jsonl` (`run.log_test_run`). The report says how many runs there were
+before it, and what they were.
 
 It scores the test split once with the rules and the model, computes the metrics of the three
 configs (`rules`, `classifier`, `combined`), and writes two things: the file
@@ -19,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -75,6 +81,103 @@ def configs_of(document: Mapping[str, Any]) -> dict[str, Any]:
     return found
 
 
+def plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" + ("" if count == 1 else "s")
+
+
+def tuning_sentence(tuning: Mapping[str, Any] | None, flag: float, taint: float) -> str:
+    """What the dev sweep said about the thresholds used here, from the record it left."""
+    used = (
+        f"The thresholds are the configured ones: a text is flagged at {flag} and a session is "
+        f"tainted at {taint}."
+    )
+    if not tuning:
+        return f"{used} No tuning record is kept in `eval/results/`."
+    chosen, floor = tuning["recommended"], tuning["precision_floor"]
+    best, wanted = chosen["suspicious"], chosen["injection"]
+    first = f"the best F0.5 of the combined score was at {best}"
+    if best != flag:
+        first += f", not {flag}"
+    if wanted is None:
+        second = f"no threshold reached a precision of {floor} for tainting"
+    elif wanted == taint:
+        second = f"{taint} was the lowest threshold with a precision of {floor} for tainting"
+    else:
+        second = (
+            f"the lowest threshold with a precision of {floor} for tainting was {wanted}, "
+            f"not {taint}"
+        )
+    stayed = best == flag and wanted in (None, taint)
+    kept = "so they stayed." if stayed else "and this report uses the configured ones."
+    return (
+        f"{used} They were checked on the dev split only ({tuning['n']} texts, "
+        f"`eval/results/{tuning['file']}`): {first}, and {second}, {kept}"
+    )
+
+
+def describe_configs(configs: Sequence[str]) -> str:
+    """The configs of a logged run in words. The 300 ms row is derived and is not a config."""
+    base = sorted(c for c in configs if c != "combined_300ms")
+    if base == ["rules"]:
+        return "rules only"
+    if base == ["classifier", "combined", "rules"]:
+        return "all three configs"
+    return ", ".join(base)
+
+
+def scored_before(document: Mapping[str, Any]) -> str:
+    """How many times the test split was scored before this report, and what those runs were."""
+    earlier = document.get("earlier_runs", [])
+    head = (
+        f"The test split was scored {plural(document['test_runs'], 'time')} before this report; "
+        f"every run is in `eval/results/test-runs.jsonl`{':' if earlier else '.'}"
+    )
+    lines = []
+    for entry in earlier:
+        tree = " with uncommitted changes" if entry.get("dirty") else ""
+        where = f"{entry['at'][:10]}, commit `{entry['commit'][:12]}`{tree}"
+        what = f"{plural(entry['n'], 'text')}, {describe_configs(entry['configs'])}"
+        lines.append(f"- {where}, {what}" + (f": {entry['note']}." if entry.get("note") else "."))
+    return "\n".join([head, "", *lines]) if lines else head
+
+
+def reading(configs: Mapping[str, Any], shown: Sequence[str], flag: float) -> list[str]:
+    """What the first table shows when its rows pull apart, said once and from the numbers."""
+    ranked = [n for n in shown if configs[n]["roc_auc"] is not None]
+    if len(ranked) < 2:
+        return []
+    top = max(ranked, key=lambda n: configs[n]["roc_auc"])
+    sentence = f"The best ROC AUC is that of {NAMES[top]} ({configs[top]['roc_auc']:.3f})."
+    if top != "rules" and {"rules", "classifier", "combined"} <= configs.keys():
+        at_rules = (configs["rules"]["recall_at_fpr_5pct"] or {}).get("recall")
+        at_both = (configs["combined"]["recall_at_fpr_5pct"] or {}).get("recall")
+        flagged = configs["classifier"]["negatives_by_kind"]["negative"]
+        if at_rules is not None and at_both is not None and at_both < at_rules:
+            sentence = (
+                f"The best ROC AUC is that of {NAMES[top]} ({configs[top]['roc_auc']:.3f}), but "
+                f"at a false positive rate of 5% or less the rules alone find more attacks "
+                f"({at_rules:.2f} against {at_both:.2f}). The combined score is the higher of the "
+                "two scores, so every harmless text that the model flags is flagged by it too: "
+                f"{flagged['count']} of {flagged['of']} harmless documents at {flag}."
+            )
+    return [sentence, ""]
+
+
+def small_groups(configs: Mapping[str, Any], shown: Sequence[str]) -> list[str]:
+    """A line about how few texts some rates rest on, from the sizes of the groups."""
+    if not shown:
+        return []
+    hard = configs[shown[0]]["hard_negatives"]
+    sizes = [cell["of"] for cell in hard["by_family"].values()]
+    if not sizes:
+        return []
+    return [
+        f"- The test split has {hard['flag']['of']} hard negatives, and each kind of them is "
+        f"{min(sizes)} to {max(sizes)} texts. A rate over so few texts is wide, and the "
+        "intervals above say how wide."
+    ]
+
+
 def render_section(document: Mapping[str, Any]) -> str:
     """The detector section of docs/results.md, from a report document."""
     result = document["result"]
@@ -84,6 +187,11 @@ def render_section(document: Mapping[str, Any]) -> str:
     samples = result["samples"]
     commit = document["commit"][:12] + (" plus uncommitted changes" if document["dirty"] else "")
     sources = document["dataset"]["sources"]
+    counts = document["dataset"]["counts"]
+    kinds = document["dataset"].get("kinds", {})
+    hard_total = kinds.get("hard_negative", 0)
+    generated = counts.get("synthetic", 0) - hard_total
+    tuned = tuning_sentence(document.get("tuning"), flag, taint)
     out = [
         "## Detector",
         "",
@@ -93,26 +201,23 @@ def render_section(document: Mapping[str, Any]) -> str:
         f"number below is in `eval/results/detector-{document['date']}.json`.",
         "",
         f"The test split has {samples['n']} texts from {samples['carriers']} carriers, "
-        f"{samples['injections']} of them injections. Thresholds were tuned on the dev split "
-        f"only: a text is flagged at {flag} and a session is tainted at {taint}. "
-        "The test split was scored "
-        f"{document['test_runs']} time(s) before this report; every run is in "
-        "`eval/results/test-runs.jsonl`.",
+        f"{samples['injections']} of them injections. {tuned}",
         "",
-        "The data (`eval/DATASETS.md` has sources and licenses):",
+        scored_before(document),
+        "",
+        "The data (`eval/DATASETS.md` has sources and licenses). The counts are those of the whole "
+        "dataset, which dev and test share between them:",
         "",
         "- **Public prompts**: "
-        f"`{sources['public']['dataset']}`, {document['dataset']['counts'].get('public', 0)} "
-        "prompts of both labels, in English and German. They are direct requests to a model "
-        "and not documents.",
+        f"`{sources['public']['dataset']}`, {counts.get('public', 0)} prompts of both labels, in "
+        "English and German. They are direct requests to a model and not documents.",
         "- **Documents**: emails, pages and files, harmless as they are and with one of 12 attacks "
         "from `examples/fixtures/injections/templates.yaml` put at the start, middle or end, a "
-        "quarter of them hidden with invisible characters. "
-        f"{document['dataset']['counts'].get('synthetic', 0)} texts are generated from the "
-        f"fixtures of this repository, and {document['dataset']['counts'].get('wikitext', 0)} are "
-        f"built on articles of `{sources['wikitext']['dataset']}`.",
-        "- **Hard negatives**: 150 harmless texts that sound like instructions (how-to guides, "
-        "recipes, business mail, and security articles that quote attacks).",
+        f"quarter of them hidden with invisible characters. {generated} texts are generated from "
+        f"the fixtures of this repository, and {counts.get('wikitext', 0)} are built on articles "
+        f"of `{sources['wikitext']['dataset']}`.",
+        f"- **Hard negatives**: {hard_total} harmless texts that sound like instructions (how-to "
+        "guides, recipes, business mail, and security articles that quote attacks).",
     ]
     for note in document["dataset"]["notes"]:
         out += ["", f"**Not complete**: {note}."]
@@ -142,6 +247,7 @@ def render_section(document: Mapping[str, Any]) -> str:
         "Recall at a fixed false positive rate does not depend on the thresholds, so it is the "
         "number to compare configs by. The interval is the Wilson 95% interval of the recall.",
         "",
+        *reading(configs, shown, flag),
         "### At the configured thresholds",
         "",
     ]
@@ -221,10 +327,10 @@ def render_section(document: Mapping[str, Any]) -> str:
             rows,
         ),
         "",
-        "The attacks of the documents are the 12 templates that the rules were written against, "
-        "so the rules' recall on them says less than it seems to. The public prompts are the "
-        "independent check. They include German prompts and role-play requests, and the model's "
-        "card says it handles neither non-English prompts nor jailbreaks.",
+        "The attacks of the documents are the 12 templates of this repository, which were "
+        "written alongside the rules, so the rules' recall on them says less than it seems to. "
+        "The public prompts are the independent check. They include prompts in German, and the "
+        "model's card says it is for English.",
         "",
         "### Time of a scan",
         "",
@@ -246,7 +352,12 @@ def render_section(document: Mapping[str, Any]) -> str:
                     num(cell["p95_ms"], 1),
                 ]
             )
-    out += [table(["Config", "Tokens", "Texts", "p50 ms", "p95 ms"], rows), ""]
+    out += [
+        table(["Config", "Tokens", "Texts", "p50 ms", "p95 ms"], rows),
+        "",
+        "A scan with the model runs the rules too, so the last two rows are the same scans.",
+        "",
+    ]
     if "combined_300ms" in configs:
         c = configs["combined_300ms"]
         out += [
@@ -293,10 +404,8 @@ def render_section(document: Mapping[str, Any]) -> str:
         "### What is and is not in these numbers",
         "",
         f"- The model is `{MODEL}` at revision `{MODEL_REVISION[:7]}`. Its card says it is for "
-        "English and does not detect jailbreaks, which is most of the public prompts.",
-        "- Thresholds were chosen on dev by `eval/detector/tune.py` (see `eval/results/`) and were "
-        "not changed after the test split was scored.",
-        "- A rate over 84 or fewer texts is wide. The intervals above say how wide.",
+        "English and does not detect jailbreaks.",
+        *small_groups(configs, shown),
         "- Images are not read by the scanner, so there are none in the data.",
         "- The numbers are for one machine and one day. The times in particular move with the load "
         "of the machine (`docs/spikes/scanner.md` found five to seven times between a quiet "
@@ -331,10 +440,37 @@ def count_test_runs(path: Path | None = None) -> int:
     return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
 
 
+def tuning_record() -> dict[str, Any] | None:
+    """The latest record that `tune.py` left for the combined score, or None."""
+    found = sorted(RESULTS.glob("tuning-*-combined.json"))
+    if not found:
+        return None
+    record = json.loads(found[-1].read_text(encoding="utf-8"))
+    return {
+        "file": found[-1].name,
+        "date": record["date"],
+        "n": record["n"],
+        "recommended": record["recommended"],
+        "precision_floor": record["recommended"]["precision_floor"],
+        "current": record["current"],
+    }
+
+
+def earlier_runs(path: Path | None = None) -> list[dict[str, Any]]:
+    """The lines of the log of runs on the test split."""
+    path = path or run.RUN_LOG
+    if not path.is_file():
+        return []
+    return [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
+
+
 def dataset_facts(data: Dataset) -> dict[str, Any]:
     manifest = load_manifest(MANIFEST) or {}
     return {
         "counts": dict(data.parts),
+        "kinds": dict(Counter(s.kind for s in data.samples)),
         "notes": list(data.notes),
         "sources": manifest.get("sources", {}),
         "manifest_version": manifest.get("version"),
@@ -368,6 +504,8 @@ def build_document(
         "model": {"id": MODEL, "revision": MODEL_REVISION, "classifier": base.classifier},
         "dataset": dataset_facts(data),
         "test_runs": count_test_runs(),
+        "earlier_runs": earlier_runs(),
+        "tuning": tuning_record(),
         "result": result,
     }
 
@@ -382,12 +520,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--offline", action="store_true", help="do not download the public parts")
     parser.add_argument("--no-docs", action="store_true", help="do not touch docs/results.md")
+    parser.add_argument("--note", default="", help="why this run was made, for its line of the log")
     args = parser.parse_args(argv)
 
     data = build(download=not args.offline)
     document = build_document(data, limit=args.limit)
     # The test split was read, so the run is logged, a sample or not.
-    log_test_run(document["result"], note=f"report with --limit {args.limit}" if args.limit else "")
+    why = [f"report with --limit {args.limit}" if args.limit else "", args.note]
+    log_test_run(document["result"], note="; ".join(w for w in why if w))
     if args.limit:
         print(render_section(document))
         return 0
