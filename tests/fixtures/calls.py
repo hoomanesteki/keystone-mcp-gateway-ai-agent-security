@@ -36,14 +36,22 @@ def make_tool(
 
 
 def make_ctx(
-    arguments: dict[str, Any] | None = None, tool: ToolRef | None = None, **fields: Any
+    arguments: dict[str, Any] | None = None,
+    tool: ToolRef | None = None,
+    *,
+    principal: Principal | None = None,
+    session: SessionState | None = None,
+    received_at: datetime | None = None,
+    **fields: Any,
 ) -> CallContext:
-    now = datetime.now(UTC)
+    """A call by olivia of acme, now, in a fresh session, unless told otherwise."""
+    now = received_at or datetime.now(UTC)
+    who = principal or OLIVIA
     return CallContext(
         call_id=new_id(),
         received_at=now,
-        principal=OLIVIA,
-        session=SessionState(session_id="session-1", principal=OLIVIA, created_at=now),
+        principal=who,
+        session=session or SessionState(session_id="session-1", principal=who, created_at=now),
         tool=tool or make_tool(),
         arguments={"text": "hello"} if arguments is None else arguments,
         **fields,
