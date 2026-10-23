@@ -173,12 +173,22 @@ HOST = re.compile(
 )
 
 
+Classifier = Literal["protectai-deberta-v2", "prompt-guard-2-86m", "none"]
+
+
 class ScannerSettings(BaseModel):
-    """How tool output is checked for instructions aimed at the model (KS-701)."""
+    """How tool output is checked for instructions aimed at the model (KS-701, KS-702)."""
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
+    # The model behind the rules, or `none`. It needs the extra `keystone[scanner]`; without it the
+    # scanner runs on its rules alone and logs that once at start. `prompt-guard-2-86m` needs the
+    # Llama license accepted on Hugging Face.
+    classifier: Classifier = "protectai-deberta-v2"
+    # The longest a scan waits for the model. A model that has not answered by then is left out
+    # of that scan, which is then scored by the rules alone (`model` says "timeout").
+    classifier_timeout_ms: int = Field(default=300, ge=1, le=10_000)
     thresholds: ScannerThresholds = Field(default_factory=ScannerThresholds)
     # Hosts a markdown image may point to without a mark against it. An image anywhere else, or any
     # markdown link or image with a long query string, is how a conversation leaves in a URL.
@@ -264,6 +274,10 @@ class Settings(BaseSettings):
     audit: AuditSettings = Field(default_factory=AuditSettings)
     approvals: ApprovalSettings = Field(default_factory=ApprovalSettings)
     scanner: ScannerSettings = Field(default_factory=ScannerSettings)
+    # A short name for `scanner.classifier`, so that KEYSTONE_SCANNER_CLASSIFIER=none turns the
+    # model off without the nested spelling (KEYSTONE_SCANNER__CLASSIFIER). It wins when both are
+    # set, because it is the one a person types to change a running stack.
+    scanner_classifier: Classifier | None = None
     policy: PolicySettings = Field(default_factory=PolicySettings)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
     auth: AuthSettings = Field(default_factory=AuthSettings)
@@ -297,6 +311,12 @@ class Settings(BaseSettings):
         is dev."""
         configured = self.audit.fail_closed
         return configured if configured is not None else self.env != "dev"
+
+    @model_validator(mode="after")
+    def _the_short_name_of_the_classifier(self) -> "Settings":
+        if self.scanner_classifier is not None:
+            self.scanner = self.scanner.model_copy(update={"classifier": self.scanner_classifier})
+        return self
 
     @model_validator(mode="after")
     def _dev_principal_only_without_authentication(self) -> "Settings":

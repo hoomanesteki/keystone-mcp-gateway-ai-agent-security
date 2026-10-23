@@ -267,6 +267,11 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        # The classifier behind the scanner's rules, and its model, are in the image (KS-702). The
+        # first build downloads the model (738 MB) and torch, and took 20 minutes on a laptop.
+        # KEYSTONE_SCANNER_CLASSIFIER=none turns the model off.
+        WITH_SCANNER: "1"
     image: keystone:dev
     # --migrate creates the registry tables on first start and is a no-op afterwards.
     command: ["serve", "--host", "0.0.0.0", "--port", "8080", "--migrate"]
@@ -302,6 +307,8 @@ services:
       ECHO_API_KEY: "${ECHO_API_KEY:-dev-echo-key-0e4b9d13}"
       WEB_API_KEY: "${WEB_API_KEY:-dev-web-key-9d3b6e21}"
       FILES_GLOBEX_API_KEY: "${FILES_GLOBEX_API_KEY:-dev-globex-key-5a7c28e6}"
+      # The model behind the scanner's rules: protectai-deberta-v2, prompt-guard-2-86m or none.
+      KEYSTONE_SCANNER_CLASSIFIER: "${KEYSTONE_SCANNER_CLASSIFIER:-protectai-deberta-v2}"
       # Other containers reach Keystone by its service name.
       KEYSTONE_ALLOWED_HOSTS: '["127.0.0.1:*", "localhost:*", "[::1]:*", "keystone:*"]'
     volumes:

@@ -24,6 +24,16 @@ paths = [
   '''^tests/unit/test_settings\.py$''',
 ]
 
+# The short names of the classifiers in the scanner (`key="protectai-deberta-v2"`). The generic
+# rule reads a name after the word "key" as a key. Path and value must both match, so any other
+# string in this file that looks like a key is still caught.
+[[allowlists]]
+description = "Classifier names in defense/classifier.py, not keys"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^src/keystone/defense/classifier\.py$''']
+regexes = ['''^(protectai-deberta-v2|prompt-guard-2-86m)$''']
+
 # A made-up key that the upstream client test sends to an upstream, to be refused. Path and value
 # must both match, so any other string in this file that looks like a key is still caught.
 [[allowlists]]

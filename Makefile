@@ -76,6 +76,7 @@ ci-local: up-core ## the same steps as CI, run locally
 
 gate: up ## everything a phase gate runs: make gate PHASE=N
 	@test -n "$(PHASE)" || { echo "usage: make gate PHASE=N" >&2; exit 2; }
+	@if [ $(PHASE) -ge 7 ]; then uv sync --locked --extra scanner; fi
 	$(MAKE) lint type
 	@if [ $(PHASE) -ge 4 ]; then $(MAKE) policy; fi
 	$(RUN) pytest --phase $(PHASE) tests/unit tests/integration tests/invariants tests/e2e
