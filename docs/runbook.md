@@ -193,7 +193,9 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `KEYSTONE_ENV` | `dev` | `dev`, `test` or `prod` |
-| `KEYSTONE_DATABASE_URL` | `postgresql+asyncpg://keystone:keystone@localhost:55432/keystone` | Postgres DSN |
+| `KEYSTONE_DATABASE_URL` | `postgresql+asyncpg://keystone:keystone@localhost:55432/keystone` | Postgres DSN. Compose runs Keystone as the role `keystone_app` (see Database roles). |
+| `KEYSTONE_MIGRATE_DATABASE_URL` | unset | Where `keystone db upgrade` and `keystone serve --migrate` connect, when that is not `KEYSTONE_DATABASE_URL`: creating tables takes the role that owns them. Unset means they use `KEYSTONE_DATABASE_URL`. Compose sets it to the owner. |
+| `KEYSTONE_APP_DB_PASSWORD` | the development password | Read by the migration that creates the `keystone_app` role. With `KEYSTONE_ENV=prod` and no value, that migration stops. It is not a Keystone setting: set the same value in the password of `KEYSTONE_DATABASE_URL`. |
 | `KEYSTONE_REDIS_URL` | `redis://localhost:56379/0` | Redis URL. Session state lives here. Set it to an empty string to keep session state in the gateway process instead (one process only, lost on restart). |
 | `KEYSTONE_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` |
 | `KEYSTONE_CONFIG` | unset | Path to a YAML file with the same keys |
@@ -718,6 +720,43 @@ With `audit.fail_closed` on, which is the default outside `dev`, an unhealthy wr
 pipeline refuse each call before it runs an interceptor: `KS_DENIED`, "audit unavailable", with
 `keystone/reason: audit-unavailable` in `_meta`, and a row for the refusal once the writer can
 take it. In `dev` the call goes ahead and the failure is counted.
+
+### Checking and exporting the log
+
+`keystone audit verify` reads every row in `seq` order and recomputes the hashes from what Postgres
+returns. It prints `OK, 42 records` and exits 0, or `broken at seq 10: hash mismatch` (a row was
+edited, or its link to the row before it was) or `broken at seq 5: gap` (a row is missing) and
+exits 2. `--from-seq N` starts at record N, and trusts the stored hash of record N-1 as the anchor
+without checking that record, so it says nothing about the records before N.
+
+```bash
+docker compose -f deploy/docker-compose.yml exec keystone keystone audit verify
+```
+
+`keystone audit export [--since T] [--until T] [--tenant ID]` writes the records as JSON lines to
+standard output, from `--since` (inclusive) up to `--until` (exclusive), as dates or times
+(`2026-10-01`, `2026-10-01T12:00:00Z`; UTC unless the time says otherwise). A line holds the
+columns of one record in the form its hash covers, so whoever receives the file can check it with
+a sha256 and a JSON library: the hash is the sha256 of the previous hash (as bytes) followed by the
+canonical JSON (sorted keys, no spaces) of the line without `seq`, `prev_hash` and `hash`. A tenant's
+export has gaps in `seq`, because the chain runs through every tenant's records; each line still
+proves itself.
+
+What verify cannot see: a log that was cut short (the newest rows deleted) is still a whole chain,
+and so is one whose every row and hash was rewritten. Publish the latest hash somewhere out of
+reach to close both (ADR-0009).
+
+### Database roles
+
+Migrations run as the role that owns the tables. Keystone runs as `keystone_app`, which the
+migration `0006` creates (`CREATE ROLE ... LOGIN`, with `KEYSTONE_APP_DB_PASSWORD`). It may select,
+insert, update and delete in every table, and on `audit_events` it may only insert and select, so a
+compromised gateway cannot edit or delete what it logged. Tables that later migrations create are
+open to it by default privileges. It has no access to `alembic_version`. A role belongs to the
+Postgres cluster, not to one database, so the migration leaves an existing `keystone_app` as it is:
+change its password with `ALTER ROLE keystone_app PASSWORD '...'`, and change the password in
+`KEYSTONE_DATABASE_URL` with it. The owner, and any Postgres superuser, can still change the log;
+that is how the Phase 5 smoke shows verify catching an edit.
 
 Until the admin API arrives (KS-507) the rows can be read with `psql`:
 

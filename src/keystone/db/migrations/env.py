@@ -18,11 +18,10 @@ target_metadata = Base.metadata
 
 def database_url() -> str:
     # config.attributes lets tests pass a URL without ini-file percent escaping.
-    return (
-        config.attributes.get("url")
-        or config.get_main_option("sqlalchemy.url")
-        or Settings().database_url.get_secret_value()
-    )
+    if url := (config.attributes.get("url") or config.get_main_option("sqlalchemy.url")):
+        return str(url)
+    settings = Settings()
+    return (settings.migrate_database_url or settings.database_url).get_secret_value()
 
 
 def run_migrations_offline() -> None:

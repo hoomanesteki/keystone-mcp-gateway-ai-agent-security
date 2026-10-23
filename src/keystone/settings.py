@@ -145,6 +145,10 @@ class Settings(BaseSettings):
 
     env: Literal["dev", "test", "prod"] = "dev"
     database_url: SecretStr = SecretStr(DEFAULT_DATABASE_URL)
+    # Where migrations connect, when that is not `database_url`. The application runs as a role
+    # that may only add audit records (KS-503), and creating tables takes the role that owns them.
+    # Without it, migrations use `database_url`.
+    migrate_database_url: SecretStr | None = None
     redis_url: SecretStr = SecretStr(DEFAULT_REDIS_URL)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     config_path: Path | None = Field(default=None, validation_alias=CONFIG_ENV_VAR)

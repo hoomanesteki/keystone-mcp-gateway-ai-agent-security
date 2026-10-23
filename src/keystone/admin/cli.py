@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from keystone import __version__
 from keystone.app import create_app
+from keystone.audit.verify import Verdict, export_records, verify_chain
 from keystone.core.types import ToolStatus
 from keystone.db.models import Tool, Upstream
 from keystone.db.session import create_engine, make_sessionmaker
@@ -77,6 +78,12 @@ policy_app = typer.Typer(
     add_completion=False,
 )
 app.add_typer(policy_app, name="policy")
+audit_app = typer.Typer(
+    help="The audit log: check its hash chain and export it.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(audit_app, name="audit")
 log = structlog.get_logger()
 
 
@@ -105,6 +112,11 @@ def run_with_database[T](action: Callable[[Settings, Sessionmaker], Awaitable[T]
         # The text of these errors can hold the connection string, so print the type only.
         typer.echo(f"error: cannot use the database ({type(exc).__name__})", err=True)
         raise typer.Exit(1) from None
+
+
+def migration_url(settings: Settings) -> str:
+    """Where migrations connect: the owner of the tables when one is configured."""
+    return (settings.migrate_database_url or settings.database_url).get_secret_value()
 
 
 def migrate_database(url: str) -> None:
@@ -142,7 +154,7 @@ def serve(
             typer.echo(f"  {problem}", err=True)
         raise typer.Exit(1) from None
     if migrate:
-        migrate_database(settings.database_url.get_secret_value())
+        migrate_database(migration_url(settings))
     uvicorn.run(gateway_app, host=host, port=port)
 
 
@@ -154,7 +166,7 @@ app.add_typer(db_app, name="db")
 def db_upgrade() -> None:
     """Apply database migrations. Running it twice changes nothing."""
     try:
-        migrate_database(Settings().database_url.get_secret_value())
+        migrate_database(migration_url(Settings()))
     except (OSError, SQLAlchemyError) as exc:
         typer.echo(f"error: cannot use the database ({type(exc).__name__})", err=True)
         raise typer.Exit(1) from None
@@ -861,3 +873,63 @@ def policy_test(
     typer.echo(render_report(report))
     if not report.ok:
         raise typer.Exit(1)
+
+
+@audit_app.command("verify")
+def audit_verify(
+    from_seq: Annotated[
+        int | None,
+        typer.Option(
+            "--from-seq",
+            min=1,
+            help="Start at this seq. The record before it anchors the check and is not itself "
+            "checked, so records before it are not.",
+        ),
+    ] = None,
+) -> None:
+    """Recompute the hash chain from the rows in Postgres. Prints `OK, N records`, or
+    `broken at seq K: hash mismatch` or `broken at seq K: gap` and exits with code 2."""
+
+    async def action(settings: Settings, sessions: Sessionmaker) -> Verdict:
+        return await verify_chain(sessions, from_seq=from_seq)
+
+    verdict = run_with_database(action)
+    typer.echo(verdict.message)
+    if not verdict.ok:
+        raise typer.Exit(2)
+
+
+def parse_moment(option: str, text: str) -> datetime:
+    """A date or a date and time. Without a zone it is UTC."""
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        raise CliError(
+            f"{option}: cannot read {text!r}; write a date or a time such as 2026-10-01 or "
+            "2026-10-01T12:00:00Z"
+        ) from None
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+
+
+@audit_app.command("export")
+def audit_export(
+    since: Annotated[
+        str | None, typer.Option("--since", help="From this date or time on (UTC unless it says).")
+    ] = None,
+    until: Annotated[
+        str | None, typer.Option("--until", help="Up to, and not including, this date or time.")
+    ] = None,
+    tenant: Annotated[str | None, typer.Option("--tenant", help="Only this tenant.")] = None,
+) -> None:
+    """Write the records as JSON lines to standard output, in seq order. Each line holds the
+    columns of one record in the form its hash covers, so it can be checked on its own: the hash is
+    the sha256 of the previous hash (as bytes) and the canonical JSON of the line without `seq`,
+    `prev_hash` and `hash`."""
+
+    async def action(settings: Settings, sessions: Sessionmaker) -> None:
+        start = parse_moment("--since", since) if since else None
+        end = parse_moment("--until", until) if until else None
+        async for record in export_records(sessions, since=start, until=end, tenant=tenant):
+            typer.echo(json.dumps(record, ensure_ascii=False))
+
+    run_with_database(action)

@@ -18,6 +18,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from keystone.db.roles import APP_ROLE, DEV_APP_PASSWORD
 from keystone.settings import Settings
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -64,6 +65,17 @@ def test_database_url() -> Iterator[str]:
     command.upgrade(alembic_config(url), "head")
     yield url
     drop_database(admin_url, TEST_DATABASE)
+
+
+@pytest.fixture(scope="session")
+def app_database_url(test_database_url: str) -> str:
+    """The test database as the role Keystone runs as, which may not change the audit log. Apps
+    under test connect with it; the fixtures that empty the tables use the owner."""
+    return (
+        make_url(test_database_url)
+        .set(username=APP_ROLE, password=DEV_APP_PASSWORD)
+        .render_as_string(hide_password=False)
+    )
 
 
 @pytest.fixture

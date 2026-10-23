@@ -102,6 +102,20 @@ writer can take it, with the reason in `reasons`. This is the one change to the 
 plan section 3.6 that KS-501 allows; `Pipeline.__init__` also takes `fail_closed` as a keyword
 argument with the default `False`, which `build_pipeline` sets from the settings.
 
+**Verification and the role (KS-503).** `keystone audit verify` streams the rows in `seq` order.
+A row whose `seq` is not the next one means a row is missing (`gap`, naming the missing seq). A row
+that does not point at the hash before it, or whose own hash is not the hash of its columns, is a
+`hash mismatch` at its seq. The first problem ends the check. Exit code 2 means broken, 1 means the
+check could not run. `export` writes the same columns in the form the hash covers, one JSON object
+per line, so a recipient needs only sha256 and a JSON library to check a record.
+
+The application's role, `keystone_app`, may insert and select on `audit_events`, with UPDATE,
+DELETE and TRUNCATE revoked, and has full access to every other table (default privileges cover
+the tables of later migrations). Migrations run as the owner of the tables, through
+`KEYSTONE_MIGRATE_DATABASE_URL`. The role is created by a migration, because the tests and CI have
+no other place to make it; roles belong to the cluster, so a migration leaves an existing one
+alone, and refuses to create one with the development password when `KEYSTONE_ENV` is `prod`.
+
 **Columns beyond the data model's list.** The table has `dispatched` (did the call reach the
 upstream: `outcome` cannot say, because output blocked after the call is `rejected`) and
 `decision_source` (which part decided: policy, pinning, a rate limit). It has no `created_at`:
