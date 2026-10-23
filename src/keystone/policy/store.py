@@ -228,7 +228,7 @@ def _validate(
         else:
             problems.append(f"{kind} policies: {message}")
     try:
-        return CompiledPolicies(text)
+        return CompiledPolicies(text, [origin.meta.id for origin in origins])
     except CedarError as exc:  # parsed file by file already; a failure here is a join problem
         problems.append(f"{kind} policies: {exc}")
         return None

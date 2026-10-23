@@ -13,6 +13,7 @@ What this module guarantees to its callers:
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,10 +47,12 @@ class CedarSchema:
 
 class CompiledPolicies:
     """A parsed set of Cedar policies. Reused across evaluations: parsing it is most of the cost
-    of a decision."""
+    of a decision. `ids` are the `@id` of its policies in order, so that a message from Cedar
+    that names `policy3` can say which policy that is."""
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, ids: Sequence[str | None] = ()) -> None:
         self.text = text
+        self.ids = tuple(ids)
         try:
             self.handle = cedarpy.PolicySet.from_str(text)
         except ValueError as exc:
@@ -57,10 +60,23 @@ class CompiledPolicies:
 
     @classmethod
     def from_text(cls, text: str) -> CompiledPolicies:
-        return cls(text)
+        return cls(text, [meta.id for meta in read_policies(text)])
+
+    def name_policies(self, message: str) -> str:
+        """The message with each positional name (`policy3`) replaced by the policy's @id."""
+
+        def replace(found: re.Match[str]) -> str:
+            position = int(found.group(1))
+            name = self.ids[position] if position < len(self.ids) else None
+            return f"`{name}`" if name else found.group(0)
+
+        return _POSITIONAL.sub(replace, message)
 
     def __len__(self) -> int:
         return len(self.handle)
+
+
+_POSITIONAL = re.compile(r"`policy(\d+)`")
 
 
 @dataclass(frozen=True)
@@ -146,7 +162,7 @@ _DECISIONS: dict[Any, Literal["allow", "deny", "none"]] = {
 }
 
 
-def _verdict(result: cedarpy.AuthzResult) -> CedarVerdict:
+def _verdict(result: cedarpy.AuthzResult, policies: CompiledPolicies) -> CedarVerdict:
     diagnostics = result.diagnostics
     ids = diagnostics.id_annotations_by_reason
     # A reason with no @id (the loader refuses such a policy) keeps Cedar's own name.
@@ -154,7 +170,7 @@ def _verdict(result: cedarpy.AuthzResult) -> CedarVerdict:
     return CedarVerdict(
         decision=_DECISIONS.get(result.decision, "none"),
         reasons=reasons,
-        errors=tuple(diagnostics.errors),
+        errors=tuple(policies.name_policies(error) for error in diagnostics.errors),
     )
 
 
@@ -170,4 +186,4 @@ def authorize(
     result = cedarpy.is_authorized(
         dict(request), policies.handle, [dict(entity) for entity in entities], schema=schema.handle
     )
-    return _verdict(result)
+    return _verdict(result, policies)
