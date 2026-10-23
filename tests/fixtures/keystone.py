@@ -27,6 +27,7 @@ from keystone.settings import (
     HealthSettings,
     PolicySettings,
     RegistrySettings,
+    ScannerSettings,
     Settings,
     TenantConfig,
 )
@@ -56,6 +57,9 @@ AGENTS = {"support-agent": AgentConfig(trust="standard"), "ops-agent": AgentConf
 TEST_APPROVALS = ApprovalSettings(wait_seconds=1.0, poll_interval_s=0.2, sweep_interval_s=1.0)
 # The vault key of every test app. Made when the test run starts and never written anywhere.
 TEST_MASTER_KEY = Fernet.generate_key().decode()
+# The scanner of a test app runs on its rules. A model of 700 MB loaded for each app would make the
+# suite slow and the scores depend on a machine, so a test that wants the model builds its own.
+TEST_SCANNER = ScannerSettings(classifier="none")
 
 
 def demo_tools(upstream_id: str) -> dict[str, ToolOverride]:
@@ -187,6 +191,7 @@ def keystone_app_factory(
             # The repository's own policies, wherever the tests are run from.
             "policy": PolicySettings(root=POLICY_ROOT, include_demo=True),
             "approvals": TEST_APPROVALS,
+            "scanner": TEST_SCANNER,
             **auth_options(fake_idp),
         }
         options.update(settings or {})
@@ -237,6 +242,7 @@ def start_keystone(
             health=health or HealthSettings(interval_s=0),
             policy=PolicySettings(root=POLICY_ROOT, include_demo=True),
             approvals=TEST_APPROVALS,
+            scanner=TEST_SCANNER,
             **auth_options(fake_idp),
         )
         app = create_app(settings, **app_options)

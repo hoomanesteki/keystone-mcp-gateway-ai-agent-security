@@ -133,6 +133,8 @@ class InMemoryAuditSink:
                 "dispatched": ctx.dispatched,
                 "outcome": outcome,
                 "reject_code": reject.code.value if reject else None,
+                "scan_score": ctx.scan.score if ctx.scan else None,
+                "scan_action": ctx.scan.action if ctx.scan else None,
                 "timings_ms": dict(ctx.timings_ms),
             }
         )

@@ -5,24 +5,26 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from keystone.core.types import CallContext
+from keystone.defense.scanner import OutputScanner
 from keystone.gateway.interceptors.approval import (
     ApprovalGate,
     ApprovalInterceptor,
     Revalidation,
 )
 from keystone.gateway.interceptors.credentials import CredentialInterceptor, HeaderSource
+from keystone.gateway.interceptors.flags import SessionFlagsInterceptor
 from keystone.gateway.interceptors.pinning import PinningInterceptor, ToolStateLookup
 from keystone.gateway.interceptors.policy import PolicyInterceptor
+from keystone.gateway.interceptors.scan import OutputScanInterceptor
 from keystone.gateway.pipeline import AuditSink, Dispatcher, Interceptor, Pipeline
 from keystone.gateway.sessions import SessionStore, refresh
 from keystone.gateway.stubs import ApprovalInterceptor as StubApprovalInterceptor
 from keystone.gateway.stubs import (
     BudgetInterceptor,
     MeteringInterceptor,
-    OutputScanInterceptor,
     RateLimitInterceptor,
-    SessionFlagsInterceptor,
 )
+from keystone.gateway.stubs import OutputScanInterceptor as StubOutputScanInterceptor
 from keystone.gateway.stubs import PolicyInterceptor as StubPolicyInterceptor
 from keystone.policy.engine import PolicyEngine
 from keystone.settings import Settings
@@ -67,9 +69,25 @@ class PipelineDeps:
     # the stub that refuses it: the unit tests of the pipeline, and an app with no master key.
     approvals: ApprovalGate | None = None
     # Where the sessions are kept. A call that waited for approval reads its session again from
-    # here before it is checked a second time (KS-791). Without one the call is checked on the
-    # copy it started with, which is what the unit tests of the pipeline want.
+    # here before it is checked a second time (KS-791), and the flags and output slots record what
+    # a call learned here (KS-704). Without one the call is checked on the copy it started with and
+    # records on that copy alone, which is what the unit tests of the pipeline want.
     sessions: SessionStore | None = None
+    # What reads the output of a tool (KS-704). Without one the output slot is the Phase 1 stub that
+    # records a benign scan, which only the unit tests of the pipeline want. `scanner.enabled`
+    # false switches the scan off whatever is given here.
+    scanner: OutputScanner | None = None
+
+
+def output_slot(settings: Settings, deps: PipelineDeps) -> Interceptor:
+    """The scanner is off when the settings say so: nothing is scanned and the audit record has no
+    scan, which is not the same as a scan that found nothing. With the scanner on and none given,
+    the slot is the stub that records a benign scan."""
+    if not settings.scanner.enabled:
+        return OutputScanInterceptor(None)
+    if deps.scanner is None:
+        return StubOutputScanInterceptor()
+    return OutputScanInterceptor(deps.scanner, deps.sessions, deps.metrics)
 
 
 def build_pipeline(
@@ -99,8 +117,8 @@ def build_pipeline(
             else StubApprovalInterceptor()
         ),
         "credential": CredentialInterceptor(deps.vault),
-        "output_scan": OutputScanInterceptor(),
-        "session_flags": SessionFlagsInterceptor(),
+        "output_scan": output_slot(settings, deps),
+        "session_flags": SessionFlagsInterceptor(deps.sessions),
         "metering": MeteringInterceptor(),
     }
     interceptors = [overrides.get(slot, stubs[slot]) for slot in INTERCEPTOR_ORDER]
