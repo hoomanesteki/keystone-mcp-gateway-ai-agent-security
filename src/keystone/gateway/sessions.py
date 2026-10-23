@@ -7,11 +7,12 @@ store for a single process without Redis, and for tests that do not need it.
 
 from __future__ import annotations
 
+import itertools
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import structlog
 from pydantic import ValidationError
@@ -24,12 +25,23 @@ log = structlog.get_logger()
 MAX_SESSIONS = 10_000
 SESSION_TTL_S = 24 * 60 * 60
 TOUCH_EVERY_S = 60.0
+# A listing reads this many keys at a time, and gives up after MAX_SCANNED.
+SCAN_BATCH = 200
+MAX_SCANNED = 10_000
 
 
 class SessionStore(Protocol):
     async def create(self, session_id: str, principal: Principal) -> SessionState: ...
     async def get(self, session_id: str) -> SessionState | None: ...
     async def save(self, state: SessionState) -> None: ...
+
+
+@runtime_checkable
+class SessionDirectory(Protocol):
+    """What the admin API needs to list the live sessions of a tenant (KS-507). It is apart from
+    `SessionStore`, which is a contract of plan section 3.6 and does not change."""
+
+    async def list_for_tenant(self, tenant_id: str, limit: int) -> list[SessionState]: ...
 
 
 class SessionRows(Protocol):
@@ -72,6 +84,11 @@ class InMemorySessionStore:
         self._sessions.move_to_end(state.session_id)
         while len(self._sessions) > self._max:
             self._sessions.popitem(last=False)
+
+    async def list_for_tenant(self, tenant_id: str, limit: int) -> list[SessionState]:
+        """The tenant's sessions, the most recently used first."""
+        mine = (s for s in reversed(self._sessions.values()) if s.principal.tenant_id == tenant_id)
+        return list(itertools.islice(mine, limit))
 
 
 def session_key(session_id: str) -> str:
@@ -135,6 +152,27 @@ class RedisSessionStore:
             # new one over it.
             log.error("session_state_unreadable", session=session_id)
             return None
+
+    async def list_for_tenant(self, tenant_id: str, limit: int) -> list[SessionState]:
+        """The tenant's live sessions, newest first. It scans the keys, so it looks at no more than
+        MAX_SCANNED of them, and it reads without restarting a session's clock."""
+        found: list[SessionState] = []
+        scanned = 0
+        async for key in self._redis.scan_iter(match=session_key("*"), count=SCAN_BATCH):
+            scanned += 1
+            if scanned > MAX_SCANNED:
+                break
+            raw = await self._redis.get(key)
+            if raw is None:
+                continue
+            try:
+                state = SessionState.model_validate_json(raw)
+            except ValidationError:
+                continue
+            if state.principal.tenant_id == tenant_id:
+                found.append(state)
+        found.sort(key=lambda s: s.created_at, reverse=True)
+        return found[:limit]
 
     async def save(self, state: SessionState) -> None:
         await self._redis.set(

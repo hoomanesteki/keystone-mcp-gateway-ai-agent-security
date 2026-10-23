@@ -170,6 +170,9 @@ class Settings(BaseSettings):
     oidc_issuer: str | None = None
     oidc_audience: str = "keystone"
     oidc_discovery_url: str | None = None
+    # The one origin a browser may call the admin API from (the console, KS-605). CORS refuses any
+    # other.
+    console_origin: str = "http://localhost:5173"
     # Where traces go: an OTLP/HTTP endpoint such as http://jaeger:4318 (KS-504). Without it no
     # spans are made, and audit rows carry no trace id.
     otlp_endpoint: str | None = None
@@ -211,6 +214,17 @@ class Settings(BaseSettings):
         if parts.scheme not in ("http", "https") or not parts.netloc:
             raise ValueError(f"{info.field_name} must be an http or https URL")
         return value.rstrip("/") if info.field_name == "public_base_url" else value
+
+    @field_validator("console_origin")
+    @classmethod
+    def _an_origin(cls, value: str) -> str:
+        """scheme://host[:port] and nothing after it: that is what a browser sends as Origin."""
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.netloc or parts.path not in ("", "/"):
+            raise ValueError("console_origin must look like http://localhost:5173")
+        if parts.query or parts.fragment or parts.username or parts.password:
+            raise ValueError("console_origin must look like http://localhost:5173")
+        return f"{parts.scheme}://{parts.netloc}"
 
     @field_validator("log_level", mode="before")
     @classmethod
