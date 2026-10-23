@@ -125,8 +125,16 @@ approvals:
 # suspicious. `allowed_domains` are the hosts a markdown image may point to without a mark against it
 # (a name covers its subdomains). The scan reads at most `max_scan_chars`: a longer text is read at
 # both ends. All of these can be set with KEYSTONE_SCANNER__<NAME>.
+#
+# `classifier` is the model behind the rules: protectai-deberta-v2, prompt-guard-2-86m (needs the
+# Llama license accepted on Hugging Face) or none. It needs the extra keystone[scanner]; without it
+# the scanner runs on its rules alone and says so at start. A scan waits `classifier_timeout_ms` for
+# the model and goes on with the rules when it has not answered. KEYSTONE_SCANNER_CLASSIFIER=none
+# turns the model off.
 scanner:
   enabled: true
+  classifier: protectai-deberta-v2
+  classifier_timeout_ms: 300
   thresholds: {suspicious: 0.5, injection: 0.85}
   allowed_domains: []
   max_scan_chars: 200000

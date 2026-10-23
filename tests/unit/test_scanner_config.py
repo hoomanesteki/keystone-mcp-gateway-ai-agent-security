@@ -69,3 +69,77 @@ def test_allowed_domains_are_kept_in_lower_case_without_a_leading_dot() -> None:
     config = ScannerSettings(allowed_domains=["CDN.Acme.test", ".docs.acme.test"])
 
     assert config.allowed_domains == ["cdn.acme.test", "docs.acme.test"]
+
+
+def test_the_classifier_defaults_are_the_plans() -> None:
+    config = ScannerSettings()
+
+    assert config.classifier == "protectai-deberta-v2"
+    assert config.classifier_timeout_ms == 300
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"classifier": "a-model-nobody-listed"},
+        {"classifier": ""},
+        {"classifier_timeout_ms": 0},
+        {"classifier_timeout_ms": 60_000},
+    ],
+)
+def test_a_classifier_setting_that_makes_no_sense_is_refused(bad: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        ScannerSettings.model_validate(bad)
+
+
+@pytest.mark.parametrize("name", ["protectai-deberta-v2", "prompt-guard-2-86m", "none"])
+def test_every_classifier_the_plan_names_is_accepted(name: str) -> None:
+    assert ScannerSettings.model_validate({"classifier": name}).classifier == name
+
+
+def test_one_underscore_turns_the_classifier_off(
+    monkeypatch: pytest.MonkeyPatch, clean_env: None
+) -> None:
+    monkeypatch.setenv("KEYSTONE_SCANNER_CLASSIFIER", "none")
+
+    assert Settings().scanner.classifier == "none"
+
+
+def test_the_nested_name_does_the_same(monkeypatch: pytest.MonkeyPatch, clean_env: None) -> None:
+    monkeypatch.setenv("KEYSTONE_SCANNER__CLASSIFIER", "none")
+
+    assert Settings().scanner.classifier == "none"
+
+
+def test_the_short_name_wins_over_the_nested_one_and_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_env: None
+) -> None:
+    path = tmp_path / "keystone.yaml"
+    path.write_text("scanner:\n  classifier: prompt-guard-2-86m\n")
+    monkeypatch.setenv("KEYSTONE_SCANNER__CLASSIFIER", "prompt-guard-2-86m")
+    monkeypatch.setenv("KEYSTONE_SCANNER_CLASSIFIER", "none")
+
+    config = Settings(config_path=path).scanner
+
+    assert config.classifier == "none"
+
+
+def test_the_short_name_keeps_the_rest_of_the_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_env: None
+) -> None:
+    path = tmp_path / "keystone.yaml"
+    path.write_text("scanner:\n  thresholds: {suspicious: 0.4, injection: 0.7}\n")
+    monkeypatch.setenv("KEYSTONE_SCANNER_CLASSIFIER", "none")
+
+    config = Settings(config_path=path).scanner
+
+    assert config.classifier == "none" and config.thresholds.injection == 0.7
+
+
+def test_a_short_name_that_is_not_a_classifier_is_refused(
+    monkeypatch: pytest.MonkeyPatch, clean_env: None
+) -> None:
+    monkeypatch.setenv("KEYSTONE_SCANNER_CLASSIFIER", "gpt")
+
+    with pytest.raises(ValidationError):
+        Settings()

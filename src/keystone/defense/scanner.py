@@ -14,15 +14,19 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+import anyio
+
 from keystone.core.types import ScanResult, ToolRef, ToolResult
 from keystone.defense.classifier import Classifier
-from keystone.defense.rules import Rule, analyze, combine, default_rules
+from keystone.defense.rules import Rule, analyze, combine, default_rules, prepare, reveal_tags
 from keystone.settings import ScannerSettings, ScannerThresholds
 
 Label = Literal["benign", "suspicious", "injection"]
 
 # Text that is JSON is read as the strings in it. Beyond this size it is read as it is.
 MAX_JSON_CHARS = 5_000_000
+# What `model` says when the classifier was asked and gave no answer in time.
+TIMEOUT = "timeout"
 
 
 @dataclass(frozen=True)
@@ -114,6 +118,10 @@ class ScanDetails(ScanResult):
     normalized: bool = False
     # The text was longer than `scanner.max_scan_chars` and only its two ends were read.
     truncated: bool = False
+    # The two scores the final one is the higher of. The classifier's is None when there is no
+    # classifier or it gave no answer in time.
+    rule_score: float = 0.0
+    classifier_score: float | None = None
 
 
 def label_for(score: float, thresholds: ScannerThresholds) -> Label:
@@ -125,8 +133,10 @@ def label_for(score: float, thresholds: ScannerThresholds) -> Label:
 
 
 class CompositeScanner:
-    """Scores a text with the rules. `classifier` is the second opinion that KS-703 combines with
-    the rules' score; until then it is kept and not asked."""
+    """Scores a text with the rules and, when there is one, a classifier. The final score is the
+    higher of the two: the rules are cheap and exact about what they name, and the classifier sees
+    what no pattern names. A classifier that does not answer within `classifier_timeout_ms` is left
+    out of that scan, which is then the rules alone, and `model` says "timeout"."""
 
     def __init__(
         self,
@@ -139,12 +149,32 @@ class CompositeScanner:
         self._cfg = cfg or ScannerSettings()
 
     async def scan(self, text: str, *, tool: ToolRef) -> ScanResult:
-        return self.scan_text(text)
-
-    def scan_text(self, text: str) -> ScanDetails:
-        """The scan, without waiting for anything. The rules are a few milliseconds of Python."""
         started = time.perf_counter()
         window, truncated = self._window(text)
+        details = self._rules_pass(window, truncated)
+        classifier = self._classifier
+        if classifier is not None:
+            view = prepare(reveal_tags(window))[0]
+            answer = await self._ask(classifier, view)
+            score = details.score if answer is None else max(details.score, round(answer, 6))
+            details = details.model_copy(
+                update={
+                    "score": score,
+                    "label": label_for(score, self._cfg.thresholds),
+                    "model": TIMEOUT if answer is None else classifier.name,
+                    "classifier_score": None if answer is None else round(answer, 6),
+                }
+            )
+        return details.model_copy(update={"latency_ms": (time.perf_counter() - started) * 1000})
+
+    def scan_text(self, text: str) -> ScanDetails:
+        """The rules alone, without waiting for anything. They are a few milliseconds of Python."""
+        started = time.perf_counter()
+        window, truncated = self._window(text)
+        details = self._rules_pass(window, truncated)
+        return details.model_copy(update={"latency_ms": (time.perf_counter() - started) * 1000})
+
+    def _rules_pass(self, window: str, truncated: bool) -> ScanDetails:
         hits, normalized = analyze(window, self._rules)
         # Rounded so that a score meant to sit on a threshold does so (1 - 0.4 * 0.5 is 0.8).
         score = round(combine(hit.weight for hit in hits), 6)
@@ -154,10 +184,15 @@ class CompositeScanner:
             rule_hits=[hit.id for hit in hits],
             action="pass",
             model=None,
-            latency_ms=(time.perf_counter() - started) * 1000,
             normalized=normalized,
             truncated=truncated,
+            rule_score=score,
         )
+
+    async def _ask(self, classifier: Classifier, view: str) -> float | None:
+        with anyio.move_on_after(self._cfg.classifier_timeout_ms / 1000):
+            return await classifier.score(view)
+        return None
 
     def _window(self, text: str) -> tuple[str, bool]:
         """The text, or its two ends when it is longer than the limit."""

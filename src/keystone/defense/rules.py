@@ -301,6 +301,17 @@ def default_rules(allowed_domains: Iterable[str] = ()) -> list[Rule]:
     ]
 
 
+# Unicode tag characters are ASCII moved to U+E0020 to U+E007E, where no editor draws them.
+_TAG_TO_ASCII = {code: code - 0xE0000 for code in range(0xE0020, 0xE007F)}
+
+
+def reveal_tags(text: str) -> str:
+    """The text with tag characters written as the ASCII they stand for. A model reads what the
+    bytes of a tag character say, so the classifier is given the message that a person cannot see.
+    (The `hidden_unicode` rule hits on the characters either way.)"""
+    return text if text.isascii() else text.translate(_TAG_TO_ASCII)
+
+
 def prepare(text: str) -> tuple[str, bool]:
     """The text the phrase rules read, and whether normalizing it changed anything. Invisible
     characters are removed first (`hidden_unicode` has already seen them), so what changes the text
