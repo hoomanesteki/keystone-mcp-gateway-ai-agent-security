@@ -85,6 +85,16 @@ runs the one test that loads the real model.
 | torch | 2.14.1 | CPU inference of the classifier. Linux gets the CPU wheel (`2.14.1+cpu`) from `download.pytorch.org/whl/cpu`, so no CUDA library is installed; macOS and Windows get the ordinary wheel |
 | transformers | 5.20.2 | loads the model and its tokenizer; brings `huggingface-hub`, `tokenizers` and `safetensors` |
 
+## Python packages: the eval extra
+
+The optional extra `keystone[eval]` (KS-707) reads the public datasets of the detector evaluation.
+CI installs it for the nightly detector job and for nothing else, and `make gate` installs it from
+Phase 7. Without it the evaluation builds its synthetic texts only and says so.
+
+| Package | Version | Used for |
+|---|---|---|
+| pyarrow | 26.0.0 | reads the parquet files of `deepset/prompt-injections` and `Salesforce/wikitext` at a pinned revision. Imported inside one function of `eval/detector/datasets.py`, so nothing else needs it. The datasets server of Hugging Face answers 429 after a few dozen requests, which 60 articles cannot stay under; the files do not |
+
 ## Models
 
 A model is pinned to a revision, which `keystone.defense.classifier.SPECS` holds and a test checks.
