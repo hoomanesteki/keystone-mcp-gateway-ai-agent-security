@@ -16,6 +16,11 @@ upstreams:
     tenant: acme
     transport: http
     url: "http://localhost:8101/mcp"
+    # The demo servers need an API key when MAIL_API_KEY is set. credential_env names the variable
+    # Keystone reads it from at startup, to store it encrypted in the vault (needs
+    # KEYSTONE_MASTER_KEYS). The key itself never goes in this file.
+    credential_mode: static
+    credential_env: {X-Api-Key: MAIL_API_KEY}
     tools:
       read_email: {risk: low, tags: [reads_untrusted, reads_sensitive]}
       send_email: {risk: high, tags: [external_effect], extract: {recipient_domain: "$.to | domain"}}

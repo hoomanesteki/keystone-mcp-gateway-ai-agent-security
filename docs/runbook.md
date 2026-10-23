@@ -68,7 +68,7 @@ Run one outside compose: `uv run python -m examples.upstreams.mail_server --port
 |---|---|
 | `MAIL_DB`, `BANK_DB`, `FILES_DB` | SQLite file for the server's state. Default: a temp file. Every start re-seeds it. |
 | `FILES_WORKSPACE` | Directory the files server confines itself to. Default: a temp directory. |
-| `MAIL_API_KEY`, `FILES_API_KEY`, `BANK_API_KEY`, `ECHO_API_KEY` | When set, `/mcp` requires a matching `X-Api-Key` header. Unset in tests and compose until Phase 3. |
+| `MAIL_API_KEY`, `FILES_API_KEY`, `BANK_API_KEY`, `ECHO_API_KEY` | When set, `/mcp` requires a matching `X-Api-Key` header, and `/_state` reports `api_key_received`. Compose sets them (the defaults are in `.env.example`); Keystone takes them from its own environment and stores them in the vault. |
 | `ECHO_POISONED` | `1` adds the poisoned tool. |
 
 ## Identity (Keycloak)
@@ -215,9 +215,11 @@ Three sections come from the YAML file only: `tenants`, `upstreams` and `agents`
 ## Credentials
 
 An upstream that needs an API key gets it from Keystone, never from the agent and never from the
-config file. The key is stored encrypted in Postgres (table `credentials`) and Keystone adds it to
-the call as an HTTP header. This section is the storage. The injection and the proof that no
-credential leaks come with KS-306.
+config file. The key is stored encrypted in Postgres (table `credentials`), and the credential slot
+of the pipeline adds it to the call as an HTTP header at the last moment: after policy and
+approval, so a refused call never has its credential decrypted, and dropped from the call context
+as soon as the call ends. It does not appear in the tool list, in a result, in a rejection, in the
+audit record or in a log line.
 
 `credential_mode` on the upstream says whose credential it is:
 
@@ -254,6 +256,43 @@ KEYSTONE_MASTER_KEYS="$NEW"      keystone serve                # now the old key
 
 It exits 1 and names the rows it could not decrypt if some credential was written under a key that
 is no longer listed. A rotation never undoes a `cred set` made while it runs.
+
+### From the environment at startup
+
+In the config, an HTTP upstream can name the environment variable that holds its key instead of
+holding it. Keystone reads the variable when it starts and stores the value in the vault through
+the same code as `cred set`, before the first sync needs it:
+
+```yaml
+upstreams:
+  - id: mail
+    tenant: acme
+    url: http://mail-mcp:8101/mcp
+    credential_mode: static
+    credential_env: {X-Api-Key: MAIL_API_KEY}
+```
+
+A value that has not changed is not written again. A variable that is not set leaves the stored
+credential as it is, so a restart without the variable does not lose it. A name that starts with
+`KEYSTONE_` is refused, so the master key cannot be used as an upstream credential by mistake.
+`credential_env` on an upstream whose `credential_mode` is `none` is an error, because it would
+never be sent. Keystone does not start if an upstream in the config uses credentials and
+`KEYSTONE_MASTER_KEYS` is not set.
+
+Keystone also uses an upstream's static credential for what it does on its own account: reading
+the tool list (startup, the timer and `keystone registry sync`) and the health probes. A `per_user`
+upstream that has a static credential is read with that one; a user's credential is never used
+for it. Without a static credential those requests carry no key, so a `per_user` upstream that
+demands a key even to list its tools needs a static credential as well, or its probes fail and
+Keystone marks it down.
+
+A call whose upstream gets no credential (a `static` upstream whose credential was deleted, say)
+reaches the upstream without one. If the upstream answers 401, the agent gets `KS_UPSTREAM_ERROR`,
+after the reconnect attempts, which take about 4 seconds.
+
+Not covered: an upstream that copies the key it received into a tool result. Keystone passes
+results on unchanged, so the key would reach the agent. The demo servers never do this; a server
+you do not trust belongs behind the sandbox of Phase 8.
 
 Header names are letters, digits and dashes. `Host`, `Content-Type`, `Mcp-Session-Id` and the
 other headers the HTTP layer owns are refused. Values are printable ASCII on one line, up to 4096
