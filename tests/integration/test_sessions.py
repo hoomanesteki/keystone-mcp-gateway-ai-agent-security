@@ -191,10 +191,10 @@ async def test_a_redis_failure_is_raised(sessionmaker: Sessions) -> None:
 async def test_the_gateway_writes_the_row_on_the_first_call_of_a_new_session(
     keystone_app: KeystoneApp, mcp_client: McpConnect, redis: Redis, sessionmaker: Sessions
 ) -> None:
-    async with mcp_client(keystone_app) as client:
+    async with mcp_client(keystone_app, user="olivia") as client:
         await client.call_tool("echo__echo", {"payload": "one"})
         await client.call_tool("echo__echo", {"payload": "two"})
-    async with mcp_client(keystone_app) as client:
+    async with mcp_client(keystone_app, user="olivia") as client:
         await client.call_tool("echo__echo", {"payload": "three"})
 
     first, second = {r["session_id"] for r in keystone_app.audit.records}, None
@@ -210,14 +210,20 @@ async def test_the_gateway_writes_the_row_on_the_first_call_of_a_new_session(
     assert second is None
 
 
-async def test_a_list_before_any_call_stores_nothing(
+async def test_a_session_is_stored_when_it_opens_before_any_call(
     keystone_app: KeystoneApp, mcp_client: McpConnect, redis: Redis, sessionmaker: Sessions
 ) -> None:
+    # KS-304 binds a session to its principal when `initialize` creates it, so the state and the
+    # row exist before the first call. Until then they appeared with the first call.
     async with mcp_client(keystone_app) as client:
         await client.list_tools()
 
-    assert await rows(sessionmaker) == []
-    assert [key async for key in redis.scan_iter("ks:sess:*")] == []
+    [row] = await rows(sessionmaker)
+    assert (row.tenant_id, row.user_id, row.agent_id) == ("acme", "alice", "support-agent")
+    keys = [key async for key in redis.scan_iter("ks:sess:*")]
+    assert keys == [session_key(row.id)]
+    state = SessionState.model_validate_json(await redis.get(keys[0]) or "")
+    assert state.principal.user_id == "alice" and state.call_count == 0
 
 
 async def test_a_call_is_refused_and_audited_when_the_session_state_cannot_be_read(

@@ -2,9 +2,13 @@
 # Environment variables override anything set here.
 log_level: info
 
+# One Keystone can serve several tenants. A token's `tenant` claim picks one, and a caller sees only
+# that tenant's upstreams and tools. An upstream id is unique across tenants.
 tenants:
   - id: acme
     name: Acme Corp
+  - id: globex
+    name: Globex Inc
 
 # The MCP servers Keystone proxies. Each tool is exposed as <id>__<tool>, for example mail__read_email.
 # These URLs reach the demo upstreams that `make up` publishes on the host. Inside compose they are
@@ -16,12 +20,37 @@ upstreams:
     tenant: acme
     transport: http
     url: "http://localhost:8101/mcp"
+    # The demo servers need an API key when MAIL_API_KEY is set. credential_env names the variable
+    # Keystone reads it from at startup, to store it encrypted in the vault (needs
+    # KEYSTONE_MASTER_KEYS). The key itself never goes in this file.
+    credential_mode: static
+    credential_env: {X-Api-Key: MAIL_API_KEY}
     tools:
       read_email: {risk: low, tags: [reads_untrusted, reads_sensitive]}
       send_email: {risk: high, tags: [external_effect], extract: {recipient_domain: "$.to | domain"}}
   - {id: files, tenant: acme, transport: http, url: "http://localhost:8102/mcp"}
   - {id: bank, tenant: acme, transport: http, url: "http://localhost:8103/mcp"}
   - {id: echo, tenant: acme, transport: http, url: "http://localhost:8104/mcp"}
+  # Globex's own drive: `python -m examples.upstreams.files_server --port 8112` with
+  # FILES_SEED=examples/fixtures/files-globex. Only globex's users see its tools.
+  - id: files_globex
+    tenant: globex
+    transport: http
+    url: "http://localhost:8112/mcp"
+
+# Sign-in. KEYSTONE_OIDC_ISSUER is the `iss` of valid tokens (required); see docs/runbook.md for the
+# other OIDC variables. `mode: none` skips the check and makes every caller the dev principal. It is
+# refused unless env is dev or test.
+auth:
+  mode: oidc
+  allow_unknown_agents: false
+
+# The agents (OAuth clients, the token's `azp`) that may connect, and how far each is trusted:
+# low, standard or high. An agent that is not listed is refused with 403 unless
+# auth.allow_unknown_agents is true, and then it gets trust low.
+agents:
+  support-agent: {trust: standard}
+  ops-agent: {trust: high}
 
 # How the tool list is kept current. All three can be set with KEYSTONE_REGISTRY__<NAME>.
 registry:

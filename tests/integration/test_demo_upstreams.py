@@ -1,3 +1,4 @@
+import secrets
 import sys
 from pathlib import Path
 from typing import Any
@@ -7,7 +8,7 @@ import pytest
 from mcp import Client, StdioServerParameters
 from mcp.client.streamable_http import streamable_http_client
 
-from examples.upstreams import _common, echo_server, mail_server
+from examples.upstreams import _common, echo_server, files_server, mail_server
 from tests.fixtures.mcp_results import many, one, texts
 from tests.fixtures.servers import ServerThread
 from tests.fixtures.upstreams import NAMES, DemoUpstreams
@@ -301,6 +302,62 @@ async def test_a_server_with_an_api_key_refuses_calls_without_it(tmp_path: Path)
         assert httpx2.get(f"{thread.url}/healthz", timeout=10).status_code == 200
     finally:
         thread.stop()
+
+
+@pytest.mark.phase(3)
+async def test_state_says_whether_the_right_key_arrived_and_never_shows_it(tmp_path: Path) -> None:
+    key = f"s3cret-{secrets.token_hex(6)}"
+    app = _common.http_app(
+        mail_server.create_server(tmp_path / "mail.db"), api_key=key, host="127.0.0.1"
+    )
+    thread = ServerThread(app).start()
+    probe = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+
+    def state() -> Any:
+        return httpx2.get(f"{thread.url}/_state", timeout=10)
+
+    try:
+        assert state().json()["api_key_received"] is False
+        httpx2.post(f"{thread.url}/mcp", json=probe, headers={"X-Api-Key": "wrong"}, timeout=10)
+        assert state().json()["api_key_received"] is False  # a refused request does not count
+        httpx2.post(f"{thread.url}/mcp", json=probe, headers={"X-Api-Key": key}, timeout=10)
+        arrived = state()
+        httpx2.post(f"{thread.url}/_reset", timeout=10)
+        reset = state()
+    finally:
+        thread.stop()
+
+    assert arrived.json()["api_key_received"] is True
+    assert key not in arrived.text  # a boolean, never the value
+    assert reset.json()["api_key_received"] is False
+
+
+@pytest.mark.phase(3)
+async def test_a_server_without_a_key_reports_none_arrived(demo_upstreams: DemoUpstreams) -> None:
+    await call(demo_upstreams, "mail", "list_emails")
+
+    assert demo_upstreams.state("mail")["api_key_received"] is False
+
+
+@pytest.mark.phase(3)
+async def test_a_files_server_can_start_from_another_seed(tmp_path: Path) -> None:
+    seed = ROOT / "examples" / "fixtures" / "files-globex"
+    server = files_server.create_server(tmp_path / "workspace", tmp_path / "files.db", seed=seed)
+    thread = ServerThread(server.streamable_http_app()).start()
+    try:
+        async with Client(f"{thread.url}/mcp") as client:
+            listing = many(await client.call_tool("list_files", {"path": "."}))
+            readme = texts(await client.call_tool("read_file", {"path": "README.txt"}))[0]
+            await client.call_tool("write_file", {"path": "README.txt", "content": "changed"})
+        httpx2.post(f"{thread.url}/_reset", timeout=10)
+        async with Client(f"{thread.url}/mcp") as client:
+            again = texts(await client.call_tool("read_file", {"path": "README.txt"}))[0]
+    finally:
+        thread.stop()
+
+    assert [entry["name"] for entry in listing] == ["README.txt", "finance", "projects"]
+    assert "Globex shared drive" in readme
+    assert again == readme  # reset goes back to that seed, not to the default one
 
 
 @pytest.mark.phase(1)

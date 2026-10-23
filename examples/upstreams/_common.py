@@ -2,7 +2,9 @@
 
 Each server is `python -m examples.upstreams.<name>_server --port N --transport http|stdio`.
 The HTTP form adds three plain routes next to /mcp that are not tools, so an agent cannot call
-them: GET /healthz, POST /_reset (back to the seed) and GET /_state (what the server did).
+them: GET /healthz, POST /_reset (back to the seed) and GET /_state (what the server did). When a
+server requires an API key, /_state also says, as a boolean, whether a request with the right key
+has arrived since the last reset. It never shows the key, and no tool or route returns it.
 """
 
 from __future__ import annotations
@@ -14,8 +16,10 @@ import sqlite3
 import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from weakref import WeakKeyDictionary
 
 import uvicorn
 from mcp.server.context import ServerRequestContext
@@ -29,12 +33,25 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 API_KEY_HEADER = "x-api-key"
 
 
+@dataclass
+class KeyProbe:
+    """Whether a request with the right API key has reached /mcp since the last reset."""
+
+    received: bool = False
+
+
+# One probe per server, made when its test routes are registered and read by `http_app`, so the
+# servers' create_server functions need no extra argument.
+_PROBES: WeakKeyDictionary[MCPServer, KeyProbe] = WeakKeyDictionary()
+
+
 class ApiKeyMiddleware:
     """Require `X-Api-Key` on /mcp when the server has a key. The test routes stay open."""
 
-    def __init__(self, app: ASGIApp, api_key: str) -> None:
+    def __init__(self, app: ASGIApp, api_key: str, probe: KeyProbe | None = None) -> None:
         self.app = app
         self.api_key = api_key
+        self.probe = probe
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http" and scope["path"].startswith("/mcp"):
@@ -44,6 +61,8 @@ class ApiKeyMiddleware:
                 response = JSONResponse({"error": "invalid or missing X-Api-Key"}, status_code=401)
                 await response(scope, receive, send)
                 return
+            if self.probe is not None:
+                self.probe.received = True
         await self.app(scope, receive, send)
 
 
@@ -81,6 +100,8 @@ def register_test_routes(
     reset: Callable[[], None],
     state: Callable[[], dict[str, Any]],
 ) -> None:
+    probe = _PROBES.setdefault(server, KeyProbe())
+
     @server.custom_route("/healthz", methods=["GET"])
     async def healthz(request: Request) -> Response:
         return JSONResponse({"status": "ok"})
@@ -88,11 +109,12 @@ def register_test_routes(
     @server.custom_route("/_reset", methods=["POST"])
     async def reset_route(request: Request) -> Response:
         reset()
+        probe.received = False
         return JSONResponse({"status": "reset"})
 
     @server.custom_route("/_state", methods=["GET"])
     async def state_route(request: Request) -> Response:
-        return JSONResponse(state())
+        return JSONResponse({**state(), "api_key_received": probe.received})
 
 
 def http_app(server: MCPServer, *, api_key: str | None, host: str) -> Starlette:
@@ -100,7 +122,7 @@ def http_app(server: MCPServer, *, api_key: str | None, host: str) -> Starlette:
     # server binds 0.0.0.0 and other containers reach it by service name.
     app = server.streamable_http_app(host=host)
     if api_key:
-        app.add_middleware(ApiKeyMiddleware, api_key=api_key)
+        app.add_middleware(ApiKeyMiddleware, api_key=api_key, probe=_PROBES.get(server))
     return app
 
 

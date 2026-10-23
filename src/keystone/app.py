@@ -1,4 +1,5 @@
-from collections.abc import AsyncIterator, Callable
+import os
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
@@ -21,7 +22,16 @@ from keystone.gateway.sessions import InMemorySessionStore, RedisSessionStore, S
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
 from keystone.gateway.wiring import PipelineDeps, build_pipeline
 from keystone.health import check_dependencies, upstream_statuses
-from keystone.registry.config import apply_config_upstreams, stdio_environments, tool_overrides
+from keystone.identity.credential_repo import vault_from_settings
+from keystone.identity.metadata import add_metadata_route
+from keystone.identity.middleware import Authenticator
+from keystone.identity.vault import VaultError
+from keystone.registry.config import (
+    apply_config_upstreams,
+    seed_credentials,
+    stdio_environments,
+    tool_overrides,
+)
 from keystone.registry.repo import ToolRepo, UpstreamRepo
 from keystone.registry.service import RegistryService
 from keystone.registry.sync import RegistrySyncer
@@ -36,13 +46,28 @@ def create_app(
     audit: AuditSink | None = None,
     interceptors: dict[str, Interceptor] | None = None,
     wrap_dispatcher: Callable[[Dispatcher], Dispatcher] | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> FastAPI:
     """Build the app. The keyword arguments are seams for tests: a different audit sink, a
-    real interceptor in one slot, or a spy around the dispatcher."""
+    real interceptor in one slot, a spy around the dispatcher, or the environment that upstream
+    credentials are read from (the process environment by default)."""
     settings = settings or Settings()
+    # Refuses to build an app whose authentication cannot work, instead of one that answers 401
+    # to everybody.
+    authenticator = Authenticator(settings)
     # The engine connects lazily, so building it needs no database. The lifespan disposes it.
     engine = create_engine(settings.database_url.get_secret_value())
     sessions = make_sessionmaker(engine)
+    vault = vault_from_settings(settings, sessions)
+    needing_a_vault = [
+        u.id for u in settings.upstreams if u.credential_mode != "none" or u.credential_env
+    ]
+    if needing_a_vault and vault is None:
+        raise VaultError(
+            f"upstream {', '.join(needing_a_vault)} uses credentials, "
+            "so KEYSTONE_MASTER_KEYS must be set"
+        )
+    service_headers = vault.service_headers if vault else None
     directory = UpstreamDirectory()
     pool = UpstreamPool(
         directory_client_factory(directory, health_timeout_s=settings.health.timeout_s)
@@ -55,6 +80,7 @@ def create_app(
         overrides=tool_overrides(settings.upstreams),
         timeout_s=settings.registry.sync_timeout_s,
         environments=stdio_environments(settings.upstreams),
+        service_headers=service_headers,
     )
     registry = RegistryService(syncer, cache_ttl_s=settings.registry.cache_ttl_s)
     health = UpstreamHealth(
@@ -65,13 +91,14 @@ def create_app(
         timeout_s=settings.health.timeout_s,
         degraded_after=settings.health.degraded_after,
         down_after=settings.health.down_after,
+        service_headers=service_headers,
     )
     audit = audit or InMemoryAuditSink()
     dispatcher: Dispatcher = UpstreamDispatcher(pool, health)
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
     pipeline = build_pipeline(
-        settings, PipelineDeps(dispatcher, audit, tool_states=registry), interceptors
+        settings, PipelineDeps(dispatcher, audit, tool_states=registry, vault=vault), interceptors
     )
     # An empty KEYSTONE_REDIS_URL keeps session state in this process, for a single-process setup.
     redis = (
@@ -97,6 +124,12 @@ def create_app(
                 [t.id for t in settings.tenants],
                 allow_private=settings.allow_private_upstreams,
             )
+            # Credentials given in the environment go into the vault now, before the first sync
+            # needs them.
+            if vault is not None:
+                await seed_credentials(
+                    vault, settings.upstreams, os.environ if environ is None else environ
+                )
             # One task enters and leaves the pool, the sync loop and the session manager, as
             # the SDK's cancel scopes require (engineering note 1).
             async with AsyncExitStack() as stack:
@@ -121,7 +154,10 @@ def create_app(
     app.state.health = health
     app.state.gateway = gateway
     app.state.audit = audit
-    manager = mount_mcp(app, gateway)
+    app.state.authenticator = authenticator
+    app.state.vault = vault
+    manager = mount_mcp(app, gateway, authenticator)
+    add_metadata_route(app, settings)
 
     if settings.env != "prod" and isinstance(audit, InMemoryAuditSink):
         sink = audit

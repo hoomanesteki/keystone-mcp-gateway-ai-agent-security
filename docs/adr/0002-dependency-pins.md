@@ -50,10 +50,12 @@ file or listed with a different version.
 | alembic | 1.20.0 | schema migrations |
 | anyio | 4.15.1 | timeouts and task groups (fail_after, create_task_group) |
 | asyncpg | 0.32.0 | Postgres driver, also used directly by the readiness probe |
+| cryptography | 50.0.2 | Fernet encryption for the credential vault (KS-305), and the RSA and EC keys of the fake IdP |
 | fastapi | 0.159.1 | HTTP app and dependency injection |
 | jsonschema | 4.26.0 | Draft 2020-12 validation of tool arguments in the pipeline |
 | mcp | 2.3.0 | MCP server and client SDK (ADR-0003); a new major version, see `docs/spikes/mcp-proxy.md` |
 | pydantic-settings | 2.16.1 | typed settings from env and YAML |
+| pyjwt | 2.15.1 | JWT validation against the IdP's keys (KS-303), with the `crypto` extra for RS256 and ES256; it was already installed through the MCP SDK |
 | pyyaml | 6.0.3 | YAML config files |
 | redis | 8.1.0 | Redis client (asyncio) |
 | sqlalchemy | 2.1.6 | async ORM and Core |
@@ -92,7 +94,6 @@ file or listed with a different version.
 | charset-normalizer | 3.5.2 |
 | click | 8.5.0 |
 | colorama | 0.4.6 |
-| cryptography | 50.0.2 |
 | cyclonedx-python-lib | 11.12.0 |
 | defusedxml | 0.7.1 |
 | distlib | 0.4.4 |
@@ -131,7 +132,6 @@ file or listed with a different version.
 | pydantic | 2.14.1 |
 | pydantic-core | 2.50.1 |
 | pygments | 2.21.0 |
-| pyjwt | 2.15.1 |
 | pyparsing | 3.3.3 |
 | python-discovery | 1.6.4 |
 | python-dotenv | 1.2.4 |

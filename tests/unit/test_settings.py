@@ -68,7 +68,8 @@ def test_invalid_env_value_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.phase(1)
 @pytest.mark.parametrize("env", ["dev", "test"])
 def test_dev_and_test_get_the_phase_1_dev_principal(env: str) -> None:
-    principal = Settings(env=env).dev_principal  # type: ignore[arg-type]
+    # Since KS-304 the dev principal exists only when authentication is turned off.
+    principal = Settings(env=env, auth={"mode": "none"}).dev_principal  # type: ignore[arg-type]
 
     assert principal is not None
     assert (principal.tenant_id, principal.user_id, principal.agent_id) == (
@@ -124,6 +125,7 @@ def test_allowed_hosts_and_dev_principal_come_from_json_env_vars(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("KEYSTONE_ALLOWED_HOSTS", '["keystone:*", "localhost:*"]')
+    monkeypatch.setenv("KEYSTONE_AUTH__MODE", "none")
     monkeypatch.setenv(
         "KEYSTONE_DEV_PRINCIPAL",
         '{"tenant_id": "globex", "user_id": "quinn", "agent_id": "support-agent"}',
@@ -204,3 +206,91 @@ def test_tool_overrides_load_from_yaml_and_typos_fail(tmp_path: Path) -> None:
         )
     with pytest.raises(ValueError, match="tool"):
         Settings(upstreams=[{"id": "mail", "tool": {}}])  # type: ignore[list-item]
+
+
+@pytest.mark.phase(3)
+def test_auth_none_refused_outside_dev() -> None:
+    assert Settings(env="dev", auth={"mode": "none"}).auth.mode == "none"  # type: ignore[arg-type]
+    assert Settings(env="test", auth={"mode": "none"}).auth.mode == "none"  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match=r"auth\.mode"):
+        Settings(env="prod", auth={"mode": "none"})  # type: ignore[arg-type]
+
+
+@pytest.mark.phase(3)
+def test_auth_none_is_refused_in_prod_when_it_comes_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KEYSTONE_ENV", "prod")
+    monkeypatch.setenv("KEYSTONE_AUTH__MODE", "none")
+
+    with pytest.raises(ValueError, match=r"auth\.mode"):
+        Settings()
+
+
+@pytest.mark.phase(3)
+@pytest.mark.parametrize("env", ["dev", "test", "prod"])
+def test_authentication_is_on_by_default_and_there_is_no_dev_principal(env: str) -> None:
+    settings = Settings(env=env)  # type: ignore[arg-type]
+
+    assert settings.auth.mode == "oidc"
+    assert settings.dev_principal is None
+
+
+@pytest.mark.phase(3)
+def test_a_dev_principal_needs_authentication_to_be_off() -> None:
+    principal = {"tenant_id": "acme", "user_id": "x", "agent_id": "y"}
+
+    with pytest.raises(ValueError, match="dev_principal"):
+        Settings(env="dev", dev_principal=principal)  # type: ignore[arg-type]
+    chosen = Settings(env="dev", auth={"mode": "none"}, dev_principal=principal)  # type: ignore[arg-type]
+    assert chosen.dev_principal is not None and chosen.dev_principal.user_id == "x"
+
+
+@pytest.mark.phase(3)
+def test_oidc_settings_have_defaults_and_come_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    defaults = Settings()
+    assert (defaults.oidc_issuer, defaults.oidc_discovery_url, defaults.public_base_url) == (
+        None,
+        None,
+        None,
+    )
+    assert defaults.oidc_audience == "keystone"
+
+    monkeypatch.setenv("KEYSTONE_OIDC_ISSUER", "http://localhost:8180/realms/keystone")
+    monkeypatch.setenv(
+        "KEYSTONE_OIDC_DISCOVERY_URL",
+        "http://keycloak:8080/realms/keystone/.well-known/openid-configuration",
+    )
+    monkeypatch.setenv("KEYSTONE_OIDC_AUDIENCE", "gateway")
+    monkeypatch.setenv("KEYSTONE_PUBLIC_BASE_URL", "https://keystone.example.test/")
+
+    settings = Settings()
+
+    assert settings.oidc_issuer == "http://localhost:8180/realms/keystone"
+    assert (settings.oidc_discovery_url or "").startswith("http://keycloak:8080/")
+    assert settings.oidc_audience == "gateway"
+    assert settings.public_base_url == "https://keystone.example.test"  # no trailing slash
+
+
+@pytest.mark.phase(3)
+@pytest.mark.parametrize("field", ["oidc_issuer", "oidc_discovery_url", "public_base_url"])
+@pytest.mark.parametrize("value", ["localhost:8180", "ftp://idp.test/realm", "http://", "/realm"])
+def test_urls_must_be_http_or_https(field: str, value: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        Settings(**{field: value})  # type: ignore[arg-type]
+
+
+@pytest.mark.phase(3)
+def test_master_keys_are_a_secret_that_settings_never_print(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = "FpAPqO9j92_C-qEbO6vqkdH2olOR4ZHKzRqM7OhjSE0="
+    assert Settings().master_keys is None
+
+    monkeypatch.setenv("KEYSTONE_MASTER_KEYS", f"{key},another")
+    settings = Settings()
+
+    assert settings.master_keys is not None
+    assert settings.master_keys.get_secret_value() == f"{key},another"
+    assert key not in repr(settings) and key not in settings.model_dump_json()

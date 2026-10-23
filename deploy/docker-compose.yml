@@ -38,8 +38,27 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
       KC_HEALTH_ENABLED: "true"
+      # Every token carries this address as its issuer (iss), whoever asks for it. Keystone reads
+      # the discovery document and the keys from http://keycloak:8080 instead; with dynamic
+      # backchannel URLs Keycloak answers that request with its own address in jwks_uri.
+      KC_HOSTNAME: "http://localhost:${KEYCLOAK_PORT:-8180}"
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      # DEVELOPMENT ONLY. The realm file (keycloak/realm-keystone.json) holds ${NAME} placeholders
+      # for these, and Keycloak fills them from its environment when it imports the realm. The
+      # defaults repeat .env.example; tests/unit/test_dev_secrets.py checks that they agree.
+      ALICE_PASSWORD: "${ALICE_PASSWORD:-alice-dev-password}"
+      OLIVIA_PASSWORD: "${OLIVIA_PASSWORD:-olivia-dev-password}"
+      LENA_PASSWORD: "${LENA_PASSWORD:-lena-dev-password}"
+      BOB_PASSWORD: "${BOB_PASSWORD:-bob-dev-password}"
+      ROOT_PASSWORD: "${ROOT_PASSWORD:-root-dev-password}"
+      SUPPORT_AGENT_SECRET: "${SUPPORT_AGENT_SECRET:-support-agent-dev-secret}"
+      OPS_AGENT_SECRET: "${OPS_AGENT_SECRET:-ops-agent-dev-secret}"
+      KEYSTONE_CLI_SECRET: "${KEYSTONE_CLI_SECRET:-keystone-cli-dev-secret}"
     ports:
       - "${KEYCLOAK_PORT:-8180}:8080"
+    # The realm is imported only when it does not exist yet, and the development database lives
+    # in the container, so `make reset` (or `make down`) followed by `make up` imports the file
+    # again. Do not give Keycloak a volume for its data.
     volumes:
       - ./keycloak:/opt/keycloak/data/import:ro
     healthcheck:
@@ -114,6 +133,9 @@ services:
       dockerfile: deploy/Dockerfile.upstreams
     image: keystone-upstreams:dev
     command: ["examples.upstreams.mail_server", "--host", "0.0.0.0", "--port", "8101"]
+    environment:
+      # Requests to /mcp need this key in X-Api-Key. Keystone holds it in its vault.
+      MAIL_API_KEY: "${MAIL_API_KEY:-dev-mail-key-3f9a1c7d}"
     ports:
       - "${MAIL_PORT:-8101}:8101"
     healthcheck:
@@ -132,6 +154,9 @@ services:
       dockerfile: deploy/Dockerfile.upstreams
     image: keystone-upstreams:dev
     command: ["examples.upstreams.files_server", "--host", "0.0.0.0", "--port", "8102"]
+    environment:
+      # Requests to /mcp need this key in X-Api-Key. Keystone holds it in its vault.
+      FILES_API_KEY: "${FILES_API_KEY:-dev-files-key-81b2e04f}"
     ports:
       - "${FILES_PORT:-8102}:8102"
     healthcheck:
@@ -150,6 +175,9 @@ services:
       dockerfile: deploy/Dockerfile.upstreams
     image: keystone-upstreams:dev
     command: ["examples.upstreams.bank_server", "--host", "0.0.0.0", "--port", "8103"]
+    environment:
+      # Requests to /mcp need this key in X-Api-Key. Keystone holds it in its vault.
+      BANK_API_KEY: "${BANK_API_KEY:-dev-bank-key-c6d57a92}"
     ports:
       - "${BANK_PORT:-8103}:8103"
     healthcheck:
@@ -162,12 +190,38 @@ services:
       timeout: 3s
       retries: 20
 
+  # The globex tenant's own files server: another drive (examples/fixtures/files-globex) and its
+  # own API key. The server reads its key from FILES_API_KEY, like the acme files server.
+  files-globex-mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.upstreams
+    image: keystone-upstreams:dev
+    command: ["examples.upstreams.files_server", "--host", "0.0.0.0", "--port", "8112"]
+    environment:
+      FILES_API_KEY: "${FILES_GLOBEX_API_KEY:-dev-globex-key-5a7c28e6}"
+      FILES_SEED: /app/examples/fixtures/files-globex
+    ports:
+      - "${FILES_GLOBEX_PORT:-8112}:8112"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.urlopen('http://127.0.0.1:8112/healthz', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   echo-mcp:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.upstreams
     image: keystone-upstreams:dev
     command: ["examples.upstreams.echo_server", "--host", "0.0.0.0", "--port", "8104"]
+    environment:
+      # Requests to /mcp need this key in X-Api-Key. Keystone holds it in its vault.
+      ECHO_API_KEY: "${ECHO_API_KEY:-dev-echo-key-0e4b9d13}"
     ports:
       - "${ECHO_PORT:-8104}:8104"
     healthcheck:
@@ -196,6 +250,21 @@ services:
       KEYSTONE_CONFIG: /etc/keystone/keystone.yaml
       KEYSTONE_DATABASE_URL: postgresql+asyncpg://keystone:keystone@postgres:5432/keystone
       KEYSTONE_REDIS_URL: redis://redis:6379/0
+      # Sign-in (KS-304). Tokens name the address a browser on this machine uses as their issuer.
+      # Keystone fetches the discovery document and the keys from the Keycloak container.
+      KEYSTONE_AUTH__MODE: oidc
+      KEYSTONE_OIDC_ISSUER: "http://localhost:${KEYCLOAK_PORT:-8180}/realms/keystone"
+      KEYSTONE_OIDC_DISCOVERY_URL: "http://keycloak:8080/realms/keystone/.well-known/openid-configuration"
+      KEYSTONE_PUBLIC_BASE_URL: "http://localhost:${KEYSTONE_PORT:-8080}"
+      # The vault (KS-305). DEVELOPMENT ONLY, like the keys below; both repeat .env.example.
+      KEYSTONE_MASTER_KEYS: "${KEYSTONE_MASTER_KEYS:-FpAPqO9j92_C-qEbO6vqkdH2olOR4ZHKzRqM7OhjSE0=}"
+      # The upstream credentials that keystone.compose.yaml takes from the environment (credential_env).
+      # At startup they go into the vault, encrypted. The upstreams above require the same values.
+      MAIL_API_KEY: "${MAIL_API_KEY:-dev-mail-key-3f9a1c7d}"
+      FILES_API_KEY: "${FILES_API_KEY:-dev-files-key-81b2e04f}"
+      BANK_API_KEY: "${BANK_API_KEY:-dev-bank-key-c6d57a92}"
+      ECHO_API_KEY: "${ECHO_API_KEY:-dev-echo-key-0e4b9d13}"
+      FILES_GLOBEX_API_KEY: "${FILES_GLOBEX_API_KEY:-dev-globex-key-5a7c28e6}"
       # Other containers reach Keystone by its service name.
       KEYSTONE_ALLOWED_HOSTS: '["127.0.0.1:*", "localhost:*", "[::1]:*", "keystone:*"]'
     volumes:
@@ -207,6 +276,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      keycloak:
+        condition: service_healthy
       mail-mcp:
         condition: service_healthy
       files-mcp:
@@ -214,6 +285,8 @@ services:
       bank-mcp:
         condition: service_healthy
       echo-mcp:
+        condition: service_healthy
+      files-globex-mcp:
         condition: service_healthy
     healthcheck:
       test:

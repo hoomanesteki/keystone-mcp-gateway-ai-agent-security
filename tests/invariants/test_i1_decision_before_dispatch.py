@@ -111,7 +111,7 @@ async def test_i1_a_decision_that_is_not_allow_stops_the_call(
     app: KeystoneApp = keystone_app_factory(
         wrap_dispatcher=wrap, interceptors={"policy": SetsEffect(effect)}
     )
-    async with mcp_client(app) as client:
+    async with mcp_client(app, user="olivia") as client:  # send_email is high risk: an operator
         result = await client.call_tool(
             "mail__send_email", {"to": "x@acme.test", "subject": "s", "body": "b"}
         )
@@ -138,7 +138,7 @@ async def test_i1_a_policy_slot_that_decides_nothing_stops_the_call(
     app: KeystoneApp = keystone_app_factory(
         wrap_dispatcher=wrap, interceptors={"policy": LeavesDecisionEmpty()}
     )
-    async with mcp_client(app) as client:
+    async with mcp_client(app, user="olivia") as client:
         result = await client.call_tool("mail__send_email", SEND_ARGS)
 
     assert result.is_error
@@ -167,7 +167,7 @@ async def test_i1_require_approval_dispatches_only_with_an_approval_id(
     app: KeystoneApp = keystone_app_factory(
         wrap_dispatcher=wrap, interceptors={"policy": policy, "approval": Approves()}
     )
-    async with mcp_client(app) as client:
+    async with mcp_client(app, user="olivia") as client:
         result = await client.call_tool("mail__send_email", SEND_ARGS)
 
     assert not result.is_error

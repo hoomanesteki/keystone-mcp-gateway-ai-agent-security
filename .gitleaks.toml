@@ -1,0 +1,25 @@
+# Gitleaks reads this file from the repository root. It keeps the default rules and allows one
+# thing: a false positive in the JWT module, where the generic key rule read the EC curve check
+# `ec_key.curve, ec.SECP256R1` as a key followed by a secret. The rule, the file and the value
+# must all match, so a real secret anywhere else, or another finding in this file, is still caught.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "EC curve check in identity/jwt.py, not a key"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^src/keystone/identity/jwt\.py$''']
+regexes = ['''^ec\.SECP256R1$''']
+
+# Made-up API keys that the tests store in the vault and read back. The generic rule reads any
+# long string next to the word "key" as a secret. These files only, and only that rule, so a
+# real secret in them of any other kind (a cloud key, a private key, a token) is still caught.
+[[allowlists]]
+description = "Fake credentials in the vault tests"
+targetRules = ["generic-api-key"]
+paths = [
+  '''^tests/unit/test_vault\.py$''',
+  '''^tests/integration/test_vault\.py$''',
+  '''^tests/unit/test_settings\.py$''',
+]

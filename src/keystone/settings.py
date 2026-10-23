@@ -1,8 +1,17 @@
 import os
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -24,6 +33,28 @@ DEFAULT_REDIS_URL = "redis://localhost:56379/0"
 class TenantConfig(BaseModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")
     name: str = Field(min_length=1)
+
+
+class AgentConfig(BaseModel):
+    """What the config says about one agent: the OAuth client that acts for users (KS-308). The
+    key under `agents` is the client id, which a token carries in `azp`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    trust: Literal["low", "standard", "high"] = "standard"
+
+
+class AuthSettings(BaseModel):
+    """How callers are identified."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # "oidc": every request to /mcp carries a bearer token from the identity provider. "none":
+    # every caller is `dev_principal`, which is only allowed when env is dev or test.
+    mode: Literal["oidc", "none"] = "oidc"
+    # An agent that is not listed under `agents` is refused with 403. With this on it gets in with
+    # trust `low` instead.
+    allow_unknown_agents: bool = False
 
 
 class RegistrySettings(BaseModel):
@@ -64,7 +95,7 @@ class HealthSettings(BaseModel):
 # calling localhost, and its Host header then names that site (DNS rebinding).
 DEFAULT_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 
-# Phase 1 has no authentication. Until KS-304, every caller is this person.
+# Who every caller is when `auth.mode` is `none`, which only dev and test allow.
 DEV_PRINCIPAL = Principal(
     tenant_id="acme", user_id="olivia", groups=("operators",), agent_id="ops-agent"
 )
@@ -94,18 +125,46 @@ class Settings(BaseSettings):
     allow_private_upstreams: bool = False
     registry: RegistrySettings = Field(default_factory=RegistrySettings)
     health: HealthSettings = Field(default_factory=HealthSettings)
-    # Who every caller is until real authentication arrives (KS-304). Never allowed in prod.
+    agents: dict[str, AgentConfig] = Field(default_factory=dict)
+    auth: AuthSettings = Field(default_factory=AuthSettings)
+    # Token validation (KS-303). `oidc_issuer` is the value tokens carry in `iss`. Keystone reads
+    # the identity provider's discovery document from there too, unless `oidc_discovery_url` names
+    # another address: in compose, tokens name http://localhost:8180 and Keystone asks
+    # http://keycloak:8080.
+    oidc_issuer: str | None = None
+    oidc_audience: str = "keystone"
+    oidc_discovery_url: str | None = None
+    # The address clients use to reach Keystone, for the sign-in metadata (RFC 9728). Without it
+    # the address of the request is used.
+    public_base_url: str | None = None
+    # Fernet keys for the credential vault, comma separated: the first encrypts and every one
+    # decrypts (KS-305). They are checked when the vault is built, not here, because a validation
+    # error would print the value it rejected.
+    master_keys: SecretStr | None = None
+    # Who every caller is when `auth.mode` is `none`. It exists only then.
     dev_principal: Principal | None = None
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))
 
     @model_validator(mode="after")
-    def _dev_principal_only_outside_prod(self) -> "Settings":
-        if self.env == "prod":
-            if self.dev_principal is not None:
-                raise ValueError("dev_principal is not allowed when env is prod")
-        elif self.dev_principal is None:
-            self.dev_principal = DEV_PRINCIPAL
+    def _dev_principal_only_without_authentication(self) -> "Settings":
+        if self.auth.mode == "none":
+            if self.env not in ("dev", "test"):
+                raise ValueError("auth.mode none is only allowed when env is dev or test")
+            if self.dev_principal is None:
+                self.dev_principal = DEV_PRINCIPAL
+        elif self.dev_principal is not None:
+            raise ValueError("dev_principal needs auth.mode none")
         return self
+
+    @field_validator("oidc_issuer", "oidc_discovery_url", "public_base_url")
+    @classmethod
+    def _http_url(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if not value:
+            return None
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError(f"{info.field_name} must be an http or https URL")
+        return value.rstrip("/") if info.field_name == "public_base_url" else value
 
     @field_validator("log_level", mode="before")
     @classmethod

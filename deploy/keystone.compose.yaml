@@ -2,15 +2,55 @@
 # Environment variables in docker-compose.yml override anything set here.
 log_level: info
 
+# Two tenants on one Keystone. A token's `tenant` claim picks one, and a caller sees only its own
+# tenant's upstreams and tools (KS-307).
 tenants:
   - id: acme
     name: Acme Corp
+  - id: globex
+    name: Globex Inc
 
+# Who may connect (KS-308): the OAuth clients of the Keycloak realm that act for users. The
+# issuer and the keys come from the environment (docker-compose.yml).
+agents:
+  support-agent: {trust: standard}
+  ops-agent: {trust: high}
+
+# The four HTTP upstreams require an API key. `credential_env` names the variable that holds it
+# (docker-compose.yml sets them); Keystone stores the value encrypted in its vault at startup and
+# adds it to every call, so no agent and no file here holds it.
 upstreams:
-  - {id: mail, tenant: acme, transport: http, url: "http://mail-mcp:8101/mcp"}
-  - {id: files, tenant: acme, transport: http, url: "http://files-mcp:8102/mcp"}
-  - {id: bank, tenant: acme, transport: http, url: "http://bank-mcp:8103/mcp"}
-  - {id: echo, tenant: acme, transport: http, url: "http://echo-mcp:8104/mcp"}
+  - id: mail
+    tenant: acme
+    transport: http
+    url: "http://mail-mcp:8101/mcp"
+    credential_mode: static
+    credential_env: {X-Api-Key: MAIL_API_KEY}
+  - id: files
+    tenant: acme
+    transport: http
+    url: "http://files-mcp:8102/mcp"
+    credential_mode: static
+    credential_env: {X-Api-Key: FILES_API_KEY}
+  - id: bank
+    tenant: acme
+    transport: http
+    url: "http://bank-mcp:8103/mcp"
+    credential_mode: static
+    credential_env: {X-Api-Key: BANK_API_KEY}
+  - id: echo
+    tenant: acme
+    transport: http
+    url: "http://echo-mcp:8104/mcp"
+    credential_mode: static
+    credential_env: {X-Api-Key: ECHO_API_KEY}
+  # Globex's own drive. An upstream id is unique across tenants, so it is not called `files`.
+  - id: files_globex
+    tenant: globex
+    transport: http
+    url: "http://files-globex-mcp:8112/mcp"
+    credential_mode: static
+    credential_env: {X-Api-Key: FILES_GLOBEX_API_KEY}
   # A demo MCP server that Keystone starts itself and talks to over stdin and stdout. The working
   # directory of the container is /app, where the image keeps `examples`.
   - id: echostd

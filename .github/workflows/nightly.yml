@@ -1,0 +1,46 @@
+name: Nightly
+
+# The end-to-end tests need the whole compose stack (Keycloak, the demo upstreams, Keystone), so
+# they run here and at every phase gate instead of on each push. Run it by hand from the Actions
+# tab, or locally with `make up && make test-e2e`.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Fail instead of rewriting uv.lock.
+  UV_LOCKED: "1"
+
+jobs:
+  e2e:
+    name: e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.1
+        with:
+          enable-cache: true
+      - run: uv sync
+      - name: start the stack
+        run: make up
+      - name: end-to-end tests
+        run: make test-e2e
+      - name: container logs
+        if: failure()
+        run: docker compose -f deploy/docker-compose.yml logs --no-color --tail=200
+      - name: stop the stack
+        if: always()
+        run: make down

@@ -40,6 +40,7 @@ def test_migrations_up_down(clean_env: None) -> None:
             "upstreams",
             "tools",
             "sessions",
+            "credentials",
         }
 
         command.downgrade(config, "base")
@@ -116,7 +117,12 @@ async def test_db_fixture_isolation_second_writer(db: AsyncSession) -> None:
 def tenant_settings(tmp_path: Path, test_database_url: str, tenants_yaml: str) -> Settings:
     config = tmp_path / "keystone.yaml"
     config.write_text(tenants_yaml)
-    return Settings(env="test", config_path=config, database_url=SecretStr(test_database_url))
+    return Settings(
+        env="test",
+        config_path=config,
+        database_url=SecretStr(test_database_url),
+        oidc_issuer="http://idp.test/realms/keystone",
+    )
 
 
 async def test_config_tenants_upserted(
@@ -154,7 +160,13 @@ async def test_tenant_upsert_updates_names_without_duplicates(
 async def test_get_session_dependency_serves_a_session(
     clean_env: None, test_database_url: str
 ) -> None:
-    app = create_app(Settings(env="test", database_url=SecretStr(test_database_url)))
+    app = create_app(
+        Settings(
+            env="test",
+            database_url=SecretStr(test_database_url),
+            oidc_issuer="http://idp.test/realms/keystone",
+        )
+    )
 
     @app.get("/probe")
     async def probe(session: Annotated[AsyncSession, Depends(get_session)]) -> dict[str, int]:

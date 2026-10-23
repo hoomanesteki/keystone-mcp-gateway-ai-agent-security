@@ -12,11 +12,14 @@ upstreams and Keystone, and waits until every container reports healthy. Cold st
 |---|---|
 | `make up` | Start the full stack and wait for health |
 | `make up-core` | Start Postgres and Redis only (what `make check` needs) |
-| `make demo` | `make up`, reset the upstreams, run the scripted agent through Keystone and print its transcript |
+| `make demo` | `make up`, reset the upstreams, run the scripted agent through Keystone as olivia and print its transcript |
 | `make down` | Stop the stack and keep its data |
 | `make reset` | Stop the stack and delete its volumes |
+| `scripts/get_token.sh alice support-agent` | Print an access token for a Keycloak user (see Identity) |
+| `make test-e2e` | The end-to-end tests against the running stack. The nightly workflow runs `make up` and then this |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit count is off |
+| `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), alice's 15 tools, bob's 3 globex tools and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
 | `bash scripts/smoke/phase_2.sh` | Lists the 15 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
 
 ## Host ports
@@ -35,7 +38,8 @@ Tests never use these ports. They start their own services on free ports.
 | Prometheus | 9090 | |
 | Grafana | 3000 | login `admin` / `admin`, Prometheus and Jaeger provisioned |
 | Mail, files, bank, echo | 8101, 8102, 8103, 8104 | demo upstreams, services `mail-mcp`, `files-mcp`, `bank-mcp`, `echo-mcp` |
-| Web, files-globex | 8105, 8112 | later phases |
+| Files for globex | 8112 | the globex tenant's own drive, service `files-globex-mcp` |
+| Web | 8105 | later phase |
 | Fake LLM | 8199 | later phase |
 | Console | 5173 | later phase |
 
@@ -53,6 +57,7 @@ share one image (`deploy/Dockerfile.upstreams`), and `make up` starts them.
 | files | 8102 | `list_files`, `read_file`, `write_file` (confined to one workspace) |
 | bank | 8103 | `get_balance`, `list_transactions`, `transfer` (3 seeded accounts) |
 | echo | 8104 | `echo`, `sleep`, `fail` |
+| files (globex) | 8112 | the tools of `files`, on another drive (`examples/fixtures/files-globex`), for the globex tenant |
 
 Each also serves plain HTTP routes next to `/mcp` that are not tools, so an agent cannot call them:
 `GET /healthz`, `POST /_reset` (back to the seed) and `GET /_state` (sent mail, transfers, written
@@ -66,8 +71,119 @@ Run one outside compose: `uv run python -m examples.upstreams.mail_server --port
 |---|---|
 | `MAIL_DB`, `BANK_DB`, `FILES_DB` | SQLite file for the server's state. Default: a temp file. Every start re-seeds it. |
 | `FILES_WORKSPACE` | Directory the files server confines itself to. Default: a temp directory. |
-| `MAIL_API_KEY`, `FILES_API_KEY`, `BANK_API_KEY`, `ECHO_API_KEY` | When set, `/mcp` requires a matching `X-Api-Key` header. Unset in tests and compose until Phase 3. |
+| `FILES_SEED` | Directory the files server starts from and returns to on reset. Default: `examples/fixtures/files`. |
+| `MAIL_API_KEY`, `FILES_API_KEY`, `BANK_API_KEY`, `ECHO_API_KEY` | When set, `/mcp` requires a matching `X-Api-Key` header, and `/_state` reports `api_key_received`. Compose sets them (the defaults are in `.env.example`); Keystone takes them from its own environment and stores them in the vault. |
 | `ECHO_POISONED` | `1` adds the poisoned tool. |
+
+## Identity (Keycloak)
+
+`make up` starts Keycloak 26 and imports the realm `keystone` from `deploy/keycloak/realm-keystone.json`.
+Its admin console is at `http://localhost:8180` (`admin` / `admin`).
+
+| User | Tenant | Groups | Realm role | Signs in through |
+|---|---|---|---|---|
+| `alice` | acme | `/tenants/acme`, `/support` | | `support-agent` |
+| `olivia` | acme | `/tenants/acme`, `/operators` | | `ops-agent` |
+| `lena` | acme | `/tenants/acme`, `/approvers` | `approver` | `keystone-cli` |
+| `bob` | globex | `/tenants/globex` | | `support-agent` |
+| `root` | acme | `/tenants/acme`, `/admins` | `admin` | `ops-agent` |
+
+The user id is the user name, so a token's `sub` reads `alice`. Passwords are `<name>-dev-password`.
+The clients `support-agent`, `ops-agent` and `keystone-cli` are confidential and allow the
+password grant, which exists for the demo and the smoke scripts. `console` is public and uses
+PKCE with the redirect `http://localhost:5173/*`. Every client puts `keystone` in `aud` and adds
+the claims `tenant` (from the user attribute), `groups` (full paths such as `/tenants/acme`) and
+`roles` (realm roles).
+
+```bash
+scripts/get_token.sh alice support-agent        # prints an access token
+```
+
+The script reads `<USER>_PASSWORD` and `<CLIENT>_SECRET` from the environment, then `.env`, then
+`.env.example`. Those files hold development values that are public in this repository. Never use
+them outside your own machine. The realm file contains `${NAME}` placeholders and no secrets;
+Keycloak fills them from its environment, which `deploy/docker-compose.yml` sets.
+
+A user needs an email, a first name, a last name, `emailVerified: true` and no required actions,
+or Keycloak 26 refuses the password grant with "Account is not fully set up". A custom user
+attribute such as `tenant` must be declared in the realm's user profile (the realm file does) or
+the realm must set `unmanagedAttributePolicy` to `ENABLED`.
+
+### The issuer
+
+A token's `iss` must be the same whichever address asked for the token, or validation fails for
+somebody. Compose sets `KC_HOSTNAME=http://localhost:8180` and `KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true`.
+Every token then carries `iss=http://localhost:8180/realms/keystone`, while a request to
+`http://keycloak:8080/...` from another container gets a `jwks_uri` that points at
+`keycloak:8080`. A service inside the network can then fetch the keys without going out through
+the host. `tests/e2e/test_keycloak.py` checks both answers.
+
+Keystone has two settings for this. `oidc_issuer` (`KEYSTONE_OIDC_ISSUER`) is the value tokens
+carry in `iss`: `http://localhost:8180/realms/keystone` in compose. `oidc_discovery_url`
+(`KEYSTONE_OIDC_DISCOVERY_URL`) is where Keystone reads the discovery document, and it only needs
+to be set when that differs from the issuer's own address: in compose it is
+`http://keycloak:8080/realms/keystone/.well-known/openid-configuration`. The document's `issuer`
+must equal `oidc_issuer`, or Keystone refuses its keys (503, and a log line naming both values).
+
+### How Keystone checks a token
+
+`identity/jwt.py` does it in this order, and stops at the first failure:
+
+1. The header is read without verifying anything. An `alg` other than `RS256` or `ES256` is
+   refused here, so `none`, the HMAC algorithms and anything else never reach a key. A header with
+   `jku`, `jwk`, `x5u`, `crit` or `b64` is refused too, and so is a token without a `kid`.
+2. The `kid` selects one key from the identity provider's published set. Encryption keys
+   (`use: enc`), RSA keys under 2048 bits and EC keys that are not P-256 are not used.
+3. The key must match the algorithm: RSA for `RS256`, EC P-256 for `ES256`.
+4. The signature and the claims are verified with exactly that one algorithm. `exp`, `iat`,
+   `iss`, `aud` and `sub` must be present. `iss` must equal the configured issuer, `aud` must
+   contain the configured audience, and `exp`, `nbf` and `iat` get 60 seconds of leeway.
+
+The keys are fetched from the discovery document with a 3 second timeout and kept in memory. A
+token with an unknown `kid` makes Keystone fetch them again, at most once a minute, so a rotation
+is picked up and a stream of made-up key ids costs the identity provider one request a minute.
+While Keystone holds no keys at all, a failed fetch is retried after 2 seconds. If the keys cannot
+be fetched, the answer is 503, not 401: the token was not shown to be bad.
+
+`tenant` is required and must look like a tenant id. The agent is `azp`, or `client_id` when
+there is no `azp`. Groups lose their leading `/`, and the `/tenants/...` groups are dropped,
+because the tenant has its own claim. The roles come from `roles`, or from `realm_access.roles`
+when there is no `roles` claim, and only `admin` and `approver` are kept.
+
+### Agents
+
+An agent is the OAuth client that acts for a user (`azp`). The `agents` section of the config
+lists the ones that may connect and how far Keystone trusts each (`low`, `standard` or `high`):
+
+```yaml
+agents:
+  support-agent: {trust: standard}
+  ops-agent: {trust: high}
+auth:
+  allow_unknown_agents: false   # true lets an unlisted agent in with trust low
+```
+
+A token from an agent that is not listed is refused with 403, after it has been validated. Set
+`KEYSTONE_AUTH__ALLOW_UNKNOWN_AGENTS=true` to let such an agent in with trust `low` instead.
+`keystone agent list` prints the table and says which of the two applies. The trust level is in
+the principal that policy sees (Phase 4).
+
+### Changing the realm
+
+Keycloak imports the realm file only when the realm does not exist. The development database
+lives in the Keycloak container, so removing the container removes the realm. After you edit
+`realm-keystone.json`:
+
+| What you run | Result |
+|---|---|
+| `make reset && make up` | The edited realm is imported. This also deletes the Postgres, Prometheus and Grafana volumes. |
+| `make down && make up` | The same for the realm, and the volumes stay. |
+| `make up` alone | Nothing changes: the container is reused and the realm already exists. |
+| `docker compose -f deploy/docker-compose.yml up -d --force-recreate keycloak` | Re-imports the file and touches nothing else. |
+
+Recreating Keycloak creates new signing keys, so tokens fetched before it stop validating.
+Keystone picks up the new keys the first time it sees a token with an unknown key id, at most once
+a minute, so a token fetched right after the restart may be refused for up to a minute.
 
 ## Keystone settings
 
@@ -89,9 +205,136 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_HEALTH__TIMEOUT_S` | `3` | A probe slower than this has failed. |
 | `KEYSTONE_HEALTH__DEGRADED_AFTER` | `1` | Consecutive failed probes before an upstream is `degraded`. |
 | `KEYSTONE_HEALTH__DOWN_AFTER` | `3` | Consecutive failed probes before it is `down`. Not less than `DEGRADED_AFTER`. |
-| `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is, until real authentication arrives in Phase 3. Refused when `KEYSTONE_ENV=prod`. |
+| `KEYSTONE_AUTH__MODE` | `oidc` | `oidc`: every request to `/mcp` carries a bearer token from the identity provider. `none`: every caller is the dev principal. `none` is refused unless `KEYSTONE_ENV` is `dev` or `test`. Also `auth.mode` in the YAML. |
+| `KEYSTONE_OIDC_ISSUER` | unset | The `iss` of valid tokens. Required when the mode is `oidc`, and an https URL when `KEYSTONE_ENV=prod`. |
+| `KEYSTONE_OIDC_AUDIENCE` | `keystone` | The value `aud` must contain. |
+| `KEYSTONE_OIDC_DISCOVERY_URL` | the issuer's own `/.well-known/openid-configuration` | Where to read the discovery document, when that is not the issuer's address. See "The issuer". |
+| `KEYSTONE_PUBLIC_BASE_URL` | the address of the request | How clients reach Keystone, for the sign-in metadata (`http://localhost:8080` in compose). Set it behind a proxy that changes the scheme or the host. |
+| `KEYSTONE_MASTER_KEYS` | unset | Fernet keys for the credential vault, comma separated. The first encrypts, all decrypt. Needed by `keystone cred ...` and, from KS-306, by the gateway. |
+| `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is when `KEYSTONE_AUTH__MODE=none`. Refused in any other mode. |
+| `KEYSTONE_AUTH__ALLOW_UNKNOWN_AGENTS` | `false` | Let an agent that is not under `agents` in with trust `low`. Also `auth.allow_unknown_agents` in the YAML. |
 
-Two sections come from the YAML file only: `tenants` and `upstreams` (see `keystone.example.yaml`).
+Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
+
+## Credentials
+
+An upstream that needs an API key gets it from Keystone, never from the agent and never from the
+config file. The key is stored encrypted in Postgres (table `credentials`), and the credential slot
+of the pipeline adds it to the call as an HTTP header at the last moment: after policy and
+approval, so a refused call never has its credential decrypted, and dropped from the call context
+as soon as the call ends. It does not appear in the tool list, in a result, in a rejection, in the
+audit record or in a log line.
+
+`credential_mode` on the upstream says whose credential it is:
+
+| Mode | What Keystone sends |
+|---|---|
+| `none` (default) | Nothing |
+| `static` | The upstream's own credential, the same for every caller |
+| `per_user` | The credential of the user making the call. A user without one is refused with `KS_DENIED` ("no credential for this user on mail") |
+
+```bash
+echo -n "$MAIL_KEY" | keystone cred set --upstream mail --header X-Api-Key     # the value comes from stdin
+keystone cred set --upstream mail --header X-Api-Key --from-env MAIL_API_KEY   # or from a variable
+keystone cred set --upstream crm --user alice --header X-Api-Key --from-env ALICE_CRM_KEY
+keystone cred list                                                             # who, which key, when
+```
+
+There is no option that takes the value on the command line, where a process list would show it.
+On a terminal the command asks for the value without echoing it. `cred set` replaces the
+credential it finds for that upstream and user, and holds one header. `cred list` prints the
+tenant, upstream, user, the id of the master key and two times. It does not decrypt anything.
+
+The vault needs `KEYSTONE_MASTER_KEYS`: one or more Fernet keys, comma separated. The first
+encrypts and every one decrypts. Make a key with
+`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. The
+key in `.env.example` is public, for local use only: `KEYSTONE_ENV=prod` refuses it.
+
+To rotate the master key, put the new key first and keep the old one, run
+`keystone cred rotate-keys`, then remove the old key:
+
+```bash
+KEYSTONE_MASTER_KEYS="$NEW,$OLD" keystone cred rotate-keys     # rotated 12, already under the first key 0
+KEYSTONE_MASTER_KEYS="$NEW"      keystone serve                # now the old key can go
+```
+
+It exits 1 and names the rows it could not decrypt if some credential was written under a key that
+is no longer listed. A rotation never undoes a `cred set` made while it runs.
+
+### From the environment at startup
+
+In the config, an HTTP upstream can name the environment variable that holds its key instead of
+holding it. Keystone reads the variable when it starts and stores the value in the vault through
+the same code as `cred set`, before the first sync needs it:
+
+```yaml
+upstreams:
+  - id: mail
+    tenant: acme
+    url: http://mail-mcp:8101/mcp
+    credential_mode: static
+    credential_env: {X-Api-Key: MAIL_API_KEY}
+```
+
+A value that has not changed is not written again. A variable that is not set leaves the stored
+credential as it is, so a restart without the variable does not lose it. A name that starts with
+`KEYSTONE_` is refused, so the master key cannot be used as an upstream credential by mistake.
+`credential_env` on an upstream whose `credential_mode` is `none` is an error, because it would
+never be sent. Keystone does not start if an upstream in the config uses credentials and
+`KEYSTONE_MASTER_KEYS` is not set.
+
+Keystone also uses an upstream's static credential for what it does on its own account: reading
+the tool list (startup, the timer and `keystone registry sync`) and the health probes. A `per_user`
+upstream that has a static credential is read with that one; a user's credential is never used
+for it. Without a static credential those requests carry no key, so a `per_user` upstream that
+demands a key even to list its tools needs a static credential as well, or its probes fail and
+Keystone marks it down.
+
+A call whose upstream gets no credential (a `static` upstream whose credential was deleted, say)
+reaches the upstream without one. If the upstream answers 401, the agent gets `KS_UPSTREAM_ERROR`,
+after the reconnect attempts, which take about 4 seconds.
+
+Not covered: an upstream that copies the key it received into a tool result. Keystone passes
+results on unchanged, so the key would reach the agent. The demo servers never do this; a server
+you do not trust belongs behind the sandbox of Phase 8.
+
+Header names are letters, digits and dashes. `Host`, `Content-Type`, `Mcp-Session-Id` and the
+other headers the HTTP layer owns are refused. Values are printable ASCII on one line, up to 4096
+characters.
+
+Every credential the vault decrypts is also registered with the log scrubber, which replaces it
+wherever it appears in a log line, in a field of any name and inside an exception message. A
+value shorter than 8 characters is not registered, because it would match inside ordinary words, so
+use keys longer than that.
+
+## Tenants
+
+A tenant is one team that shares the Keystone: its upstreams, its tools, its users and its
+sessions. Compose runs two, `acme` and `globex`. A token's `tenant` claim decides which one a
+caller belongs to, and nothing else can: not a header, not a field of the request. A token for a
+tenant that is not under `tenants` in the config gets 403 `unknown_tenant`.
+
+| | acme | globex |
+|---|---|---|
+| Users | alice, olivia, lena, root | bob |
+| Upstreams | mail, files, bank, echo, echostd (15 tools) | files_globex (3 tools) |
+
+An upstream id is unique across tenants, so globex's drive is `files_globex` (its tools are
+`files_globex__read_file` and so on) and not a second `files`.
+
+A caller lists and calls only its own tenant's tools. A call to another tenant's tool, by its exact
+name, gets `KS_TOOL_NOT_FOUND`, the same answer as for a name that does not exist anywhere, so
+the answer does not confirm that the tool exists. `KS_DENIED` would. The gateway also drops any
+tool the registry returns for another tenant, so a bug in a lookup cannot show one (invariant
+I5, `tests/invariants/test_i5_tenants.py`).
+
+Try it with `scripts/smoke/phase_3.sh`, or by hand:
+
+```bash
+KEYSTONE_TOKEN=$(scripts/get_token.sh bob support-agent) \
+  uv run python scripts/smoke/mcp_probe.py call bank__get_balance '{"account": "CHK-001"}'
+# error=true code=KS_TOOL_NOT_FOUND
+```
 
 ## Upstreams
 
@@ -121,6 +364,10 @@ server, so run it where `KEYSTONE_DATABASE_URL` points at the right database (in
 | `keystone upstream add ID --url URL [--tenant T]` | Register an http upstream with `source=cli`. The URL goes through the SSRF guard. |
 | `keystone upstream add ID --transport stdio -- CMD ARGS...` | Register a stdio upstream. |
 | `keystone upstream remove ID` | Disable a CLI upstream. A config upstream is removed by editing the file. |
+| `keystone cred set --upstream ID --header NAME [--user U] [--from-env VAR]` | Store an upstream credential, read from stdin or the variable. |
+| `keystone cred list [--json]` | Stored credentials, without their values. |
+| `keystone cred rotate-keys` | Re-encrypt every credential under the first master key. |
+| `keystone agent list [--json]` | The agents in the config with their trust level, and what an unlisted agent gets. |
 | `keystone db upgrade` | Apply database migrations. `keystone serve --migrate` does it before starting; the compose stack uses that. |
 
 ### stdio upstreams
@@ -242,7 +489,7 @@ several.
 Each MCP session has a state object (flags, taint, call count, spend) stored as JSON in Redis
 under `ks:sess:{session id}`. The key lives 24 hours from its last use: both reading and writing
 a session restart the clock. Postgres holds one `sessions` row per session, written when the
-session makes its first call, as the durable reference that audit records will point at. The row's
+session opens, as the durable reference that audit records will point at. The row's
 `last_seen_at`, flags and taint are updated at most once a minute per session.
 
 If Redis cannot be reached, a call is refused with `KS_DENIED` ("session state is unavailable") and
@@ -251,15 +498,39 @@ cannot write the row, the call goes ahead and the failure is logged. A request t
 session id gets a throwaway state that is never stored. Redis database 15 belongs to the tests;
 they empty it.
 
+A session is bound to the principal that opened it. When `initialize` creates the session,
+Keystone records the tenant, the user and the agent of the token next to the new session id,
+before the client learns the id. Every later request that names the session must carry a token
+with the same three values, or it gets 403 `session belongs to another principal`. A different
+token for the same principal (a refreshed one, with changed groups) is fine, and each call is
+decided on the groups of its own token. A session id Keystone has no binding for gets 404, which
+makes a client start a new session; it is never adopted by whoever names it first. The binding
+is kept in the gateway process, like the SDK's own sessions, so it does not depend on Redis
+being up.
+
 ## The MCP endpoint
 
 `POST /mcp` on port 8080 speaks MCP over streamable HTTP. Keystone serves the handshake protocol
 era only (ADR-0003). A client in its default `auto` mode falls back to it by itself. A client
 pinned to the `2026-07-28` version is refused.
 
-Phase 1 has no authentication: whoever can reach the port acts as the dev principal above, so
-keep it on localhost. With `KEYSTONE_ENV=prod` there is no dev principal and the endpoint answers
-every request with HTTP 401 until Phase 3.
+Every request needs `Authorization: Bearer <token>`. The Host header is checked first (421 for an
+address that is not in `KEYSTONE_ALLOWED_HOSTS`), then the token:
+
+| Answer | When |
+|---|---|
+| 401 with `WWW-Authenticate: Bearer resource_metadata="<base>/.well-known/oauth-protected-resource"` | No token, or a token that is invalid. The body says why: `{"error": "invalid_token", "reason": "expired"}` |
+| 403 | The token is sound but its agent is not under `agents` (`unknown_agent`), or it names a session that another principal opened |
+| 404 | The request names a session that no one opened here |
+| 503 with `Retry-After` | The identity provider's keys cannot be fetched |
+
+`GET /.well-known/oauth-protected-resource` (RFC 9728) returns
+`{"resource": "<base>/mcp", "authorization_servers": ["<issuer>"], "bearer_methods_supported":
+["header"]}`, so an MCP client that supports OAuth can find the identity provider from the 401
+without it being written into the client. `/healthz`, `/readyz` and that document need no token.
+
+With `KEYSTONE_AUTH__MODE=none` (dev and test only) there is no check, and every caller is the dev
+principal. Keep that on localhost.
 
 `GET /_dev/audit` returns how many calls the in-memory audit log holds and the last 50. It exists
 for the Phase 1 demo, is not mounted when `KEYSTONE_ENV=prod`, and goes away when the admin API
@@ -282,6 +553,11 @@ a 1 second limit each and returns 503 if either is down.
 | An agent gets `Unsupported protocol version` | It pinned the `2026-07-28` version. Use the default mode or `mode="legacy"`. |
 | `421 Invalid Host header` from `/mcp` | The `Host` is not in `KEYSTONE_ALLOWED_HOSTS`. Add it, for example `keystone:*`. |
 | `make up` times out on Keycloak | `docker compose -f deploy/docker-compose.yml logs keycloak`. First start imports the realm and can take 60 seconds on a slow disk. |
+| `get_token.sh` says `Invalid user credentials` | The realm was imported with other passwords (an older `.env`, or `.env` changed after the first start). Recreate Keycloak, see "Changing the realm". |
+| `401` with `reason: expired` | The token is older than five minutes. Get a new one with `scripts/get_token.sh`. |
+| `401` with `reason: wrong_issuer` | The token was issued under another address than `KEYSTONE_OIDC_ISSUER`. Get tokens from `http://localhost:8180`, the address in the setting. |
+| `403` with `reason: unknown_agent` | The token's `azp` is not under `agents`. Add it, or run `keystone agent list`. |
+| `503` from `/mcp` | Keystone cannot read the identity provider's keys. Check `KEYSTONE_OIDC_DISCOVERY_URL` and that Keycloak is up; the log says `jwks_fetch_failed` or `oidc_issuer_mismatch`. |
 | Port already in use | Another process holds the port. Set a different one in `.env`. |
 | `make check` cannot reach Postgres | Run `make up-core`, then `docker compose -f deploy/docker-compose.yml ps`. |
 | `ModuleNotFoundError: keystone` right after `uv sync` (macOS) | A background process flagged `.venv` as hidden, and Python skips hidden `.pth` files. Check with `ls -lO .venv/lib/python3.12/site-packages/keystone.pth`. Set `UV_PROJECT_ENVIRONMENT` to a path outside the repo, for example `$HOME/.cache/keystone-venv`, then run `uv sync`. |

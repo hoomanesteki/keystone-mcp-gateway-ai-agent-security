@@ -50,6 +50,7 @@ def start_keystone(
             tenants=[ACME],
             upstreams=upstreams,
             allow_private_upstreams=True,
+            oidc_issuer="http://idp.test/realms/keystone",
         )
         thread = ServerThread(create_app(settings)).start()
         started.append(thread)
