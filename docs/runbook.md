@@ -479,6 +479,31 @@ of its input schema. The `tools` block of an upstream in the YAML sets risk, tag
 and extractors by the upstream's own tool name (for example `send_email`, not `mail__send_email`).
 A tool without an entry has risk `medium`, no tags and no cost.
 
+An extractor reduces a call's arguments to a fact a policy may read, such as the amount of a
+transfer or the domain of a recipient. The `extract` map of a tool pairs a field of the schema's
+`args` record with a path and pipes:
+
+```yaml
+tools:
+  send_email: {risk: high, tags: [external_effect], extract: {recipient_domain: "$.to | domain"}}
+  transfer:   {risk: high, tags: [external_effect], extract: {amount: "$.amount | cents"}}
+```
+
+The path is `$.a`, `$.a.b` or `$.a[0]`, in any mix. The pipes are `int` (cut the fraction), `cents`
+(times 100, rounded half up), `domain` (the domain of one plain email address, in lower case),
+`lower` and `len` (of a text or a list). The key must be a field of `args` in
+`policies/schema.cedarschema` (`amount`, `recipient_domain`, `path` or `count`), and the pipes
+must give the type the schema says. Keystone stops at startup, naming the upstream, the tool and
+the key, if one is not. An argument that is not there, or that a pipe cannot use, leaves the key
+out for that call and logs why at debug level, without the value. A policy has to ask
+`context.args has amount` before it reads the field.
+
+Two cases are treated so that a rule is not skipped by accident. A number beyond the range of a
+Cedar `Long` (about 9.2 x 10^18) is capped at the range, so a rule that says "over 500" still sees a
+transfer of 10^30. And `domain` accepts one plain address: `a@evil.test,b@acme.test`, a display
+name or a comment has no domain. With `int`, an amount of 500.99 becomes 500; use `cents` for
+money and write the limit in cents.
+
 | Command | What it does |
 |---|---|
 | `keystone registry sync [--upstream ID] [--json]` | Sync now and print, per upstream, how many tools were created, unchanged, changed and removed, plus the names and any errors. Exits 1 if an upstream could not be synced. |
