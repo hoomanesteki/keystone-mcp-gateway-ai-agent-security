@@ -224,6 +224,10 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_POLICY__ROOT` | `policies` | The directory with the schema and the policies (see Policies). A relative path is read from the working directory; the image has its own copy at `/app/policies`, and compose mounts this checkout's at `/etc/keystone/policies`. Also `policy.root` in the YAML. |
 | `KEYSTONE_POLICY__INCLUDE_DEMO` | `false` | Also read `demo/`, the rules that go with the demo upstreams. Compose turns it on. |
 | `KEYSTONE_POLICY__LIST_CACHE_TTL_S` | `60` | How long the answer to "which tools may this caller see" is kept, per caller and policy version. `0` turns the cache off. |
+| `KEYSTONE_APPROVALS__WAIT_SECONDS` | `60` | How long a call that needs approval is held before the agent gets `KS_APPROVAL_PENDING` and an id. `0` never holds one; at most 300. See Approvals. |
+| `KEYSTONE_APPROVALS__TTL_SECONDS` | `900` | How long after the request it can be decided and used. |
+| `KEYSTONE_APPROVALS__SWEEP_INTERVAL_S` | `30` | Seconds between marking requests that ran out of time as expired. |
+| `KEYSTONE_APPROVALS__POLL_INTERVAL_S` | `2` | Seconds between looks at a request a call is waiting for, when Redis has not woken it. |
 
 Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
 
@@ -487,6 +491,56 @@ have to be a listed agent: `keystone-cli` is how the CLI signs in, and it is not
 What lets a caller in is the `admin` role (user `root` in the local realm). A reload runs one at a
 time. It records the new version before it puts the set in force, so a set that could not be
 recorded is not used.
+
+## Approvals
+
+A call that the policy sends to approval (`require_approval`) waits for a person. Each request is a
+row in `approvals`, and it is specific, time-limited and used once. This section describes the
+service that keeps the rows. The interceptor that holds the call, the tools an agent waits with
+and the API an approver uses come after it.
+
+A row holds the tool, the arguments with secrets masked (`args_redacted`, the same masking the
+audit log uses), who asked (user, agent, session, call), the ids of the policies that asked, and
+the original arguments encrypted with the vault's keys (`args_ciphertext`) so that an approved call
+runs with exactly them. It also holds `args_digest`, the sha256 of the canonical JSON of the
+arguments that the audit log writes as `args_digest`. The approval is for that digest: it cannot
+be used for other arguments.
+
+| State | How it gets there |
+|---|---|
+| `pending` | The call was sent to approval |
+| `approved`, `rejected` | A person with the `approver` or `admin` role decided |
+| `consumed` | The approved request was used by the call it was made for |
+| `expired` | `ttl_seconds` passed before it was decided or used |
+
+The rules, each one SQL statement in `src/keystone/approvals/service.py`:
+
+- **Decide.** A request changes only while it is pending, unexpired, in the approver's tenant and
+  not requested by the approver. The user who asked can never approve their own request, whatever
+  roles they hold, and an approver of another tenant gets "not found". Two decisions at once leave
+  one: the other is told the request is no longer pending.
+- **Use.** An approval is used by one `UPDATE` that checks the status (`approved`), the tenant,
+  the tool, the session, the user, the digest of the arguments and that it has not expired. It
+  returns whether it changed a row, so of two calls that present one approval exactly one gets it.
+- **Time.** `expires_at` is set from the database clock, and both statements compare it with
+  `clock_timestamp()`. They do not use `now()`: that is the start of the transaction, so a
+  statement held up by a row lock would be judged by a time before it waited, and could use an
+  approval after it had expired. `test_a_consume_that_waited_for_a_lock_past_the_expiry_fails`
+  holds a lock across an expiry to show the difference. The sweeper marks expired rows every 30
+  seconds; nothing depends on it for safety.
+- **Waiting.** A waiter subscribes to `ks:approval:<id>` on Redis, reads the row, and sleeps until
+  a message arrives or `poll_interval_s` passes. A message only wakes it. The verdict is always
+  read from the row, so a message that is lost or forged decides nothing, and without Redis the
+  wait polls.
+
+`keystone_approvals_pending{tenant}` counts the pending requests of each tenant. It is set when
+the sweeper starts and after each request, decision and sweep.
+
+Approvals need `KEYSTONE_MASTER_KEYS`, because the arguments are encrypted with the vault's keys.
+Without them there is no approval service and a call that needs approval is refused, as before.
+Rotating the keys needs no re-encryption of the arguments: every key decrypts, and a request lives
+for 15 minutes at most. Removing a key before the requests it encrypted have expired makes those
+requests unusable.
 
 ## Upstreams
 

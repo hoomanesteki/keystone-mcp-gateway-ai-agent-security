@@ -12,6 +12,7 @@ from keystone import __version__
 from keystone.admin.api import PREFIX, AdminDeps, create_admin_app
 from keystone.admin.auth import AdminAuth
 from keystone.admin.tools import ToolAdmin
+from keystone.approvals.service import ApprovalService
 from keystone.audit.redact import RedactionConfig
 from keystone.audit.sink import PostgresAuditSink
 from keystone.db.session import create_engine, make_sessionmaker
@@ -130,6 +131,28 @@ def create_app(
     audit = audit or PostgresAuditSink(
         sessions, metrics=metrics, redaction=RedactionConfig.of(settings.audit.redact_keys)
     )
+    # An empty KEYSTONE_REDIS_URL keeps session state in this process, for a single-process setup.
+    redis = (
+        Redis.from_url(settings.redis_url.get_secret_value(), decode_responses=True)
+        if settings.redis_url.get_secret_value()
+        else None
+    )
+    # An approval keeps the call's arguments encrypted with the vault's keys, so without
+    # KEYSTONE_MASTER_KEYS there are no approvals: the approval slot stays the stub that refuses.
+    approvals = (
+        ApprovalService(
+            sessions,
+            vault.cipher,
+            redis=redis,
+            ttl_s=settings.approvals.ttl_seconds,
+            poll_interval_s=settings.approvals.poll_interval_s,
+            sweep_interval_s=settings.approvals.sweep_interval_s,
+            redaction=RedactionConfig.of(settings.audit.redact_keys),
+            metrics=metrics,
+        )
+        if vault is not None
+        else None
+    )
     dispatcher: Dispatcher = UpstreamDispatcher(pool, health)
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
@@ -146,12 +169,6 @@ def create_app(
             policy=policy_engine,
         ),
         interceptors,
-    )
-    # An empty KEYSTONE_REDIS_URL keeps session state in this process, for a single-process setup.
-    redis = (
-        Redis.from_url(settings.redis_url.get_secret_value(), decode_responses=True)
-        if settings.redis_url.get_secret_value()
-        else None
     )
     session_store: SessionStore = (
         RedisSessionStore(redis, SessionRepo(sessions)) if redis else InMemorySessionStore()
@@ -197,7 +214,7 @@ def create_app(
                 for report in await registry.sync_all():
                     log.info("startup_sync", **report.model_dump())
                 await stack.enter_async_context(
-                    background_tasks(registry, health, settings, policies)
+                    background_tasks(registry, health, settings, policies, approvals)
                 )
                 await stack.enter_async_context(manager.run())
                 yield
@@ -231,6 +248,7 @@ def create_app(
     app.state.authenticator = authenticator
     app.state.vault = vault
     app.state.policies = policies
+    app.state.approvals = approvals
     # The admin API is an app of its own under a prefix: its own schema, errors and CORS rule.
     admin_api = create_admin_app(
         AdminDeps(
@@ -286,14 +304,20 @@ def create_app(
 
 @asynccontextmanager
 async def background_tasks(
-    registry: RegistryService, health: UpstreamHealth, settings: Settings, policies: PolicyStore
+    registry: RegistryService,
+    health: UpstreamHealth,
+    settings: Settings,
+    policies: PolicyStore,
+    approvals: ApprovalService | None = None,
 ) -> AsyncIterator[None]:
     """Run the periodic sync (unless its interval is 0), the watch for changes made by other
-    processes, the health probes (unless their interval is 0) and the policy reload on SIGHUP
-    while the body of the `with` runs."""
+    processes, the health probes (unless their interval is 0), the policy reload on SIGHUP and
+    the sweep of expired approvals while the body of the `with` runs."""
     async with anyio.create_task_group() as group:
         group.start_soon(registry.run_watch)
         group.start_soon(reload_on_sighup, policies)
+        if approvals is not None:
+            group.start_soon(approvals.run_sweeper)
         if settings.registry.sync_interval_s > 0:
             group.start_soon(registry.run_periodic, settings.registry.sync_interval_s)
         if settings.health.interval_s > 0:
