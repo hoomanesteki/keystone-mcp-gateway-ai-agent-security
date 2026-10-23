@@ -291,6 +291,7 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_SCANNER__THRESHOLDS__INJECTION` | `0.85` | A score from here up is an `injection`. Not below `SUSPICIOUS`. |
 | `KEYSTONE_SCANNER__ALLOWED_DOMAINS` | `[]` | JSON list of hosts a markdown image may point to without a mark against it. A name covers its subdomains. |
 | `KEYSTONE_SCANNER__MAX_SCAN_CHARS` | `200000` | The most text one scan reads. A longer text is read at both ends, half of this at each. |
+| `KEYSTONE_SCANNER__DESCRIPTION_THRESHOLD` | `0.5` | A new tool is held when the rules score its description, or the description of a field of its input schema, at or above this. Above 0, at most 1. See Upstreams. |
 
 Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
 
@@ -938,16 +939,30 @@ change back, the tool is released by the next sync. A newer offer replaces an ol
 | `keystone tool approve-change NAME [--expect FP] [--note TEXT]` | Make the pending definition the pinned one, recompute the hashes and set the tool `active`. With `--expect`, refuses if the pending definition is no longer the one with that fingerprint. The note goes in the log. |
 | `keystone tool disable NAME` / `enable NAME` | Take a tool out of service by hand. Sync never re-enables a tool you disabled. `disable` and `enable` both refuse a quarantined tool (review it and approve it instead), and `enable` refuses one the upstream stopped listing. |
 
-A tool seen for the first time is screened too (`keystone.defense.description_check`). Five
-rules look for characters a reader cannot see (tag characters, zero-width and bidirectional
-controls), phrases such as "ignore all previous instructions" or "do not tell the user", the pseudo
-tags `<important>` and `<system>`, "before using this tool" together with read, send or call, and a
-description longer than 2,000 characters. A tool that trips any of them is created `quarantined`
-with the reason `suspicious_description:<rule ids>`, and has no pending definition. The agent is
+A tool seen for the first time is screened too (`keystone.defense.description_check`), in two
+passes over its description and over the `description` of every field of its input schema, at any
+depth. The first pass is five rules from Phase 2: characters a reader cannot see (tag characters,
+zero-width and bidirectional controls), phrases such as "ignore all previous instructions" or "do
+not tell the user", the pseudo tags `<important>` and `<system>`, "before using this tool"
+together with read, send or call, and a text longer than 2,000 characters. The second pass is the
+scanner's rules, the ones that read tool output (see Scanner), and it holds the tool when the
+highest score is at or above `scanner.description_threshold` (0.5). The classifier is not used: it
+scored two harmless descriptions of the demo tools ("Return the payload unchanged.") at 0.998, and a
+tool must not be held or not depending on whether a model has loaded.
+
+A tool that trips either pass is created `quarantined` with the reason
+`suspicious_description:<rule ids> score=<score> in=<place>`, for example
+`suspicious_description:role_spoof,tool_directive score=0.70 in=input_schema.properties.note`. It
+has no pending definition. The first pass's rules come first, then the scanner's, each once; the
+score is the highest of the texts that held the tool, and the place is where it was. With
+`scanner.enabled: false` only the first pass runs, on the description alone, and the reason is the
+rule ids as before. A schema with more than 1,000 descriptions is held as `oversized` and the rest
+is not read. Other strings of a schema (`title`, `default`, `enum`, `examples`, property names)
+are not read. `keystone tool show` and the tools page print the rules and the score. The agent is
 told the category only, not which rule fired. `approve-change` releases it as it is after you have
-read it. This is a short list of crude patterns and a determined author will get past it. It is
-meant to stop the careless cases and to make a person look; Phase 7 replaces it with a scanner.
-Try it: `ECHO_POISONED=1` makes the demo echo server list a tool that is held at first sight.
+read it. These are patterns and a determined author will get past them; they stop the careless and
+make a person look. Try it: `ECHO_POISONED=1` makes the demo echo server list a tool that is held
+at first sight.
 
 Review with `tool show`, then approve with the fingerprint it printed:
 `keystone tool approve-change echo__echo --expect 1a2b3c4d5e6f`. Without `--expect`, a server

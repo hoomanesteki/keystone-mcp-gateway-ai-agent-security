@@ -201,6 +201,35 @@ then `session_flags`. The scanner arrived in the pipeline here.
   not find it still loading. An app with `env=test` does not, and the model loads at its first
   scan: the tests start hundreds of apps.
 
+**The descriptions of tools (KS-706).** A tool's description is text the model reads, and so is the
+description of each field of its input schema. When the registry sees a tool for the first time, a
+`Screener` (`defense/description_check.py`) reads both with the rules of this ADR, and holds the
+tool when the highest score is at or above `scanner.description_threshold` (0.5). The first check
+of Phase 2 (`check_description`) still runs on every text, so that nothing it held before is
+released: a tool is held when the first check hits or the rules score it high enough, and the
+reason lists the rules of both, the highest score of the texts that held it and where it was
+(`suspicious_description:role_spoof,tool_directive score=0.70 in=input_schema.properties.note`).
+Where I read the story narrowly or widely:
+
+- **The rules only, no classifier.** The story says `CompositeScanner`, which is the rules and a
+  model when there is one. I used the rules alone (`scan_text`). I ran the model over the 13
+  descriptions of the demo tools on 2026-10-23: it scored "Return the payload unchanged." 0.998 and
+  "Always fail with the given message." 0.998, the other eleven under 0.01. A description is short
+  and imperative, which is the text the model gets wrong, so a model that had finished loading
+  would hold the echo tools and one that had not would not. The classifier takes seconds to load
+  and the registry syncs at start, so the answer would also depend on when the sync ran.
+- **Only `description` fields.** "Every `description` field inside `input_schema`, recursively":
+  at any depth, in `properties`, `items`, `anyOf`, `$defs` and the rest. A key named `description`
+  that holds an object is a property of that name, and the walk goes into it. `title`, `default`,
+  `enum`, `examples` and property names are not read. A change to any of them in a tool that was
+  accepted holds the tool (KS-205), and a new tool is read by a person who is told to look.
+- **At most 1,000 descriptions.** A schema with more is held as `oversized` and the rest is not
+  read, so an upstream cannot make a sync as slow as it likes.
+- **The check is for a tool seen for the first time.** A tool whose definition changes is held for
+  review whatever the new text says (KS-205), as before.
+- **With `scanner.enabled: false`** only the first check runs, on the description alone, and the
+  reason is the rule ids, exactly as before Phase 7.
+
 **A contract changes.** `ScanResult.action` (plan section 3.6) gains `"error"` beside `pass`,
 `annotate`, `redact` and `block`, so that the audit record can say `scan_action="error"`. Nothing
 else in `core` changes. The audit column is text and takes the value as it is.
