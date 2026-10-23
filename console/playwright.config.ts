@@ -19,6 +19,9 @@ export default defineConfig({
   reporter: process.env["CI"] ? [["github"], ["list"]] : [["list"]],
   use: {
     baseURL: "http://localhost:5173",
+    // The console honors this (index.css), so colors are at rest when the test reads them. A page
+    // that has just changed theme is mid-transition for 150 ms, and axe would measure that.
+    reducedMotion: "reduce",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },

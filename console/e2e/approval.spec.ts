@@ -1,8 +1,21 @@
 import { readFileSync } from "node:fs";
-import { expect, test } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
+import { expect, test, type Page } from "@playwright/test";
 import { devEnv, urls } from "./support/dev-env";
 
 const POLICY_DOCS = /docs\/policies\.md#approve-transfer-over-500$/;
+
+/** What axe finds on the page as it is: WCAG 2.1 A and AA and its best practices. */
+async function violations(page: Page) {
+  const results = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "best-practice"])
+    .analyze();
+  return results.violations.map((found) => ({
+    rule: found.id,
+    help: found.help,
+    where: found.nodes.map((node) => node.target.join(" ")),
+  }));
+}
 
 test("lena approves a pending transfer", async ({ page, request }) => {
   const env = devEnv();
@@ -43,6 +56,13 @@ test("lena approves a pending transfer", async ({ page, request }) => {
 
   const approvalId = await card.getAttribute("data-approval-id");
   expect(approvalId).toBeTruthy();
+
+  await test.step("the page has no accessibility violations, in the light and the dark theme", async () => {
+    expect(await violations(page)).toEqual([]);
+    await page.emulateMedia({ colorScheme: "dark" });
+    expect(await violations(page)).toEqual([]);
+    await page.emulateMedia({ colorScheme: "light" });
+  });
 
   await test.step("wait until Keystone has told the agent to wait", async () => {
     // Keystone holds a call for 10 seconds before it answers KS_APPROVAL_PENDING. An approval made
