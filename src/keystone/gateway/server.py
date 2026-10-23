@@ -20,14 +20,12 @@ from mcp.server.context import CallNext, HandlerResult
 from mcp.server.models import InitializationOptions
 from mcp.server.session import ServerSession
 from mcp.server.streamable_http_manager import StreamableHTTPASGIApp, StreamableHTTPSessionManager
-from mcp.server.transport_security import TransportSecuritySettings
+from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
 from mcp.shared.exceptions import MCPError
 from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS, MODERN_PROTOCOL_VERSIONS
 from pydantic import ValidationError
 from starlette.requests import Request
-from starlette.responses import JSONResponse
 from starlette.routing import Route
-from starlette.types import Receive, Scope, Send
 
 from keystone.core.errors import (
     KEYSTONE_META_PREFIX,
@@ -40,12 +38,19 @@ from keystone.core.ids import new_id
 from keystone.core.types import CallContext, Principal, SessionState, ToolRef, ToolResult
 from keystone.gateway.pipeline import Pipeline
 from keystone.gateway.sessions import SessionStore
+from keystone.identity.middleware import (
+    PRINCIPAL_KEY,
+    SESSION_HEADER,
+    Authenticator,
+    McpAuthMiddleware,
+    SessionBindings,
+    principal_key,
+)
 from keystone.registry.service import ToolLookup
 from keystone.settings import Settings
 
 log = structlog.get_logger()
 
-SESSION_HEADER = "mcp-session-id"
 UNBOUND_PREFIX = "unbound-"
 CALL_ID_KEY = "keystone/call_id"
 MAX_OPEN_SESSIONS = 10_000
@@ -68,22 +73,26 @@ class Gateway:
         self.registry = registry
         self.sessions = sessions
         self.pipeline = pipeline
+        # Who opened each session. The authentication middleware fills it and checks it.
+        self.bindings = SessionBindings()
         # The sessions to tell when the tool list changes: session id -> (tenant, session). A
         # session is kept as it was last seen, in least recently used order, and dropped when a
         # notification to it fails. The SDK ends idle sessions without telling us.
         self._open: OrderedDict[str, tuple[str, ServerSession]] = OrderedDict()
 
-    def principal(self) -> Principal:
-        # KS-304 replaces this with the principal from the validated token.
-        principal = self.settings.dev_principal
-        if principal is None:
-            raise MCPError(code=types.INTERNAL_ERROR, message="no authentication is configured")
-        return principal
+    def principal(self, ctx: Context) -> Principal:
+        """Who is calling, as the authentication middleware worked it out from this request's own
+        token. Nothing else in the request, a header or an argument, can name a tenant or a user."""
+        request = cast("Request | None", ctx.request)
+        found = request.scope.get(PRINCIPAL_KEY) if request is not None else None
+        if not isinstance(found, Principal):
+            raise MCPError(code=types.INTERNAL_ERROR, message="the request carries no principal")
+        return found
 
     async def list_tools(
         self, ctx: Context, params: types.PaginatedRequestParams | None
     ) -> types.ListToolsResult:
-        tenant_id = self.principal().tenant_id
+        tenant_id = self.principal(ctx).tenant_id
         self._remember(ctx, tenant_id)
         tools = await self.registry.list_for_tenant(tenant_id)
         return types.ListToolsResult(
@@ -96,7 +105,7 @@ class Gateway:
     async def call_tool(
         self, ctx: Context, params: types.CallToolRequestParams
     ) -> types.CallToolResult:
-        principal = self.principal()
+        principal = self.principal(ctx)
         self._remember(ctx, principal.tenant_id)
         session: SessionState | None = None
         try:
@@ -122,6 +131,12 @@ class Gateway:
         elif session is None:
             result = await self.pipeline.reject(
                 call, Reject(Code.DENIED, "session state is unavailable")
+            )
+        elif principal_key(session.principal) != principal_key(principal):
+            # The middleware has checked this against who opened the session. The stored state
+            # says it too, and a call never runs on state that belongs to someone else.
+            result = await self.pipeline.reject(
+                call, Reject(Code.DENIED, "session belongs to another principal")
             )
         else:
             result = await self.pipeline.run(call)
@@ -292,27 +307,21 @@ def transport_security(settings: Settings) -> TransportSecuritySettings:
     )
 
 
-class _Unauthenticated:
-    """Stands in for the MCP endpoint when nobody can be identified: refuse every request."""
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        response = JSONResponse(
-            {"error": "authentication is required"},
-            status_code=401,
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-        await response(scope, receive, send)
-
-
-def mount_mcp(app: FastAPI, gateway: Gateway) -> StreamableHTTPSessionManager:
-    """Serve /mcp. The caller runs the returned manager inside the app's lifespan, and builds a
-    new manager for every app, because run() works once per instance (engineering note 2)."""
-    manager = StreamableHTTPSessionManager(
-        app=build_server(gateway), security_settings=transport_security(gateway.settings)
+def mount_mcp(
+    app: FastAPI, gateway: Gateway, authenticator: Authenticator
+) -> StreamableHTTPSessionManager:
+    """Serve /mcp behind authentication. The caller runs the returned manager inside the app's
+    lifespan, and builds a new manager for every app, because run() works once per instance
+    (engineering note 2)."""
+    security = transport_security(gateway.settings)
+    manager = StreamableHTTPSessionManager(app=build_server(gateway), security_settings=security)
+    endpoint = McpAuthMiddleware(
+        StreamableHTTPASGIApp(manager),
+        authenticator=authenticator,
+        bindings=gateway.bindings,
+        sessions=lambda: gateway.sessions,
+        security=TransportSecurityMiddleware(security),
     )
     # A Route, not a Mount: a Mount redirects /mcp to /mcp/.
-    endpoint = (
-        StreamableHTTPASGIApp(manager) if gateway.settings.dev_principal else _Unauthenticated()
-    )
     app.router.routes.append(Route("/mcp", endpoint=endpoint))
     return manager

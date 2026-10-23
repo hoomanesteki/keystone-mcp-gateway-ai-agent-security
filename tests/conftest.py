@@ -42,5 +42,11 @@ def settings(tmp_path: Path, clean_env: None) -> Settings:
     """Test settings: env=test and a temp config file."""
     config = tmp_path / "keystone.yaml"
     config.write_text("log_level: warning\n")
-    # Test upstreams are local, so the SSRF guard is off (KS-202).
-    return Settings(env="test", config_path=config, allow_private_upstreams=True)
+    # Test upstreams are local, so the SSRF guard is off (KS-202). The issuer is an address
+    # nothing listens on: these tests never present a token.
+    return Settings(
+        env="test",
+        config_path=config,
+        allow_private_upstreams=True,
+        oidc_issuer="http://idp.test/realms/keystone",
+    )

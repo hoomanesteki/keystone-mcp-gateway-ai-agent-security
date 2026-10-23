@@ -137,10 +137,12 @@ async def test_every_call_leaves_one_audit_record(
 async def test_calls_carry_the_dev_principal_and_a_stable_session(
     keystone_app: KeystoneApp, mcp_client: McpConnect
 ) -> None:
-    async with mcp_client(keystone_app) as client:
+    # Since KS-304 the principal comes from the token, so the test signs in as the old dev
+    # principal, olivia of acme through ops-agent.
+    async with mcp_client(keystone_app, user="olivia") as client:
         await client.call_tool("echo__echo", {"payload": "1"})
         await client.call_tool("echo__echo", {"payload": "2"})
-    async with mcp_client(keystone_app) as client:
+    async with mcp_client(keystone_app, user="olivia") as client:
         await client.call_tool("echo__echo", {"payload": "3"})
 
     records = keystone_app.audit.records

@@ -8,6 +8,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from examples.agents.scripted_agent import Step, load_steps, main, run_script
+from tests.fixtures.fake_idp import FakeIdp
 from tests.fixtures.keystone import KeystoneApp
 from tests.fixtures.servers import ServerThread
 from tests.fixtures.upstreams import DemoUpstreams
@@ -18,9 +19,12 @@ DEMO = Path(__file__).resolve().parents[2] / "examples" / "agents" / "scripts" /
 @pytest.mark.services
 @pytest.mark.phase(1)
 async def test_the_demo_script_runs_through_keystone(
-    keystone_app: KeystoneApp, demo_upstreams: DemoUpstreams
+    keystone_app: KeystoneApp, demo_upstreams: DemoUpstreams, fake_idp: FakeIdp
 ) -> None:
-    transcript = await run_script(keystone_app.url, load_steps(DEMO))
+    # The script sends mail and reads a balance as an operator: olivia through ops-agent.
+    transcript = await run_script(
+        keystone_app.url, load_steps(DEMO), token=fake_idp.token_for("olivia")
+    )
 
     assert transcript.ok
     assert [e.kind for e in transcript.entries] == ["list_tools"] + ["call_tool"] * 3
@@ -46,7 +50,7 @@ async def test_the_demo_script_runs_through_keystone(
 @pytest.mark.services
 @pytest.mark.phase(1)
 async def test_a_refusal_matches_expect_error_code_and_anything_else_fails(
-    keystone_app: KeystoneApp,
+    keystone_app: KeystoneApp, fake_idp: FakeIdp
 ) -> None:
     steps = [
         Step("mail__nope", {}, expect_error_code="KS_TOOL_NOT_FOUND"),
@@ -56,7 +60,7 @@ async def test_a_refusal_matches_expect_error_code_and_anything_else_fails(
         Step("echo__fail", {"message": "tool error"}),
     ]
 
-    transcript = await run_script(keystone_app.url, steps)
+    transcript = await run_script(keystone_app.url, steps, token=fake_idp.token_for("alice"))
 
     assert [e.ok for e in transcript.entries] == [True, False, False, False, False]
     assert transcript.entries[0].error_code == "KS_TOOL_NOT_FOUND"
@@ -88,16 +92,21 @@ async def test_the_token_is_sent_as_a_bearer_header() -> None:
 @pytest.mark.services
 @pytest.mark.phase(1)
 def test_the_command_line_prints_json_lines_and_the_exit_code_says_pass_or_fail(
-    keystone_app: KeystoneApp, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    keystone_app: KeystoneApp,
+    fake_idp: FakeIdp,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
-    assert main(["--url", keystone_app.url, "--script", str(DEMO)]) == 0
+    token = ["--token", fake_idp.token_for("olivia")]
+    assert main(["--url", keystone_app.url, "--script", str(DEMO), *token]) == 0
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [line["ok"] for line in lines] == [True] * 4
     assert lines[1]["tool"] == "bank__get_balance"
 
     failing = tmp_path / "fail.yaml"
     failing.write_text("- {tool: mail__nope}\n")
-    assert main(["--url", keystone_app.url, "--script", str(failing), "--format", "text"]) == 1
+    text = ["--format", "text"]
+    assert main(["--url", keystone_app.url, "--script", str(failing), *text, *token]) == 1
     assert "FAIL mail__nope" in capsys.readouterr().out
 
 
