@@ -20,7 +20,13 @@ export KEYSTONE_URL=${KEYSTONE_URL:-http://localhost:${KEYSTONE_PORT:-8080}/mcp}
 BASE=${KEYSTONE_URL%/mcp}
 ECHO_BASE="http://localhost:${ECHO_PORT:-8104}"
 INTERVAL=${SMOKE_HEALTH_INTERVAL_S:-2}
-PROBE="uv run python scripts/smoke/mcp_probe.py"
+# Every probe signs in as olivia (an operator, through ops-agent) with a token of its own, because
+# a token lives five minutes and this script runs for about one.
+probe() {
+  local token
+  token=$(bash scripts/get_token.sh olivia ops-agent) || { echo "cannot get a token" >&2; return 2; }
+  KEYSTONE_TOKEN=$token uv run python scripts/smoke/mcp_probe.py "$@"
+}
 failed=0
 bank_stopped=0
 
@@ -43,8 +49,8 @@ upstream_status() {
     | python3 -c "import json,sys; print(json.load(sys.stdin)['upstreams'].get('$1', ''))"
 }
 status_is() { [ "$(upstream_status "$1")" = "$2" ]; }
-tool_count() { $PROBE list | sed -n 's/^tools: //p'; }
-has_tool() { $PROBE list | grep -qx "$1"; }
+tool_count() { probe list | sed -n 's/^tools: //p'; }
+has_tool() { probe list | grep -qx "$1"; }
 lacks_tool() { ! has_tool "$1"; }
 
 # Put the echo server and its pinned description back to the original, whatever state an earlier
@@ -84,7 +90,7 @@ echo "tools: ${count}"
 for tool in echostd__echo mail__send_email files__read_file bank__transfer echo__sleep; do
   has_tool "$tool" || fail "no ${tool} in the list"
 done
-out=$($PROBE call echostd__echo '{"payload": "over stdio"}')
+out=$(probe call echostd__echo '{"payload": "over stdio"}')
 echo "$out"
 grep -q '^error=false' <<<"$out" || fail "echostd__echo did not answer"
 
@@ -94,7 +100,7 @@ sync_out=$(keystone registry sync --upstream echo)
 echo "$sync_out"
 grep -q 'changed: echo__echo (quarantined)' <<<"$sync_out" || fail "the sync did not quarantine echo__echo"
 wait_for 20 lacks_tool echo__echo || fail "echo__echo is still in the list"
-out=$($PROBE call echo__echo '{"payload": "x"}')
+out=$(probe call echo__echo '{"payload": "x"}')
 echo "$out"
 grep -q 'code=KS_QUARANTINED' <<<"$out" || fail "a call to echo__echo was not refused with KS_QUARANTINED"
 show=$(keystone tool show echo__echo)
@@ -103,20 +109,20 @@ fingerprint=$(sed -n 's/.*fingerprint \([0-9a-f]\{12\}\).*/\1/p' <<<"$show" | he
 keystone tool approve-change echo__echo --expect "$fingerprint" --note "smoke" \
   || fail "approve-change failed"
 wait_for 20 has_tool echo__echo || fail "echo__echo did not come back after approve-change"
-out=$($PROBE call echo__echo '{"payload": "x"}')
+out=$(probe call echo__echo '{"payload": "x"}')
 grep -q '^error=false' <<<"$out" || fail "echo__echo does not work after approve-change"
 
 step "3. a stopped upstream fails fast"
 $COMPOSE stop bank-mcp >/dev/null && bank_stopped=1
 # Three failed probes, ${INTERVAL} s apart, plus a margin. The default settings need about 90 s.
 wait_for $((INTERVAL * 3 + 30)) status_is bank down || fail "bank is '$(upstream_status bank)', not down"
-out=$($PROBE call bank__get_balance '{"account": "CHK-001"}')
+out=$(probe call bank__get_balance '{"account": "CHK-001"}')
 echo "$out"
 grep -q 'code=KS_UPSTREAM_ERROR' <<<"$out" || fail "the call to a down bank was not refused"
 grep -q 'upstream bank is down' <<<"$out" || fail "the refusal does not say the upstream is down"
 ms=$(sed -n 's/.* ms=\([0-9.]*\).*/\1/p' <<<"$out" | head -1)
 awk -v ms="${ms:-99999}" 'BEGIN { exit !(ms < 50) }' || fail "the refusal took ${ms} ms, not under 50"
-mail=$($PROBE call mail__list_emails '{"folder": "inbox"}')
+mail=$(probe call mail__list_emails '{"folder": "inbox"}')
 grep -q '^error=false' <<<"$mail" || fail "mail stopped working while bank was down"
 
 echo

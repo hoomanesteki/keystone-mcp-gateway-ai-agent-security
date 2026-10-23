@@ -8,13 +8,17 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import httpx2
 import jwt
 import pytest
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = ["docker", "compose", "-f", str(ROOT / "deploy" / "docker-compose.yml")]
 KEYCLOAK = f"http://localhost:{os.environ.get('KEYCLOAK_PORT', '8180')}"
 REALM_URL = f"{KEYCLOAK}/realms/keystone"
+KEYSTONE = f"http://localhost:{os.environ.get('KEYSTONE_PORT', '8080')}"
 
 pytestmark = [pytest.mark.phase(3), pytest.mark.e2e, pytest.mark.docker]
 
@@ -148,3 +152,25 @@ def test_keycloak_accepted_the_client_settings_of_the_realm_file(stack: None) ->
     for name in ("support-agent", "ops-agent", "keystone-cli"):
         assert clients[name]["publicClient"] is False
         assert clients[name]["directAccessGrantsEnabled"] is True
+
+
+async def test_keystone_accepts_a_keycloak_token_and_refuses_a_request_without_one(
+    stack: None,
+) -> None:
+    probe = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+    headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+
+    async with httpx2.AsyncClient(timeout=10) as plain:
+        refused = await plain.post(f"{KEYSTONE}/mcp", json=probe, headers=headers)
+        metadata = await plain.get(f"{KEYSTONE}/.well-known/oauth-protected-resource")
+    token = get_token("alice", "support-agent")
+    bearer = httpx2.AsyncClient(headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    async with bearer, Client(streamable_http_client(f"{KEYSTONE}/mcp", http_client=bearer)) as c:
+        names = {tool.name for tool in (await c.list_tools()).tools}
+
+    assert refused.status_code == 401
+    assert refused.headers["www-authenticate"] == (
+        f'Bearer resource_metadata="{KEYSTONE}/.well-known/oauth-protected-resource"'
+    )
+    assert metadata.json()["authorization_servers"] == [REALM_URL]
+    assert {"bank__get_balance", "mail__read_email", "echo__echo"} <= names

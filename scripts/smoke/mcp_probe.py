@@ -5,8 +5,9 @@
 
 `list` prints `tools: N` and then one name per line. `call` prints one line,
 `error=<true|false> code=<keystone code or -> ms=<time of the call>`, then the first text block.
-The URL comes from KEYSTONE_URL (default http://localhost:8080/mcp). The exit code is 0 whenever
-Keystone answered, whatever the answer was; 2 means it could not be reached.
+The URL comes from KEYSTONE_URL (default http://localhost:8080/mcp) and the bearer token from
+KEYSTONE_TOKEN. The exit code is 0 whenever Keystone answered, whatever the answer was; 2 means it
+could not be reached.
 """
 
 from __future__ import annotations
@@ -16,18 +17,32 @@ import json
 import os
 import sys
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import anyio
+import httpx2
 import mcp_types as types
 from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
 
 CODE_KEY = "keystone/code"
+TOKEN_ENV = "KEYSTONE_TOKEN"  # noqa: S105 - the name of the variable, not a token
 TIMEOUT_S = 30.0
 
 
+@asynccontextmanager
+async def connect(url: str) -> AsyncIterator[Client]:
+    token = os.environ.get(TOKEN_ENV)
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    http = httpx2.AsyncClient(headers=headers, timeout=httpx2.Timeout(TIMEOUT_S))
+    async with http, Client(streamable_http_client(url, http_client=http)) as client:
+        yield client
+
+
 async def list_tools(url: str) -> None:
-    async with Client(url) as client:
+    async with connect(url) as client:
         tools = (await client.list_tools()).tools
     print(f"tools: {len(tools)}")
     for tool in sorted(tools, key=lambda t: t.name):
@@ -35,7 +50,7 @@ async def list_tools(url: str) -> None:
 
 
 async def call_tool(url: str, name: str, arguments: dict[str, Any]) -> None:
-    async with Client(url) as client:
+    async with connect(url) as client:
         started = time.perf_counter()
         result = await client.call_tool(name, arguments)
         elapsed_ms = (time.perf_counter() - started) * 1000
