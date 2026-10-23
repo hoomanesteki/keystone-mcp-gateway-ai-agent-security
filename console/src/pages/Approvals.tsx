@@ -5,6 +5,7 @@ import { ApprovalCard } from "../components/ApprovalCard";
 import { Button } from "../components/Button";
 import { Icon } from "../components/Icon";
 import { EmptyState, ErrorState, LoadingList, PageHeader } from "../components/StateViews";
+import { usePageTitle } from "../lib/usePageTitle";
 
 export function Approvals() {
   const pending = usePendingApprovals();
@@ -12,6 +13,10 @@ export function Approvals() {
   const [params] = useSearchParams();
   const wanted = params.get("id");
   const heading = useRef<HTMLDivElement>(null);
+  // The count in the tab's title shows an approver, in a tab they are not looking at, that
+  // something waits.
+  const waiting = pending.data?.length ?? 0;
+  usePageTitle(waiting > 0 ? `(${waiting}) Approvals` : "Approvals");
 
   // A decided card disappears under the person's hands, so focus goes to the top of the page
   // instead of to nothing.

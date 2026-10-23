@@ -19,6 +19,7 @@ upstreams and Keystone, and waits until every container reports healthy. Cold st
 | `make test-e2e` | The end-to-end tests against the running stack. The nightly workflow runs `make up` and then this |
 | `make console-check` | The console's lint (ESLint with type information, Prettier), unit tests and production build. `make check` runs it |
 | `make console-types` | Write the admin API's schema (`scripts/dump_openapi.py`) and generate `console/src/api/schema.d.ts` from it |
+| `make console-e2e` | The browser test of the approval loop (see Console). It starts the stack if it is not running; `make gate PHASE=6` and the nightly run it |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit log (read through the admin API) does not hold one new record for each call |
 | `bash scripts/smoke/phase_6.sh` | Three agents run as olivia and lena decides through the admin API: a transfer of 900 is held, approved and completed (a second decision is 409 and olivia's own is 403); one of 700 is rejected with a note that the agent gets; one of 600 times out as `KS_APPROVAL_PENDING`, is approved late and is awaited. Then the audit log and `keystone_approvals_pending` are checked. About 20 seconds: the third request waits out the 10 s hold. |
@@ -1149,7 +1150,7 @@ pnpm install             # pnpm 12, from "packageManager" in package.json
 pnpm dev                 # http://localhost:5173
 ```
 
-Open the address and the console sends you to Keycloak. Sign in as `lena` (approver) to see the
+Open `http://localhost:5173` (the realm allows that address and not `127.0.0.1`) and the console sends you to Keycloak. Sign in as `lena` (approver) to see the
 Approvals page only, or as `root` (admin) to see Approvals, Audit and Tools. A user with neither
 role gets a page that says to ask for one. The menu only hides what the API would refuse (the
 approvals routes take an approver or an admin, every other route an admin); the API makes the real
@@ -1248,6 +1249,37 @@ fingerprint of the definition that was read, so one that changed again after the
 is refused (409) and not approved unseen. "Disable" and "Enable" switch an active tool and one an
 operator disabled; the API refuses the rest and the console shows what it said.
 
+### The browser test
+
+`make console-e2e` runs `console/e2e/approval.spec.ts` in headless chromium (Playwright, chromium
+only). It runs at every phase gate from phase 6 (`make gate PHASE=6`) and in the nightly workflow.
+It needs the compose stack and starts it (`docker compose up --build --wait`) when Keystone,
+Keycloak and the bank are not answering; a warm run takes about 14 seconds, and one that has to
+start the stack takes about 75.
+
+1. `globalSetup` puts the bank at its seed state and starts olivia's scripted agent in the
+   background with `examples/agents/scripts/approval_demo.yaml`: a transfer of 900, then
+   `keystone__await_approval`. Keystone holds the transfer for 10 seconds
+   (`approvals.wait_seconds` in `deploy/keystone.compose.yaml`) and then answers
+   `KS_APPROVAL_PENDING`, so the agent is waiting when the test starts. Playwright's `webServer`
+   starts the Vite dev server unless one is already running on port 5173 (outside CI).
+2. The test signs in as lena on Keycloak's own page (her password is in `.env.example`) and checks
+   that the menu holds Approvals only. It finds the card for `bank__transfer` and `invoice 4471`,
+   checks the risk, the requester, the amount and the link of the reason, and runs axe-core over
+   the page in the light and the dark theme (WCAG 2.1 A and AA and best practices; any finding
+   fails the test). It opens the session's recent calls and waits until a call with
+   `KS_APPROVAL_PENDING` is listed there. That wait is the point: an approval inside the first 10
+   seconds would finish the first call and leave the await tool nothing to do.
+3. It approves with a note, sees the card go and the toast, and reads the agent's transcript
+   (`console/test-results/approval-agent.txt`): the transfer succeeded, after
+   `answered KS_APPROVAL_PENDING; waited for approval <the card's id>`, with the status
+   `completed`. Then it reads `/_state` of the bank: one transfer, 900 from CHK-001 to SAV-002.
+
+The run asks the browser for reduced motion, which the console honors, so that colors are at rest
+when axe reads them. A stopped stack, a missing `uv` or a bank that does not reset stops the run
+before the browser opens, with the reason. Requests of earlier runs that nobody decided stay in the queue until they
+expire (15 minutes); the test takes the newest card.
+
 ### Settings
 
 Vite reads these when it starts. Only the `VITE_` ones reach the browser.
@@ -1323,6 +1355,13 @@ a 1 second limit each and returns 503 if either is down.
 | An approved call ends with `KS_QUARANTINED` or `KS_DENIED` | The call was checked again after its wait and the tool or the policy had changed. The approval is left unused and expires. Fix the cause, and have the agent call the tool again. |
 | Keystone does not start: "KEYSTONE_APPROVALS_WEBHOOK_SECRET must be at least 16 characters" | The signing key is too short to trust. Make one with `openssl rand -hex 32`. |
 | Keystone does not start: "KEYSTONE_APPROVALS_WEBHOOK_SECRET must be set" | `approvals.webhook_url` is set and the signing key is not in the environment. It is never read from the YAML. |
+| `pnpm dev` says port 5173 is in use | Another process holds it, perhaps an earlier `pnpm dev`. The port is fixed because the Keycloak client `console` allows `http://localhost:5173/*` only, so Vite refuses another one. Stop the other process. |
+| The console shows "Cannot reach the sign-in service" | The browser cannot read `VITE_OIDC_AUTHORITY` (`http://localhost:8180/realms/keystone`). Is Keycloak up, and is the port the one in `KEYCLOAK_PORT`? |
+| Keycloak says "Invalid parameter: redirect_uri" for the console | The console was opened at an address other than `http://localhost:5173` (`127.0.0.1` is not allowed), or the realm in Keycloak is older than `deploy/keycloak/realm-keystone.json`. The realm is imported only when it does not exist: `make reset && make up` (see "Changing the realm"). |
+| The console says "Cannot reach Keystone" or its pages answer 502 | The dev server's proxy cannot reach `KEYSTONE_URL` (`http://localhost:8080`). Run `make up`. |
+| The console shows "No console access yet" | The user has neither the `approver` nor the `admin` role. Lena is an approver and root is an admin; see Identity. |
+| The audit page shows "Audit chain not checked" | `/audit/verify` failed (a 5xx or no answer). That is not a clean result: read the Keystone log, and run `keystone audit verify` for the whole log. |
+| The `console` job of CI says `schema.d.ts` is out of date with the admin API | A route or a model changed and `console/src/api/schema.d.ts` did not. Run `make console-types` and commit the result. `make console-check` does not look for this. |
 | Port already in use | Another process holds the port. Set a different one in `.env`. |
 | `make check` cannot reach Postgres | Run `make up-core`, then `docker compose -f deploy/docker-compose.yml ps`. |
 | `ModuleNotFoundError: keystone` right after `uv sync` (macOS) | A background process flagged `.venv` as hidden, and Python skips hidden `.pth` files. Check with `ls -lO .venv/lib/python3.12/site-packages/keystone.pth`. Set `UV_PROJECT_ENVIRONMENT` to a path outside the repo, for example `$HOME/.cache/keystone-venv`, then run `uv sync`. |

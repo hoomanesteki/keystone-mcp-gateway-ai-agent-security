@@ -8,6 +8,7 @@ import { EmptyState, ErrorState, LoadingList, PageHeader } from "../components/S
 import { ToolReview } from "../components/ToolReview";
 import { formatCost } from "../lib/format";
 import { describeReason, groupByUpstream } from "../lib/tools";
+import { usePageTitle } from "../lib/usePageTitle";
 
 const HEADINGS = ["Tool", "Risk", "Tags", "Status", "Cost per call", "Actions"];
 
@@ -104,6 +105,7 @@ function Row({ tool }: { tool: ToolSummary }) {
 
 export function Tools() {
   const tools = useTools();
+  usePageTitle("Tools");
 
   if (tools.isPending) {
     return (

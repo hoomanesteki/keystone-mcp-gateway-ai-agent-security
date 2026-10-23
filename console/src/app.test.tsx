@@ -1,7 +1,8 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test } from "vitest";
-import { PEOPLE } from "./test/fakes";
+import { fakeApi, json, PEOPLE } from "./test/fakes";
+import { approval, approvalsApi } from "./test/fixtures";
 import { renderApp } from "./test/render";
 
 function menu() {
@@ -72,4 +73,26 @@ test("says so when a page does not exist", async () => {
   renderApp({ path: "/nowhere", session: PEOPLE.lena });
 
   expect(await screen.findByText("There is no page here")).toBeVisible();
+});
+
+test("goes to the sign-in page once when several calls are refused for an expired token", async () => {
+  const refused = () => json({ error: "unauthorized", reason: "expired" }, 401);
+  const api = fakeApi({ "GET /audit": refused, "GET /audit/verify": refused });
+
+  const { signIn } = renderApp({ path: "/audit", session: PEOPLE.root, api });
+
+  await waitFor(() => {
+    expect(api.calls.length).toBeGreaterThanOrEqual(2);
+  });
+  expect(signIn).toHaveBeenCalledTimes(1);
+});
+
+test("names the page and the number of waiting requests in the tab title", async () => {
+  const api = approvalsApi([approval(), approval({ id: "01SECOND" })]);
+
+  renderApp({ path: "/approvals", session: PEOPLE.lena, api });
+
+  await waitFor(() => {
+    expect(document.title).toBe("(2) Approvals - Keystone console");
+  });
 });

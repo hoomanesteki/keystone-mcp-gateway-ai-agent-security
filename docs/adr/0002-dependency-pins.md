@@ -123,6 +123,7 @@ is newer than the plan: see "Console: where a pin differs" below.
 | @testing-library/user-event | 14.6.8 | clicks and typing as a person does them |
 | @testing-library/jest-dom | 7.0.1 | matchers such as `toBeVisible` |
 | @playwright/test | 1.64.1 | the browser test of the approval loop (KS-609) |
+| @axe-core/playwright | 4.14.0 | the accessibility check inside the browser test: WCAG 2.1 A and AA and best practices, in both themes |
 | openapi-typescript | 7.13.0 | `src/api/schema.d.ts` from the API's OpenAPI document |
 | eslint | 10.13.0 | lint |
 | @eslint/js | 10.0.1 | ESLint's recommended rules |
