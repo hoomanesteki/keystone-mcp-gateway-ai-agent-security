@@ -255,6 +255,8 @@ services:
       KEYSTONE_MIGRATE_DATABASE_URL: postgresql+asyncpg://keystone:keystone@postgres:5432/keystone
       KEYSTONE_APP_DB_PASSWORD: "${KEYSTONE_APP_DB_PASSWORD:-keystone-app-dev-password}"
       KEYSTONE_REDIS_URL: redis://redis:6379/0
+      # Spans go to Jaeger over OTLP/HTTP (KS-504). Its UI is on :16686.
+      KEYSTONE_OTLP_ENDPOINT: http://jaeger:4318
       # Sign-in (KS-304). Tokens name the address a browser on this machine uses as their issuer.
       # Keystone fetches the discovery document and the keys from the Keycloak container.
       KEYSTONE_AUTH__MODE: oidc
