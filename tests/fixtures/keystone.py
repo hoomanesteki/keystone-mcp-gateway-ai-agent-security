@@ -20,7 +20,6 @@ from pydantic import SecretStr
 from redis.asyncio import Redis
 
 from keystone.app import create_app
-from keystone.audit.sink import InMemoryAuditSink
 from keystone.registry.config import ToolOverride, UpstreamConfig
 from keystone.settings import (
     AgentConfig,
@@ -33,6 +32,7 @@ from keystone.settings import (
 
 # Re-exported so tests/conftest.py can name one module: tests/unit/test_phase_plugin.py copies the
 # conftest and strips its single `pytest_plugins` line, so that line must stay on one line.
+from tests.fixtures.audit import AuditView
 from tests.fixtures.fake_idp import FakeIdp, fake_idp  # noqa: F401
 from tests.fixtures.policies import POLICY_ROOT, ROOT
 from tests.fixtures.redis import redis, test_redis_url  # noqa: F401
@@ -105,6 +105,7 @@ def credentialed_upstreams(upstreams: DemoUpstreams, tenant: str = "acme") -> li
 class KeystoneApp:
     app: FastAPI
     thread: ServerThread
+    database_url: str
 
     @property
     def url(self) -> str:
@@ -116,10 +117,9 @@ class KeystoneApp:
         return self.thread.url
 
     @property
-    def audit(self) -> InMemoryAuditSink:
-        sink = self.app.state.audit
-        assert isinstance(sink, InMemoryAuditSink)
-        return sink
+    def audit(self) -> AuditView:
+        """The audit rows this app has written, read from Postgres."""
+        return AuditView(self.app.state.audit, self.database_url)
 
 
 @pytest.fixture
@@ -184,7 +184,7 @@ def keystone_app_factory(
         }
         options.update(settings or {})
         app = create_app(Settings(**options), **app_options)
-        running = KeystoneApp(app, ServerThread(app).start())
+        running = KeystoneApp(app, ServerThread(app).start(), test_database_url)
         started.append(running)
         return running
 
@@ -231,7 +231,7 @@ def start_keystone(
             **auth_options(fake_idp),
         )
         app = create_app(settings, **app_options)
-        running = KeystoneApp(app, ServerThread(app).start())
+        running = KeystoneApp(app, ServerThread(app).start(), test_database_url)
         started.append(running)
         return running
 

@@ -294,3 +294,37 @@ def test_master_keys_are_a_secret_that_settings_never_print(
     assert settings.master_keys is not None
     assert settings.master_keys.get_secret_value() == f"{key},another"
     assert key not in repr(settings) and key not in settings.model_dump_json()
+
+
+@pytest.mark.phase(5)
+@pytest.mark.parametrize(
+    ("env", "configured", "expected"),
+    [
+        ("dev", None, False),
+        ("test", None, True),
+        ("prod", None, True),
+        ("dev", True, True),
+        ("prod", False, False),
+    ],
+)
+def test_the_audit_log_fails_closed_unless_env_is_dev(
+    env: str, configured: bool | None, expected: bool
+) -> None:
+    from keystone.settings import AuditSettings
+
+    settings = Settings(env=env, audit=AuditSettings(fail_closed=configured))  # type: ignore[arg-type]
+
+    assert settings.audit_fail_closed is expected
+
+
+@pytest.mark.phase(5)
+def test_audit_fail_closed_comes_from_the_environment_and_the_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "keystone.yaml"
+    config.write_text("audit:\n  fail_closed: false\n")
+
+    assert Settings(env="prod", config_path=config).audit_fail_closed is False
+
+    monkeypatch.setenv("KEYSTONE_AUDIT__FAIL_CLOSED", "true")
+    assert Settings(env="dev", config_path=config).audit_fail_closed is True

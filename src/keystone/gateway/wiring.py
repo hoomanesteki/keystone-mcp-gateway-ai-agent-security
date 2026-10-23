@@ -73,4 +73,10 @@ def build_pipeline(
         "metering": MeteringInterceptor(),
     }
     interceptors = [overrides.get(slot, stubs[slot]) for slot in INTERCEPTOR_ORDER]
-    return Pipeline(interceptors, deps.dispatcher, deps.audit, deps.tracer)
+    return Pipeline(
+        interceptors,
+        deps.dispatcher,
+        deps.audit,
+        deps.tracer,
+        fail_closed=settings.audit_fail_closed,
+    )

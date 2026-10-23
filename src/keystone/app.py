@@ -1,7 +1,6 @@
 import os
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Any
 
 import anyio
 import structlog
@@ -12,7 +11,7 @@ from redis.asyncio import Redis
 from keystone import __version__
 from keystone.admin.api import create_admin_router
 from keystone.admin.auth import AdminAuth, AdminRefused, admin_refused_handler
-from keystone.audit.sink import InMemoryAuditSink
+from keystone.audit.sink import PostgresAuditSink
 from keystone.db.session import create_engine, make_sessionmaker
 from keystone.db.tenants import upsert_tenants
 from keystone.gateway.dispatch import UpstreamDispatcher
@@ -43,6 +42,7 @@ from keystone.registry.repo import ToolRepo, UpstreamRepo
 from keystone.registry.service import RegistryService
 from keystone.registry.sync import RegistrySyncer
 from keystone.settings import Settings
+from keystone.telemetry.metrics import Metrics
 
 log = structlog.get_logger()
 
@@ -109,7 +109,8 @@ def create_app(
         down_after=settings.health.down_after,
         service_headers=service_headers,
     )
-    audit = audit or InMemoryAuditSink()
+    metrics = Metrics()
+    audit = audit or PostgresAuditSink(sessions, metrics=metrics)
     dispatcher: Dispatcher = UpstreamDispatcher(pool, health)
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
@@ -159,6 +160,10 @@ def create_app(
             # One task enters and leaves the pool, the sync loop and the session manager, as
             # the SDK's cancel scopes require (engineering note 1).
             async with AsyncExitStack() as stack:
+                # Entered first, so it is left last: the writer flushes what the calls that were
+                # still running when the server stopped have queued.
+                if isinstance(audit, PostgresAuditSink):
+                    await stack.enter_async_context(audit)
                 await stack.enter_async_context(pool)
                 # An upstream that is down now gets an error in its report and in `last_error`,
                 # and the periodic sync tries it again. It does not stop startup.
@@ -182,6 +187,7 @@ def create_app(
     app.state.health = health
     app.state.gateway = gateway
     app.state.audit = audit
+    app.state.metrics = metrics
     app.state.authenticator = authenticator
     app.state.vault = vault
     app.state.policies = policies
@@ -189,29 +195,6 @@ def create_app(
     app.include_router(create_admin_router(AdminAuth(authenticator), policies))
     manager = mount_mcp(app, gateway, authenticator)
     add_metadata_route(app, settings)
-
-    if settings.env != "prod" and isinstance(audit, InMemoryAuditSink):
-        sink = audit
-
-        @app.get("/_dev/audit")
-        async def dev_audit() -> dict[str, Any]:
-            """How many calls the in-memory audit sink holds, and the last 50 with the policy's
-            decision and reasons, for the demo and the smoke scripts. The admin API replaces it in
-            Phase 5. It is not mounted in prod."""
-            recent = sink.records[-50:]
-            return {
-                "count": len(sink.records),
-                "recent": [
-                    {
-                        "call_id": r["call_id"],
-                        "tool": r["tool"],
-                        "outcome": r["outcome"],
-                        "effect": r["decision"],
-                        "reasons": r["reasons"],
-                    }
-                    for r in recent
-                ],
-            }
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
