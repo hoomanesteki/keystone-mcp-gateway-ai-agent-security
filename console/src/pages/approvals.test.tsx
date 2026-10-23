@@ -20,6 +20,8 @@ test("shows pending approval with reasons", async () => {
   renderApp({ path: "/approvals", session: PEOPLE.lena, api });
 
   const card = await cardFor();
+  // The browser test finds its card by this id, and the agent's transcript names the same one.
+  expect(card).toHaveAttribute("data-approval-id", "01M5M26K3SF50VNMVPMZM605EB");
   expect(within(card).getByText("high")).toBeVisible();
   expect(within(card).getAllByText("tainted").length).toBeGreaterThan(0);
   expect(within(card).getByText("reads_sensitive")).toBeVisible();

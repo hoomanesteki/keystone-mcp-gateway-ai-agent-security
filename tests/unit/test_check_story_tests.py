@@ -156,3 +156,13 @@ def test_a_skipped_or_focused_typescript_test_is_not_a_test(
     assert "console/src/b.test.tsx::skipped one" in found
     assert "console/src/b.test.tsx::focused one" in found
     assert "console/src/b.test.tsx::not a test" in found
+
+
+@pytest.mark.phase(6)
+def test_every_test_the_plan_names_up_to_phase_six_exists_in_this_repository() -> None:
+    result = check_story_tests.check(plan_parser.load_plan(), 6, ROOT)
+
+    assert result.missing == ()
+    # The console's tests: two for the scaffold, three each for the queue and the audit page, two
+    # for the tools page and one in the browser.
+    assert result.typescript >= 11

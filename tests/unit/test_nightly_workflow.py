@@ -77,3 +77,11 @@ def test_it_uses_the_pinned_actions_of_the_ci_workflow() -> None:
     used = {step["uses"] for step in job["steps"] if "uses" in step}
 
     assert used and used <= ci_actions
+
+
+@pytest.mark.phase(6)
+def test_it_drives_the_console_in_a_browser_once_the_stack_is_up() -> None:
+    steps = commands()
+
+    assert steps.index("make up") < steps.index("make console-e2e")
+    assert any("playwright install --with-deps chromium" in step for step in steps)

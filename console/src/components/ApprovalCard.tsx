@@ -70,6 +70,7 @@ export function ApprovalCard({
   return (
     <article
       ref={card}
+      data-approval-id={item.id}
       aria-labelledby={title}
       className={`rounded-lg border bg-surface shadow-card ${highlighted ? "border-accent ring-2 ring-accent/30" : "border-line"}`}
     >
