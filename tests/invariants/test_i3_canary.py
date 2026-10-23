@@ -2,11 +2,12 @@
 
 The canary is the real API key of the echo server, stored in the vault and sent with every call
 to it. A session then does what goes wrong in practice: a call that works, an upstream that
-reports an error, an upstream that is too slow, a refusal by policy, arguments that do not fit,
-a tool that does not exist, and a dispatch that fails with an exception whose text holds the
-request headers, the way a careless HTTP library's can. Everything an observer could read is then
-searched for the canary: Keystone's logs (structlog and the standard library), the audit
-records, and every result and rejection the agent received.
+returns the key it received (a test-only upstream, tests/fixtures/reflecting_upstream.py), an
+upstream that reports an error, an upstream that is too slow, a refusal by policy, arguments that
+do not fit, a tool that does not exist, and a dispatch that fails with an exception whose text
+holds the request headers, the way a careless HTTP library's can. Everything an observer could
+read is then searched for the canary: Keystone's logs (structlog and the standard library), the
+audit records, and every result and rejection the agent received.
 
 Spans are not searched: the pipeline has no tracer but the no-op one until Phase 5, which extends
 this test.
@@ -27,6 +28,8 @@ from keystone.gateway.pipeline import Dispatcher
 from keystone.logging import SECRETS, configure_logging
 from keystone.registry.config import ToolOverride, UpstreamConfig
 from tests.fixtures.keystone import KeystoneApp, McpConnect
+from tests.fixtures.reflecting_upstream import reflecting_upstream
+from tests.fixtures.servers import ServerThread
 from tests.fixtures.upstreams import DemoUpstreams
 
 pytestmark = [pytest.mark.phase(3), pytest.mark.services]
@@ -78,6 +81,24 @@ def log_buffer(caplog: pytest.LogCaptureFixture) -> Iterator[io.StringIO]:
     structlog.reset_defaults()
 
 
+@pytest.fixture
+def reflector(canary_secret: str) -> Iterator[ServerThread]:
+    """The test-only upstream that returns the key it received. Its key is the canary."""
+    with reflecting_upstream(canary_secret) as thread:
+        yield thread
+
+
+def reflect_upstream(thread: ServerThread) -> UpstreamConfig:
+    # Same variable as the echo upstream's, so Keystone sends it the same canary.
+    return UpstreamConfig(
+        id="reflect",
+        tenant="acme",
+        url=f"{thread.url}/mcp",
+        credential_mode="static",
+        credential_env={"X-Api-Key": "ECHO_API_KEY"},
+    )
+
+
 def echo_upstream(keyed: DemoUpstreams) -> UpstreamConfig:
     return UpstreamConfig(
         id="echo",
@@ -92,6 +113,8 @@ def echo_upstream(keyed: DemoUpstreams) -> UpstreamConfig:
 
 SESSION: list[tuple[str, dict[str, Any]]] = [
     ("echo__echo", {"payload": "hello"}),  # works
+    ("reflect__show_key", {}),  # the upstream returns the key it received (KS-392)
+    ("reflect__shout", {"note": "debug"}),  # and so does this one, inside a sentence
     ("echo__fail", {"message": "on purpose"}),  # the upstream reports an error
     ("echo__sleep", {"seconds": 5}),  # the upstream is too slow
     ("echo__echo", {"payload": "forbidden"}),  # policy refuses
@@ -113,10 +136,10 @@ async def run_session(app: KeystoneApp, mcp_client: McpConnect) -> list[str]:
     return received
 
 
-def started(factory: Factory, keyed: DemoUpstreams) -> KeystoneApp:
+def started(factory: Factory, keyed: DemoUpstreams, reflector: ServerThread) -> KeystoneApp:
     return factory(
         keyed=True,
-        settings={"upstreams": [echo_upstream(keyed)]},
+        settings={"upstreams": [echo_upstream(keyed), reflect_upstream(reflector)]},
         interceptors={"policy": Policy()},
         wrap_dispatcher=LeakyDispatcher,
     )
@@ -126,11 +149,12 @@ async def test_i3(
     keystone_app_factory: Factory,
     mcp_client: McpConnect,
     keyed_upstreams: DemoUpstreams,
+    reflector: ServerThread,
     canary_secret: str,
     log_buffer: io.StringIO,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    app = started(keystone_app_factory, keyed_upstreams)
+    app = started(keystone_app_factory, keyed_upstreams, reflector)
     # The startup stored and read the credential. Forget everything the scrubber learned from it,
     # so that what protects the session below is the vault registering each secret it decrypts.
     SECRETS.clear()
@@ -148,6 +172,8 @@ async def test_i3(
     assert keyed_upstreams.state("echo")["api_key_received"] is True  # the canary was sent
     assert [(r["tool"], r["outcome"]) for r in app.audit.records] == [
         ("echo__echo", "ok"),
+        ("reflect__show_key", "ok"),
+        ("reflect__shout", "ok"),
         ("echo__fail", "ok"),  # the call itself worked; the upstream's answer was an error
         ("echo__sleep", "error"),
         ("echo__echo", "rejected"),
@@ -159,6 +185,8 @@ async def test_i3(
     assert codes == [
         None,
         None,
+        None,
+        None,
         "KS_UPSTREAM_TIMEOUT",
         "KS_DENIED",
         "KS_INVALID_ARGUMENTS",
@@ -167,6 +195,9 @@ async def test_i3(
     ]
     assert "startup_sync" in logs and "dispatch_failed" in logs
     assert "[redacted]" in logs  # the exception that held the headers was masked, not absent
+    # The reflecting upstream did return the key; what the agent got in its place is the marker.
+    for shown in received[2:4]:
+        assert json.loads(shown)["isError"] is False and shown.count("[redacted]") >= 2
 
     for where, text in observed.items():
         assert canary_secret not in text, f"the canary is in the {where}"
@@ -178,6 +209,7 @@ async def test_the_canary_search_can_fail(
     keystone_app_factory: Factory,
     mcp_client: McpConnect,
     keyed_upstreams: DemoUpstreams,
+    reflector: ServerThread,
     canary_secret: str,
     log_buffer: io.StringIO,
     monkeypatch: pytest.MonkeyPatch,
@@ -185,7 +217,7 @@ async def test_the_canary_search_can_fail(
     # The same session with the scrubber's registry switched off: the exception that holds the
     # headers now reaches the log, which shows test_i3 would notice a leak.
     monkeypatch.setattr("keystone.identity.vault.register_secret", lambda value: False)
-    app = started(keystone_app_factory, keyed_upstreams)
+    app = started(keystone_app_factory, keyed_upstreams, reflector)
 
     async with mcp_client(app) as client:
         result = await client.call_tool("echo__echo", {"payload": "leak"})
@@ -193,3 +225,29 @@ async def test_the_canary_search_can_fail(
     assert result.is_error
     assert canary_secret in log_buffer.getvalue()
     assert canary_secret not in result.model_dump_json(by_alias=True)  # the agent still sees none
+
+
+@pytest.mark.phase(4)
+async def test_the_result_search_can_fail(
+    keystone_app_factory: Factory,
+    mcp_client: McpConnect,
+    keyed_upstreams: DemoUpstreams,
+    reflector: ServerThread,
+    canary_secret: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The same upstream with the dispatcher's scrub switched off: the canary reaches the agent in
+    # the text block and in the structured content, which shows test_i3 would notice it.
+    def keep(result: ToolResult, injected: Any = ()) -> ToolResult:
+        return result
+
+    monkeypatch.setattr("keystone.gateway.dispatch.scrub_result", keep)
+    app = started(keystone_app_factory, keyed_upstreams, reflector)
+
+    async with mcp_client(app) as client:
+        result = await client.call_tool("reflect__show_key", {})
+
+    assert not result.is_error
+    assert result.structured_content is not None
+    assert result.structured_content["received"] == canary_secret
+    assert canary_secret in result.model_dump_json(by_alias=True)

@@ -1,6 +1,7 @@
 """KS-306: Keystone adds the upstream credential itself, and the agent never sees it."""
 
 import secrets
+import time
 from collections.abc import Callable
 
 import anyio
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, Decision, Effect
+from keystone.gateway.upstreams import AUTH_REFUSED_MESSAGE
 from keystone.identity.credential_repo import CredentialRepo
 from keystone.identity.vault import Cipher, Vault, key_id
 from keystone.registry.config import UpstreamConfig
@@ -105,6 +107,28 @@ async def test_a_credential_missing_from_the_vault_gives_an_upstream_error(
 
     assert result.is_error
     assert result.meta is not None and result.meta["keystone/code"] == "KS_UPSTREAM_ERROR"
+    [record] = app.audit.records
+    assert (record["outcome"], record["reject_code"]) == ("error", "KS_UPSTREAM_ERROR")
+
+
+@pytest.mark.phase(4)
+async def test_an_upstream_that_refuses_the_credential_gives_upstream_error_at_once(
+    keystone_app_factory: Factory, mcp_client: McpConnect, sessionmaker: Sessions
+) -> None:
+    # KS-391. Before it, this call waited through the reconnect backoff, about 4 s.
+    app = keystone_app_factory(keyed=True)
+    async with sessionmaker() as session, session.begin():
+        await session.execute(text("DELETE FROM credentials"))
+
+    async with mcp_client(app) as client:
+        started = time.monotonic()
+        result = await client.call_tool("mail__list_emails", {"folder": "inbox"})
+        elapsed = time.monotonic() - started
+
+    assert result.is_error
+    assert result.meta is not None and result.meta["keystone/code"] == "KS_UPSTREAM_ERROR"
+    assert AUTH_REFUSED_MESSAGE in texts(result)[0]
+    assert elapsed < 1.0
     [record] = app.audit.records
     assert (record["outcome"], record["reject_code"]) == ("error", "KS_UPSTREAM_ERROR")
 

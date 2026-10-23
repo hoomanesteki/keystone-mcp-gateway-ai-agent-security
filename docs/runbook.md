@@ -291,12 +291,20 @@ demands a key even to list its tools needs a static credential as well, or its p
 Keystone marks it down.
 
 A call whose upstream gets no credential (a `static` upstream whose credential was deleted, say)
-reaches the upstream without one. If the upstream answers 401, the agent gets `KS_UPSTREAM_ERROR`,
-after the reconnect attempts, which take about 4 seconds.
+reaches the upstream without one. If the upstream answers 401 or 403, the agent gets
+`KS_UPSTREAM_ERROR` ("the upstream server refused the credentials Keystone sent") at once: a
+connection attempt that meets either status is not retried, because the same credential gets the
+same answer, and the tests hold the call under 1 s. The log line `upstream_credentials_refused`
+names the upstream. A connection that fails for any other reason still goes through the reconnect
+backoff (0.2, 0.8 and 3.2 s).
 
-Not covered: an upstream that copies the key it received into a tool result. Keystone passes
-results on unchanged, so the key would reach the agent. The demo servers never do this; a server
-you do not trust belongs behind the sandbox of Phase 8.
+An upstream that copies the key it received into a tool result does not hand it to the agent. Before
+a result leaves dispatch, every credential value Keystone sent for the call, whatever its length,
+and every secret registered with the log scrubber are replaced with `[redacted]`, in all text of
+the result and in its structured content. The log line `upstream_result_redacted` names the
+upstream and the tool, so an operator can see which server does it. Only a value that comes back as
+it was sent is caught: an upstream that reverses, splits or encodes the key first is not, and a
+server you do not trust belongs behind the sandbox of Phase 8.
 
 Header names are letters, digits and dashes. `Host`, `Content-Type`, `Mcp-Session-Id` and the
 other headers the HTTP layer owns are refused. Values are printable ASCII on one line, up to 4096

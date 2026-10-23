@@ -6,10 +6,17 @@ from typing import Any
 import anyio
 import pytest
 from pydantic import SecretStr
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from examples.upstreams import _common, echo_server
 from keystone.core.errors import Code, Reject
-from keystone.gateway.upstreams import HttpUpstreamClient, UpstreamPool, http_client_factory
+from keystone.gateway.upstreams import (
+    AUTH_REFUSED_MESSAGE,
+    HttpUpstreamClient,
+    UpstreamPool,
+    http_client_factory,
+)
 from tests.fixtures.servers import ServerThread
 from tests.fixtures.upstreams import DemoUpstreams
 
@@ -258,3 +265,123 @@ async def test_a_call_finishes_when_its_client_is_evicted_mid_call(
 
 def texts_from(blocks: list[dict[str, Any]]) -> list[str]:
     return [str(b["text"]) for b in blocks if b.get("type") == "text"]
+
+
+class Refusing:
+    """An upstream app that, once `status` is set, answers every HTTP request with it and a body
+    that is not JSON-RPC, the way a gateway in front of an MCP server does. It counts the requests
+    it refused."""
+
+    def __init__(self, inner: ASGIApp, status: int | None = None) -> None:
+        self.inner = inner
+        self.status = status
+        self.refused = 0
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and self.status is not None:
+            self.refused += 1
+            await JSONResponse({"error": "no"}, status_code=self.status)(scope, receive, send)
+            return
+        await self.inner(scope, receive, send)
+
+
+@pytest.mark.phase(4)
+@pytest.mark.parametrize("status", [401, 403])
+async def test_an_upstream_that_refuses_the_credential_fails_at_once(status: int) -> None:
+    # KS-391. The default backoff (0.2, 0.8 and 3.2 s) is what the reconnect used to wait through.
+    upstream = Refusing(echo_server.create_server().streamable_http_app(), status)
+    server = ServerThread(upstream).start()
+    try:
+        async with anyio.create_task_group() as tg:
+            client = HttpUpstreamClient(
+                f"{server.url}/mcp", {"X-Api-Key": "wrong-key-0123"}, tg, upstream_id="echo"
+            )
+            try:
+                started = time.monotonic()
+                with pytest.raises(Reject) as called:
+                    await client.call_tool("echo", {"payload": "x"}, timeout_s=10)
+                call_s = time.monotonic() - started
+
+                started = time.monotonic()
+                with pytest.raises(Reject) as listed:
+                    await client.list_tools()
+                list_s = time.monotonic() - started
+                probed = await client.health()
+            finally:
+                await client.aclose()
+    finally:
+        server.stop()
+
+    for raised in (called.value, listed.value):
+        assert raised.code is Code.UPSTREAM_ERROR
+        assert raised.message == AUTH_REFUSED_MESSAGE
+        assert "wrong-key-0123" not in json.dumps([raised.message, raised.data])
+    assert call_s < 1.0 and list_s < 1.0
+    assert probed is False
+    # One connection attempt per request: the SDK asks `server/discover` and then `initialize`.
+    assert upstream.refused <= 2 * 3
+
+
+@pytest.mark.phase(4)
+async def test_a_wrong_key_on_a_keyed_upstream_fails_at_once() -> None:
+    app = _common.http_app(echo_server.create_server(), api_key="s3cret", host="127.0.0.1")
+    upstream = ServerThread(app).start()
+    try:
+        async with UpstreamPool(http_client_factory({"echo": f"{upstream.url}/mcp"})) as pool:
+            started = time.monotonic()
+            async with pool.lease("echo", {"X-Api-Key": SecretStr("not-the-key")}) as client:
+                with pytest.raises(Reject) as raised:
+                    await client.call_tool("echo", {"payload": "hi"}, timeout_s=10)
+            elapsed = time.monotonic() - started
+    finally:
+        upstream.stop()
+
+    assert raised.value.code is Code.UPSTREAM_ERROR
+    assert raised.value.message == AUTH_REFUSED_MESSAGE
+    assert elapsed < 1.0
+
+
+@pytest.mark.phase(4)
+async def test_a_refusal_on_an_open_session_fails_at_once() -> None:
+    # The credential is revoked while a session is open. The next request meets the 401 on a
+    # session that already exists, which was never slow, and must stay that way.
+    upstream = Refusing(echo_server.create_server().streamable_http_app())
+    server = ServerThread(upstream).start()
+    try:
+        async with anyio.create_task_group() as tg:
+            client = HttpUpstreamClient(f"{server.url}/mcp", {}, tg, upstream_id="echo")
+            try:
+                await client.call_tool("echo", {"payload": "fine"}, timeout_s=5)
+                upstream.status = 401
+                started = time.monotonic()
+                with pytest.raises(Reject) as raised:
+                    await client.call_tool("echo", {"payload": "refused"}, timeout_s=10)
+                elapsed = time.monotonic() - started
+            finally:
+                await client.aclose()
+    finally:
+        server.stop()
+
+    assert raised.value.code is Code.UPSTREAM_ERROR
+    assert elapsed < 1.0
+
+
+@pytest.mark.phase(4)
+async def test_a_refusal_does_not_stick_when_the_upstream_accepts_the_next_attempt() -> None:
+    upstream = Refusing(echo_server.create_server().streamable_http_app(), 401)
+    server = ServerThread(upstream).start()
+    try:
+        async with anyio.create_task_group() as tg:
+            client = HttpUpstreamClient(f"{server.url}/mcp", {}, tg, upstream_id="echo")
+            try:
+                with pytest.raises(Reject) as refused:
+                    await client.call_tool("echo", {"payload": "x"}, timeout_s=10)
+                upstream.status = None  # the operator fixed the credential on the upstream
+                answer = await client.call_tool("echo", {"payload": "now"}, timeout_s=10)
+            finally:
+                await client.aclose()
+    finally:
+        server.stop()
+
+    assert refused.value.message == AUTH_REFUSED_MESSAGE
+    assert text_of(answer.content) == "now"
