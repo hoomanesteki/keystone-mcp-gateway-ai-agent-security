@@ -117,7 +117,12 @@ extra and downloads the pinned model (738 MB) into the image, and the image sets
 `docker run --network none`, the built image loaded the model from `/opt/hf-cache` and scored an
 injected sentence 1.0 and a benign one 0.0. The image is 3.13 GB in `docker images` against 401 MB
 without the argument: the virtualenv grows from 149 MB to 1.2 GB (torch is 652 MB of it) and the
-model cache is 715 MB (`du -sh`). The first build took 20 minutes on a laptop. `make gate`
+model cache is 715 MB (`du -sh`). The first build took 20 minutes on a laptop. An edit in `src`
+used to run the download again, because the layer that holds the model comes after the one that
+installs the package. The download now stays in a BuildKit cache mount, and only the files of the
+pinned revision are copied from it into the image, as files and not as the cache's links, which
+point into a store of blobs outside the model's folder. A rebuild after an edit in `src` then
+took 54 s and did not fetch the model again; `docker builder prune` empties the cache. `make gate`
 installs the extra from Phase 7, because the gate runs the one test that loads the real model.
 Without the extra, `load_classifier` logs `scanner_classifier_unavailable` once and the scanner
 runs on its rules. `KEYSTONE_SCANNER_CLASSIFIER=none` (or `scanner.classifier: none`) turns the

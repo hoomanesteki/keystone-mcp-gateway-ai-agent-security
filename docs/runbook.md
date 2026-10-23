@@ -8,7 +8,9 @@ How to run the local stack and what each part listens on. This file grows with t
 upstreams and Keystone, and waits until every container reports healthy. Cold start takes about
 30 seconds on a laptop with warm images. The first build of the two local images takes longer: the
 Keystone image holds torch and a 738 MB model (the classifier, below), and its first build took
-20 minutes on a laptop.
+20 minutes on a laptop. The model stays in a build cache after that, so a rebuild after an edit in
+`src` took 54 seconds; `docker builder prune` empties the cache and the next build downloads the
+model again.
 
 | Command | What it does |
 |---|---|
