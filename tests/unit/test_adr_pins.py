@@ -1,3 +1,4 @@
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -67,3 +68,38 @@ def test_every_image_is_pinned_and_listed() -> None:
     for name, tag in sorted(references):
         assert tag and tag != "latest", f"{name} is not pinned"
         assert rows.get(name) == tag, f"{name}:{tag} is missing from ADR-0002"
+
+
+@pytest.mark.phase(6)
+def test_every_console_package_is_listed_with_its_exact_version() -> None:
+    package = json.loads((ROOT / "console" / "package.json").read_text())
+    direct = {**package["dependencies"], **package["devDependencies"]}
+
+    assert all(re.fullmatch(r"\d+\.\d+\.\d+", version) for version in direct.values()), direct
+    listed = dict(adr_rows("Console packages"))
+    listed.pop("Package")  # the header row of each table
+    assert listed == direct
+
+
+@pytest.mark.phase(6)
+def test_the_console_node_and_pnpm_versions_are_listed() -> None:
+    rows = adr_rows("Console toolchain")
+    package = json.loads((ROOT / "console" / "package.json").read_text())
+
+    assert rows["Node.js"] == (ROOT / "console" / ".nvmrc").read_text().strip()
+    assert package["packageManager"] == f"pnpm@{rows['pnpm']}"
+
+
+@pytest.mark.phase(6)
+def test_every_workflow_action_is_listed_with_its_version() -> None:
+    rows = adr_rows("CI actions")
+    used: set[tuple[str, str]] = set()
+    for workflow in (ROOT / ".github" / "workflows").glob("*.yml"):
+        for name, _, version in re.findall(
+            r"uses:\s*([\w.-]+/[\w.-]+)(@)(\S+)", workflow.read_text(), flags=re.MULTILINE
+        ):
+            used.add((name, version))
+
+    assert used, "no actions found"
+    for name, version in sorted(used):
+        assert rows.get(name) == version, f"{name}@{version} is missing from ADR-0002"

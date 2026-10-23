@@ -9,6 +9,7 @@ from keystone.core.types import ToolStatus
 from keystone.gateway.server import Gateway
 from keystone.registry.repo import ToolRepo, UpstreamRepo
 from keystone.settings import RegistrySettings, Settings
+from tests.fixtures.approvals import VIRTUAL_TOOLS
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.mcp_results import one
 from tests.fixtures.upstreams import NAMES, DemoUpstreams
@@ -26,8 +27,9 @@ async def test_list_aggregates_all_upstreams(
         names = [t.name for t in (await client.list_tools()).tools]
 
     assert names == sorted(names)
-    assert len(names) == 12
-    assert {name.partition("__")[0] for name in names} == set(NAMES)
+    # The twelve tools of the upstreams, and the two that Keystone offers every caller (KS-603).
+    assert len(names) == 12 + len(VIRTUAL_TOOLS) and set(names) >= VIRTUAL_TOOLS
+    assert {name.partition("__")[0] for name in names} == {*NAMES, "keystone"}
     for upstream in NAMES:
         assert len([n for n in names if n.startswith(f"{upstream}__")]) == 3
 
@@ -78,7 +80,7 @@ async def test_a_disabled_upstream_leaves_the_list_and_its_tools_are_not_found(
             await anyio.sleep(0.3)
         result = await client.call_tool("bank__get_balance", {"account": "CHK-001"})
 
-    assert len(names) == 9
+    assert len(names) == 9 + len(VIRTUAL_TOOLS)
     assert result.is_error
     assert result.meta is not None and result.meta["keystone/code"] == "KS_TOOL_NOT_FOUND"
 

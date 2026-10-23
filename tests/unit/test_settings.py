@@ -372,3 +372,102 @@ def test_the_console_origin_must_be_an_origin(value: str, monkeypatch: pytest.Mo
 
     with pytest.raises(ValueError, match="console_origin"):
         Settings()
+
+
+@pytest.mark.phase(6)
+def test_approval_settings_have_defaults_and_come_from_env_or_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    defaults = Settings().approvals
+    assert (defaults.wait_seconds, defaults.ttl_seconds) == (60, 900)
+    assert (defaults.sweep_interval_s, defaults.poll_interval_s) == (30, 2)
+
+    config = tmp_path / "keystone.yaml"
+    config.write_text("approvals:\n  wait_seconds: 20\n  ttl_seconds: 600\n")
+    assert Settings(config_path=config).approvals.wait_seconds == 20
+
+    monkeypatch.setenv("KEYSTONE_APPROVALS__WAIT_SECONDS", "1.5")
+    monkeypatch.setenv("KEYSTONE_APPROVALS__SWEEP_INTERVAL_S", "0.25")
+    settings = Settings(config_path=config)
+    assert (settings.approvals.wait_seconds, settings.approvals.ttl_seconds) == (1.5, 600)
+    assert settings.approvals.sweep_interval_s == 0.25
+
+
+@pytest.mark.phase(6)
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"wait_seconds": -1},
+        {"wait_seconds": 301},
+        {"ttl_seconds": 0},
+        {"sweep_interval_s": 0},
+        {"poll_interval_s": 0},
+        {"wait_secnods": 5},  # a misspelled key must fail, not quietly do nothing
+    ],
+)
+def test_approval_settings_are_checked(bad: dict[str, float]) -> None:
+    with pytest.raises(ValueError, match="approvals"):
+        Settings(approvals=bad)  # type: ignore[arg-type]
+
+
+@pytest.mark.phase(6)
+def test_the_config_cannot_define_an_upstream_called_keystone(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="reserved"):
+        Settings(upstreams=[{"id": "keystone", "tenant": "acme"}])  # type: ignore[list-item]
+
+    config = tmp_path / "keystone.yaml"
+    config.write_text(
+        "upstreams:\n  - {id: keystone, tenant: acme, transport: http, url: 'http://x.test/mcp'}\n"
+    )
+    with pytest.raises(ValueError, match="reserved"):
+        Settings(config_path=config)
+
+
+@pytest.mark.phase(6)
+def test_the_webhook_settings_are_checked_and_the_slack_address_is_a_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from keystone.settings import ApprovalSettings
+
+    defaults = ApprovalSettings()
+    assert (defaults.webhook_url, defaults.slack_webhook_url) == (None, None)
+    assert defaults.webhook_backoff_s == [1.0, 2.0, 4.0]
+
+    slack = "https://hooks.slack.test/services/T000/B000/not-for-display"
+    monkeypatch.setenv("KEYSTONE_APPROVALS__WEBHOOK_URL", "https://hooks.example.test/keystone")
+    monkeypatch.setenv("KEYSTONE_APPROVALS__SLACK_WEBHOOK_URL", slack)
+    settings = Settings()
+
+    assert settings.approvals.webhook_url == "https://hooks.example.test/keystone"
+    assert settings.approvals.slack_webhook_url is not None
+    assert settings.approvals.slack_webhook_url.get_secret_value() == slack
+    assert "not-for-display" not in repr(settings) + settings.model_dump_json()
+
+
+@pytest.mark.phase(6)
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"webhook_url": "hooks.example.test/keystone"},
+        {"webhook_url": "ftp://hooks.example.test/keystone"},
+        {"slack_webhook_url": "not a url"},
+        {"webhook_backoff_s": [1, -1]},
+        {"webhook_backoff_s": [301]},
+        {"webhook_backoff_s": [1] * 11},
+    ],
+)
+def test_a_webhook_setting_that_cannot_work_is_refused(bad: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="approvals"):
+        Settings(approvals=bad)  # type: ignore[arg-type]
+
+
+@pytest.mark.phase(6)
+def test_a_secret_put_in_the_yaml_is_refused_and_not_repeated(tmp_path: Path) -> None:
+    config = tmp_path / "keystone.yaml"
+    config.write_text("approvals:\n  webhook_secret: a-secret-that-must-not-be-echoed\n")
+
+    with pytest.raises(ValueError) as refused:
+        Settings(config_path=config)
+
+    assert "webhook_secret" in str(refused.value)
+    assert "must-not-be-echoed" not in str(refused.value)

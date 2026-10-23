@@ -476,3 +476,99 @@ async def test_a_healthy_sink_changes_nothing_when_the_pipeline_fails_closed() -
 
     assert not result.is_error and "dispatch" in events
     assert [r["outcome"] for r in sink.records] == ["ok"]
+
+
+# -- KS-691: a call that waited is checked again, by the slots that came before the wait
+
+
+@pytest.mark.phase(6)
+async def test_run_before_runs_again_the_slots_ahead_of_the_one_named() -> None:
+    pipeline, events, sink = build()
+    ctx = make_ctx()
+
+    await pipeline.run_before(ctx, "approval")
+
+    assert events == ["before:rate_limit", "before:pinning", "before:budget", "before:policy"]
+    # It checks. It does not dispatch, run the after hooks or write a record: the call goes on
+    # in `run`, which does those once.
+    assert sink.records == [] and ctx.dispatched is False and ctx.result is None
+
+
+@pytest.mark.phase(6)
+async def test_run_before_leaves_out_a_slot_it_is_told_to_skip() -> None:
+    """A rate limit charges a call once, when it arrives, and not again after a wait."""
+    pipeline, events, _ = build()
+    ctx = make_ctx()
+
+    await pipeline.run_before(ctx, "approval", skip=("rate_limit",))
+
+    assert events == ["before:pinning", "before:budget", "before:policy"]
+    assert set(ctx.timings_ms) == {"pinning", "budget", "policy"}  # the time it took is counted
+
+
+@pytest.mark.phase(6)
+async def test_run_before_decides_again_and_the_new_decision_stands() -> None:
+    pipeline, _, _ = build()
+    ctx = make_ctx(decision=Decision(effect=Effect.REQUIRE_APPROVAL, source="policy"))
+
+    await pipeline.run_before(ctx, "approval")
+
+    assert ctx.decision is not None and ctx.decision.effect is Effect.ALLOW
+
+
+@pytest.mark.phase(6)
+async def test_run_before_lets_a_refusal_through_and_goes_no_further() -> None:
+    refusal = Reject(Code.QUARANTINED, "held for review")
+    pipeline, events, _ = build(pinning={"reject_before": refusal})
+
+    with pytest.raises(Reject) as refused:
+        await pipeline.run_before(make_ctx(), "approval")
+
+    assert refused.value is refusal
+    assert events == ["before:rate_limit", "before:pinning"]
+
+
+@pytest.mark.phase(6)
+async def test_run_before_turns_a_crash_into_a_denial_that_says_nothing_of_the_cause() -> None:
+    pipeline, _, _ = build(budget={"crash_before": True})
+
+    with pytest.raises(Reject) as refused:
+        await pipeline.run_before(make_ctx(), "approval")
+
+    assert refused.value.code is Code.DENIED
+    assert "internal.py" not in refused.value.message and "secret" not in refused.value.message
+
+
+@pytest.mark.phase(6)
+@pytest.mark.parametrize(
+    ("slot", "skip", "named"),
+    [("nowhere", (), "nowhere"), ("approval", ("rate_limt",), "rate_limt")],
+)
+async def test_run_before_refuses_a_name_that_is_no_slot_before_it_runs_anything(
+    slot: str, skip: tuple[str, ...], named: str
+) -> None:
+    """A typo must not turn the check into one that checks nothing."""
+    pipeline, events, _ = build()
+
+    with pytest.raises(ValueError, match=named):
+        await pipeline.run_before(make_ctx(), slot, skip=skip)
+
+    assert events == []
+
+
+@pytest.mark.phase(6)
+async def test_run_before_refuses_a_call_when_the_audit_log_can_no_longer_be_trusted() -> None:
+    """The call waited, and in that time the sink began to lose records. An action with no record
+    is what failing closed prevents, so the check is made again, ahead of the slots."""
+    pipeline, events, _ = build(audit=UnhealthyAudit(), fail_closed=True)
+
+    with pytest.raises(Reject) as refused:
+        await pipeline.run_before(make_ctx(), "approval")
+
+    assert refused.value.code is Code.DENIED and refused.value.message == "audit unavailable"
+    assert events == []
+
+    # A pipeline that does not fail closed does not ask.
+    open_pipeline, open_events, _ = build(audit=UnhealthyAudit(), fail_closed=False)
+    await open_pipeline.run_before(make_ctx(), "approval")
+    assert open_events != []

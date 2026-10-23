@@ -1,0 +1,8 @@
+# Two tools declare a peer range that stops short of the version this project runs them on. Both
+# work there (lint and `pnpm gen:api` run in CI), so the ranges are widened on purpose and not left
+# as a warning on every install. Revisit when either tool releases a version that names the newer
+# one: eslint-plugin-jsx-a11y for ESLint 10, openapi-typescript for TypeScript 6.
+peerDependencyRules:
+  allowedVersions:
+    eslint-plugin-jsx-a11y>eslint: "10"
+    openapi-typescript>typescript: "6"

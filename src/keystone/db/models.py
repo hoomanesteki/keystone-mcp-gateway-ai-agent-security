@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import (
     BigInteger,
@@ -13,6 +13,7 @@ from sqlalchemy import (
     Index,
     LargeBinary,
     Numeric,
+    Table,
     Text,
     UniqueConstraint,
     func,
@@ -46,6 +47,7 @@ UPSTREAM_SOURCES = ("config", "cli")
 UPSTREAM_STATUSES = ("unknown", "up", "degraded", "down", "disabled")
 TOOL_STATUSES = ("active", "quarantined", "disabled")
 RISKS = ("low", "medium", "high", "critical")
+APPROVAL_STATUSES = ("pending", "approved", "rejected", "expired", "consumed")
 
 
 def _in(column: str, values: tuple[str, ...]) -> str:
@@ -246,3 +248,52 @@ class AuditEvent(Base):
     trace_id: Mapped[str | None] = mapped_column(Text)
     prev_hash: Mapped[str] = mapped_column(Text, nullable=False)
     hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class Approval(Base):
+    """A request for a person to approve one tool call (KS-601, ADR-0010).
+
+    The row holds what the approver needs to decide (tool, arguments with secrets masked, who asked,
+    which rules asked) and what the call needs to run later: the original arguments, encrypted with
+    the vault's key, and the digest of them that the approval is bound to. `expires_at` is set from
+    the database clock and so is every comparison against it (see `approvals/service.py`). There is
+    no foreign key to `tenants`, as in the audit log: a request outlives nothing it needs.
+    """
+
+    __tablename__ = "approvals"
+    __table_args__ = (
+        CheckConstraint(_in("status", APPROVAL_STATUSES), name="ck_approvals_status"),
+        Index("ix_approvals_tenant_status", "tenant_id", "status"),
+        Index("ix_approvals_session", "tenant_id", "session_id"),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The call that asked. The audit record of that call carries the same id.
+    call_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    args_redacted: Mapped[Any] = mapped_column(JSONB(none_as_null=True))
+    args_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    args_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    reasons: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'")
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    requested_by_user: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_by_agent: Mapped[str] = mapped_column(Text, nullable=False)
+    decided_by: Mapped[str | None] = mapped_column(Text)
+    decision_note: Mapped[str | None] = mapped_column(Text)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+# The table, typed as one, for statements that must be a single UPDATE (`__table__` is a plain
+# FromClause as far as the type checker knows).
+APPROVALS = cast("Table", Approval.__table__)

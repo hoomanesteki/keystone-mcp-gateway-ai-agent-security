@@ -11,6 +11,7 @@ not found, not forbidden, so the answer does not say that it exists. The one exc
 whole log, and it says nothing of what any record holds.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated
@@ -25,9 +26,13 @@ from starlette.responses import JSONResponse, Response
 from keystone import __version__
 from keystone.admin.auth import AdminAuth, AdminRefused, admin_refused_handler
 from keystone.admin.schemas import (
+    ApprovalDetail,
+    ApprovalItem,
+    ApprovalStatus,
     ApproveChange,
     AuditPage,
     AuditRecord,
+    DecisionBody,
     Effect,
     ErrorBody,
     Outcome,
@@ -42,8 +47,17 @@ from keystone.admin.schemas import (
     VerifyResult,
 )
 from keystone.admin.tools import ToolAdmin, ToolConflict, ToolNotFound
+from keystone.approvals.service import (
+    ApprovalNotFound,
+    ApprovalRecord,
+    ApprovalService,
+    NotAnApprover,
+    NotPending,
+    OwnRequest,
+)
+from keystone.audit.redact import is_masked
 from keystone.audit.verify import export_record, verify_chain
-from keystone.core.types import Principal
+from keystone.core.types import Principal, SessionState
 from keystone.db.models import AuditEvent, Tool, Upstream
 from keystone.defense.description_check import check_description
 from keystone.gateway.sessions import SessionDirectory
@@ -58,6 +72,7 @@ DEFAULT_VERIFY = 10_000
 # A request that checks more than this takes too long to wait for; the CLI checks the whole log.
 MAX_VERIFY = 100_000
 MAX_SESSIONS = 200
+RECENT_CALLS = 10
 
 
 @dataclass(frozen=True)
@@ -69,6 +84,12 @@ class AdminDeps:
     console_origin: str
     # Where live sessions are listed from. Without one the list is empty.
     session_directory: SessionDirectory | None = None
+    # The approval service. Without one (no master keys) the approvals routes answer 503.
+    approvals: ApprovalService | None = None
+
+
+class ApprovalsUnavailable(Exception):
+    """There is no approval service: Keystone has no master keys."""
 
 
 class NotFound(Exception):
@@ -90,6 +111,20 @@ async def _conflict(_request: Request, exc: Exception) -> Response:
     return _error(409, "conflict", str(exc))
 
 
+async def _forbidden(_request: Request, exc: Exception) -> Response:
+    return _error(403, "forbidden", str(exc))
+
+
+async def _no_longer_pending(_request: Request, exc: Exception) -> Response:
+    status = exc.status if isinstance(exc, NotPending) else None
+    body = {"error": "conflict", "reason": str(exc), "status": status}
+    return JSONResponse(body, status_code=409)
+
+
+async def _unavailable(_request: Request, _exc: Exception) -> Response:
+    return _error(503, "unavailable", "approvals need KEYSTONE_MASTER_KEYS, and Keystone has none")
+
+
 def _summary(row: Tool) -> ToolSummary:
     return ToolSummary(
         name=row.name,
@@ -97,6 +132,8 @@ def _summary(row: Tool) -> ToolSummary:
         status=row.status,  # type: ignore[arg-type]
         risk=row.risk,
         tags=sorted(row.tags),
+        # Without trailing zeros (0.0 is 0), and as plain digits, so that 1E-7 reads 0.0000001.
+        cost_per_call_usd=format(row.cost_per_call_usd.normalize(), "f"),
         reason=row.quarantine_reason,
         pending=row.pending_description is not None,
         description_hash=row.description_hash,
@@ -175,6 +212,11 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
     app.add_exception_handler(NotFound, _not_found)
     app.add_exception_handler(ToolNotFound, _not_found)
     app.add_exception_handler(ToolConflict, _conflict)
+    app.add_exception_handler(ApprovalNotFound, _not_found)
+    app.add_exception_handler(NotAnApprover, _forbidden)
+    app.add_exception_handler(OwnRequest, _forbidden)
+    app.add_exception_handler(NotPending, _no_longer_pending)
+    app.add_exception_handler(ApprovalsUnavailable, _unavailable)
     # Only the console's origin may call this API from a browser. A request from anywhere else
     # gets no CORS headers, and a preflight from it is refused.
     app.add_middleware(
@@ -185,6 +227,59 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
         max_age=600,
     )
     admin = Annotated[Principal, Depends(deps.auth)]
+
+    def approval_service() -> ApprovalService:
+        if deps.approvals is None:
+            raise ApprovalsUnavailable
+        return deps.approvals
+
+    async def present(
+        records: Sequence[ApprovalRecord], principal: Principal
+    ) -> list[ApprovalItem]:
+        """The requests as the API shows them: with the tool's risk and tags, and the flags and
+        taint of the session that asked, read without keeping the session alive."""
+        tools = {
+            t.name: t for t in await ToolRepo(deps.sessions).list_by_tenant(principal.tenant_id)
+        }
+        states: dict[str, SessionState | None] = {}
+        if deps.session_directory is not None:
+            for session_id in {r.session_id for r in records}:
+                try:
+                    found = await deps.session_directory.peek(session_id)
+                except Exception:
+                    found = None
+                mine = found is not None and found.principal.tenant_id == principal.tenant_id
+                states[session_id] = found if mine else None
+        items = []
+        for r in records:
+            tool, state = tools.get(r.tool_name), states.get(r.session_id)
+            items.append(
+                ApprovalItem(
+                    id=r.id,
+                    status=r.status,
+                    tool=r.tool_name,
+                    risk=tool.risk if tool else None,
+                    tags=sorted(tool.tags) if tool else [],
+                    arguments=r.args_redacted,
+                    arguments_masked=is_masked(r.args_redacted),
+                    args_digest=r.args_digest,
+                    reasons=list(r.reasons),
+                    requested_by_user=r.requested_by_user,
+                    requested_by_agent=r.requested_by_agent,
+                    own_request=r.requested_by_user == principal.user_id,
+                    session_id=r.session_id,
+                    call_id=r.call_id,
+                    requested_at=_moment(r.requested_at) or "",
+                    expires_at=_moment(r.expires_at) or "",
+                    expires_in_s=r.expires_in_s,
+                    decided_by=r.decided_by,
+                    decision_note=r.decision_note,
+                    decided_at=_moment(r.decided_at),
+                    flags=sorted(flag.value for flag in state.flags) if state else [],
+                    tainted=state.tainted if state else False,
+                )
+            )
+        return items
 
     # -- audit
 
@@ -293,6 +388,77 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
     async def enable_tool(principal: admin, name: str) -> ToolSummary:
         row, _ = await deps.tools.enable(principal.tenant_id, name)
         return _summary(row)
+
+    # -- approvals
+
+    @app.get(
+        "/approvals",
+        tags=["approvals"],
+        summary="The tenant's approval requests in one state, pending by default",
+        responses={503: {"model": ErrorBody, "description": "Keystone has no master keys."}},
+    )
+    async def list_approvals(
+        principal: admin,
+        status: ApprovalStatus = "pending",
+        limit: Annotated[int, Query(ge=1, le=MAX_PAGE)] = 100,
+    ) -> list[ApprovalItem]:
+        """Pending requests come oldest first, the one that has waited longest on top. The other
+        states come newest first."""
+        found = await approval_service().list_for_tenant(principal.tenant_id, status, limit)
+        return await present(found, principal)
+
+    @app.get(
+        "/approvals/{approval_id}",
+        tags=["approvals"],
+        summary="One request, with the last calls of the session that asked",
+        responses={
+            404: {"model": ErrorBody, "description": "No such request in the caller's tenant."},
+            503: {"model": ErrorBody, "description": "Keystone has no master keys."},
+        },
+    )
+    async def get_approval(principal: admin, approval_id: str) -> ApprovalDetail:
+        record = await approval_service().get(principal.tenant_id, approval_id)
+        if record is None:
+            raise NotFound(f"there is no approval request {approval_id!r}")
+        [item] = await present([record], principal)
+        table = AuditEvent.__table__
+        recent = (
+            select(table)
+            .where(
+                table.c.tenant_id == principal.tenant_id, table.c.session_id == record.session_id
+            )
+            .order_by(table.c.seq.desc())
+            .limit(RECENT_CALLS)
+        )
+        async with deps.sessions() as session:
+            rows = [dict(row) for row in (await session.execute(recent)).mappings()]
+        return ApprovalDetail(
+            **item.model_dump(), recent_calls=[AuditRecord(**export_record(row)) for row in rows]
+        )
+
+    @app.post(
+        "/approvals/{approval_id}/decision",
+        tags=["approvals"],
+        summary="Approve or reject a pending request",
+        responses={
+            403: {
+                "model": ErrorBody,
+                "description": "Not an approver, or the caller's own request.",
+            },
+            404: {"model": ErrorBody, "description": "No such request in the caller's tenant."},
+            409: {"model": ErrorBody, "description": "The request is no longer pending."},
+            503: {"model": ErrorBody, "description": "Keystone has no master keys."},
+        },
+    )
+    async def decide_approval(
+        principal: admin, approval_id: str, body: DecisionBody
+    ) -> ApprovalItem:
+        """One statement decides it: the request must be pending, unexpired, of the caller's
+        tenant and not the caller's own. A second decision, or one after the time ran out, is a 409
+        that names what the request is now."""
+        record = await approval_service().decide(approval_id, principal, body.approve, body.note)
+        [item] = await present([record], principal)
+        return item
 
     # -- upstreams, sessions, policies
 

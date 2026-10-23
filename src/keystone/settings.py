@@ -101,6 +101,56 @@ class AuditSettings(BaseModel):
     redact_keys: list[str] = Field(default_factory=list)
 
 
+class ApprovalSettings(BaseModel):
+    """How a call that needs a person's approval is held (KS-601, ADR-0010)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # How long a call that needs approval is held in line before the agent gets KS_APPROVAL_PENDING
+    # and an id to wait on with keystone__await_approval. Most requests in a staffed queue are
+    # decided in under a minute, so the agent sees a slow call. 0 never holds a call. An HTTP
+    # request that waits much longer than a few minutes meets timeouts nobody here controls.
+    wait_seconds: float = Field(default=60.0, ge=0, le=300)
+    # How long a request can be decided and used, counted from the request.
+    ttl_seconds: float = Field(default=900.0, gt=0, le=7 * 24 * 3600)
+    # Seconds between marking requests that ran out of time as expired. Nothing depends on it for
+    # safety (a decision or a use of an expired request is refused either way); it keeps the
+    # queue, the pending gauge and the waiting calls current.
+    sweep_interval_s: float = Field(default=30.0, gt=0)
+    # Seconds between looks at a request that a waiter is waiting for, when no message from Redis
+    # woke it first.
+    poll_interval_s: float = Field(default=2.0, gt=0)
+    # Where a new request is announced (KS-604): a JSON body signed with the secret in
+    # KEYSTONE_APPROVALS_WEBHOOK_SECRET, which is never read from this file, and a plain message to
+    # a Slack incoming webhook. Neither delays the call. The Slack address is a secret in itself, so
+    # it is better set from the environment (KEYSTONE_APPROVALS__SLACK_WEBHOOK_URL).
+    webhook_url: str | None = None
+    slack_webhook_url: SecretStr | None = None
+    # Seconds before each retry of a delivery that failed; the number of values is the number of
+    # retries. Three, 1 s then 2 s then 4 s, unless a test wants them quick.
+    webhook_backoff_s: list[float] = Field(default_factory=lambda: [1.0, 2.0, 4.0])
+
+    @field_validator("webhook_url", "slack_webhook_url", mode="before")
+    @classmethod
+    def _an_http_url(cls, value: object) -> object:
+        """Checked before the value can be a SecretStr, and without echoing it: the address of a
+        Slack webhook is a secret."""
+        if value in (None, ""):
+            return None
+        text = value.get_secret_value() if isinstance(value, SecretStr) else str(value)
+        parts = urlsplit(text)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError("a webhook address must be an http or https URL")
+        return value
+
+    @field_validator("webhook_backoff_s")
+    @classmethod
+    def _delays(cls, value: list[float]) -> list[float]:
+        if len(value) > 10 or any(delay < 0 or delay > 300 for delay in value):
+            raise ValueError("webhook_backoff_s takes at most 10 delays of 0 to 300 seconds")
+        return value
+
+
 class HealthSettings(BaseModel):
     """How the gateway watches its upstreams (KS-209)."""
 
@@ -141,6 +191,10 @@ class Settings(BaseSettings):
         extra="ignore",
         validate_by_name=True,
         validate_by_alias=True,
+        # A value that fails a check is not printed in the error. The setting may be a secret that
+        # was put where it does not belong (a webhook secret in the YAML), or an address that is
+        # one (Slack's), and a refusal should not be what publishes it.
+        hide_input_in_errors=True,
     )
 
     env: Literal["dev", "test", "prod"] = "dev"
@@ -160,6 +214,7 @@ class Settings(BaseSettings):
     registry: RegistrySettings = Field(default_factory=RegistrySettings)
     health: HealthSettings = Field(default_factory=HealthSettings)
     audit: AuditSettings = Field(default_factory=AuditSettings)
+    approvals: ApprovalSettings = Field(default_factory=ApprovalSettings)
     policy: PolicySettings = Field(default_factory=PolicySettings)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
     auth: AuthSettings = Field(default_factory=AuthSettings)

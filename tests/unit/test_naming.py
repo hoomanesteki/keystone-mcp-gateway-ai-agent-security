@@ -1,6 +1,11 @@
 import pytest
 
-from keystone.registry.naming import make_tool_name, split_tool_name
+from keystone.registry.naming import (
+    check_upstream_id,
+    is_reserved,
+    make_tool_name,
+    split_tool_name,
+)
 
 
 @pytest.mark.phase(1)
@@ -61,3 +66,19 @@ def test_upstream_id_rejects_invalid(upstream: str) -> None:
 def test_split_rejects_names_without_both_parts(name: str) -> None:
     with pytest.raises(ValueError, match="tool name"):
         split_tool_name(name)
+
+
+@pytest.mark.phase(6)
+def test_the_upstream_id_keystone_is_reserved_for_keystones_own_tools() -> None:
+    assert is_reserved("keystone")
+    for refused in (
+        lambda: check_upstream_id("keystone"),
+        lambda: make_tool_name("keystone", "await_approval"),
+        lambda: split_tool_name("keystone__whoami"),
+    ):
+        with pytest.raises(ValueError, match="reserved"):
+            refused()
+    # Only that id: the others that look like it are ordinary.
+    for fine in ("keystone2", "keystone_x", "mykeystone", "keys"):
+        assert not is_reserved(fine)
+        check_upstream_id(fine)

@@ -72,3 +72,54 @@ def test_the_case_example_in_the_doc_is_a_case(tmp_path: Path) -> None:
 
     assert loaded.case.name == "support cannot transfer"
     assert loaded.case.expect.value == "deny"
+
+
+def github_anchors(text: str) -> set[str]:
+    """The anchors GitHub makes of the headings of a page (lowercase, spaces to hyphens, other
+    punctuation dropped), and the ids of explicit `<a id>` tags. Fenced code is not headings."""
+    found = set(re.findall(r'<a (?:id|name)="([^"]+)"', text))
+    in_fence = False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            in_fence = not in_fence
+        heading = None if in_fence else re.match(r"#{1,6}\s+(.*?)\s*#*$", line)
+        if heading:
+            plain = heading.group(1).replace("`", "").lower()
+            found.add(re.sub(r"[^\w\- ]", "", plain).replace(" ", "-"))
+    return found
+
+
+def shipped_ids() -> set[str]:
+    return {
+        found
+        for path in (ROOT / "policies").rglob("*.cedar")
+        for found in re.findall(r'@id\("([^"]+)"\)', path.read_text())
+    }
+
+
+@pytest.mark.phase(6)
+def test_every_shipped_policy_id_has_an_anchor_in_the_docs() -> None:
+    """The console links a reason to `docs/policies.md#<id>`."""
+    ids = shipped_ids()
+
+    assert {"same-tenant-low-medium", "approve-transfer-over-500"} <= ids
+    assert ids - github_anchors(DOC) == set()
+
+
+@pytest.mark.phase(6)
+def test_the_reasons_keystone_writes_itself_have_anchors_too() -> None:
+    reasons = {"default-deny", "policy-error", "no-decision", "virtual-tool"}
+
+    assert reasons - github_anchors(DOC) == set()
+
+
+@pytest.mark.phase(6)
+def test_the_console_links_to_a_page_that_exists() -> None:
+    config = (ROOT / "console" / "src" / "config.ts").read_text()
+    link = re.search(
+        r'"https://github\.com/hoomanesteki/keystone-mcp-gateway-ai-agent-security/blob/main/([^"#]+)"',
+        config,
+    )
+
+    assert link is not None
+    assert (ROOT / link.group(1)).is_file()

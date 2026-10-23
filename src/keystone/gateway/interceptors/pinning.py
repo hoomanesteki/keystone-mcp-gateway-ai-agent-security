@@ -6,6 +6,7 @@ from typing import Protocol
 
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, ToolStatus
+from keystone.registry.naming import is_virtual
 from keystone.registry.pinning import reason_category
 from keystone.registry.repo import ToolState
 
@@ -29,6 +30,8 @@ class PinningInterceptor:
         self._states = states
 
     async def before_call(self, ctx: CallContext) -> None:
+        if is_virtual(ctx.tool):
+            return  # Keystone's own tools have no registry row to pin
         status, reason = ctx.tool.status, None
         if self._states is not None:
             state = await self._states.tool_state(ctx.tool.tenant_id, ctx.tool.name)

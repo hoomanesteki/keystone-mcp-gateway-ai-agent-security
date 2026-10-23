@@ -2,7 +2,8 @@ name: Nightly
 
 # The end-to-end tests need the whole compose stack (Keycloak, the demo upstreams, Keystone), so
 # they run here and at every phase gate instead of on each push. Run it by hand from the Actions
-# tab, or locally with `make up && make test-e2e`.
+# tab, or locally with `make up && make test-e2e && make console-e2e`. The last one drives the
+# console in a browser (Playwright, chromium).
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -34,10 +35,24 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: console/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: console/.nvmrc
+          cache: pnpm
+          cache-dependency-path: console/pnpm-lock.yaml
+      - name: console dependencies and browser
+        run: |
+          pnpm --dir console install --frozen-lockfile
+          pnpm --dir console exec playwright install --with-deps chromium
       - name: start the stack
         run: make up
       - name: end-to-end tests
         run: make test-e2e
+      - name: console end-to-end test
+        run: make console-e2e
       - name: container logs
         if: failure()
         run: docker compose -f deploy/docker-compose.yml logs --no-color --tail=200

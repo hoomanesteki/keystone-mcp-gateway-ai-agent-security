@@ -16,8 +16,12 @@ to an exact tag, never `latest`. At project start I took the latest stable relea
 upgrade is its own `chore/` story that updates this file and the lock together.
 
 A new dependency needs a line in the commit body and a row here. `tests/unit/test_adr_pins.py`
-fails when a direct dependency, a compose image or a Dockerfile base image is missing from this
-file or listed with a different version.
+fails when a direct dependency, a compose image, a Dockerfile base image, a console package or a
+workflow action is missing from this file or listed with a different version.
+
+The console (Phase 6) follows the same rule with `pnpm-lock.yaml` and exact versions in
+`console/package.json`, taken on 2026-10-23. Two of its pins are not the newest release, and one
+is newer than the plan: see "Console: where a pin differs" below.
 
 ## Container images
 
@@ -41,6 +45,8 @@ file or listed with a different version.
 | actions/checkout | v7 | |
 | astral-sh/setup-uv | v10.3.1 | no moving major tag is published |
 | gitleaks | 8.30.1 | downloaded in the security job and checked against its SHA-256 |
+| actions/setup-node | v7 | the console and nightly jobs; Node's version is read from `console/.nvmrc` |
+| pnpm/action-setup | v6 | the console and nightly jobs; pnpm's version is read from `console/package.json` |
 | ubuntu runner | ubuntu-24.04 | pinned so the toolchain does not move with the `latest` label |
 
 ## Python packages: direct runtime dependencies
@@ -82,6 +88,68 @@ file or listed with a different version.
 | ruff | 0.17.1 | lint and format |
 | types-jsonschema | 4.26.0.20261006 | type stubs for jsonschema |
 | types-pyyaml | 6.0.12.20260906 | type stubs for PyYAML |
+
+## Console toolchain
+
+| Item | Version | Notes |
+|---|---|---|
+| Node.js | 26 | the major, in `console/.nvmrc`; CI reads the file (`actions/setup-node`), and 26.12.0 is what I ran locally |
+| pnpm | 12.14.0 | `packageManager` in `console/package.json`, which `pnpm/action-setup` reads |
+| Chromium | the build of Playwright 1.64.1 | `pnpm exec playwright install chromium`; the e2e test runs nothing else |
+
+## Console packages: runtime dependencies
+
+| Package | Version | Used for |
+|---|---|---|
+| react | 19.3.1 | the UI; the plan names 18, see below |
+| react-dom | 19.3.1 | rendering |
+| react-router | 8.5.0 | routes and the nav (the single package; `react-router-dom` is no longer needed) |
+| @tanstack/react-query | 5.104.5 | server state: polling, caching, optimistic updates |
+| oidc-client-ts | 3.5.0 | sign-in with Keycloak (authorization code with PKCE, silent renew) |
+
+## Console packages: development dependencies
+
+| Package | Version | Used for |
+|---|---|---|
+| vite | 8.3.5 | dev server (with the `/admin` proxy) and the production build |
+| @vitejs/plugin-react | 6.1.2 | the React transform for Vite |
+| typescript | 6.0.3 | strict type checking; see below for why it is not 7 |
+| tailwindcss | 4.3.3 | styling, with the theme in `src/index.css` |
+| @tailwindcss/vite | 4.3.3 | Tailwind's Vite plugin |
+| vitest | 5.0.5 | unit tests |
+| jsdom | 30.1.3 | the DOM the unit tests run in |
+| @testing-library/react | 16.3.3 | rendering components in tests |
+| @testing-library/dom | 10.4.2 | queries; a peer of the React package |
+| @testing-library/user-event | 14.6.8 | clicks and typing as a person does them |
+| @testing-library/jest-dom | 7.0.1 | matchers such as `toBeVisible` |
+| @playwright/test | 1.64.1 | the browser test of the approval loop (KS-609) |
+| @axe-core/playwright | 4.14.0 | the accessibility check inside the browser test: WCAG 2.1 A and AA and best practices, in both themes |
+| openapi-typescript | 7.13.0 | `src/api/schema.d.ts` from the API's OpenAPI document |
+| eslint | 10.13.0 | lint |
+| @eslint/js | 10.0.1 | ESLint's recommended rules |
+| typescript-eslint | 8.72.0 | TypeScript rules, with type information |
+| eslint-plugin-react-hooks | 7.1.1 | the rules of hooks |
+| eslint-plugin-react-refresh | 0.5.7 | components that hot reload |
+| eslint-plugin-jsx-a11y | 6.10.2 | accessibility rules for JSX |
+| globals | 17.13.0 | the browser and Node globals ESLint needs |
+| prettier | 3.9.10 | formatting |
+| @types/react | 19.3.0 | types |
+| @types/react-dom | 19.3.0 | types |
+| @types/node | 26.6.5 | types for the Vite and Playwright config files |
+
+### Console: where a pin differs
+
+- **React is 19, the plan says 18.** 19.3.1 is the current release, and React Router 8 needs
+  19.2.7 or newer. Nothing in the console depends on a React 18 behaviour.
+- **TypeScript is 6.0.3, not 7.0.2.** 7.0 is the native compiler and its `typescript` package no
+  longer exposes the compiler API that two tools in the chain call: `require("typescript")` has
+  only a version, `openapi-typescript` 7.13.0 stops with an error on it (I ran it), and
+  `typescript-eslint` 8.72.0 accepts TypeScript below 6.1.0. 6.0.3 is the last release of the line
+  they use. Moving to 7 waits for a release of both that names it.
+- **Two peer ranges are widened on purpose** in `console/pnpm-workspace.yaml`:
+  `eslint-plugin-jsx-a11y` 6.10.2 names ESLint up to 9 and runs on 10, and `openapi-typescript`
+  names TypeScript `^5.x` and runs on 6. Lint and `pnpm gen:api` run in CI, so a break shows there.
+- **Versions are exact** (no `^`), so `console/package.json` and this table cannot disagree.
 
 ## Python packages: transitive (from `uv.lock`)
 

@@ -23,6 +23,7 @@ from keystone.app import create_app
 from keystone.registry.config import ToolOverride, UpstreamConfig
 from keystone.settings import (
     AgentConfig,
+    ApprovalSettings,
     HealthSettings,
     PolicySettings,
     RegistrySettings,
@@ -32,6 +33,7 @@ from keystone.settings import (
 
 # Re-exported so tests/conftest.py can name one module: tests/unit/test_phase_plugin.py copies the
 # conftest and strips its single `pytest_plugins` line, so that line must stay on one line.
+from tests.fixtures.approvals import approval_service, approver  # noqa: F401
 from tests.fixtures.audit import AuditView
 from tests.fixtures.fake_idp import FakeIdp, fake_idp  # noqa: F401
 from tests.fixtures.policies import POLICY_ROOT, ROOT
@@ -49,6 +51,9 @@ from tests.fixtures.upstreams import (  # noqa: F401
 )
 
 AGENTS = {"support-agent": AgentConfig(trust="standard"), "ops-agent": AgentConfig(trust="high")}
+# A call that needs approval is held for a second in the test apps, not a minute, and the polls and
+# the sweeper are quick. A test that wants to wait longer sets `approvals` in its own settings.
+TEST_APPROVALS = ApprovalSettings(wait_seconds=1.0, poll_interval_s=0.2, sweep_interval_s=1.0)
 # The vault key of every test app. Made when the test run starts and never written anywhere.
 TEST_MASTER_KEY = Fernet.generate_key().decode()
 
@@ -181,6 +186,7 @@ def keystone_app_factory(
             "upstreams": upstreams,
             # The repository's own policies, wherever the tests are run from.
             "policy": PolicySettings(root=POLICY_ROOT, include_demo=True),
+            "approvals": TEST_APPROVALS,
             **auth_options(fake_idp),
         }
         options.update(settings or {})
@@ -230,6 +236,7 @@ def start_keystone(
             registry=registry or RegistrySettings(sync_interval_s=0),
             health=health or HealthSettings(interval_s=0),
             policy=PolicySettings(root=POLICY_ROOT, include_demo=True),
+            approvals=TEST_APPROVALS,
             **auth_options(fake_idp),
         )
         app = create_app(settings, **app_options)
@@ -247,6 +254,18 @@ class Endpoint(Protocol):
     def url(self) -> str: ...
 
 
+PATIENCE_S = 15.0
+
+
+def hold_time(app: object) -> float:
+    """The longest the app under test holds a call that needs approval, so that the client does
+    not give up before it does: an HTTP read timeout shorter than the hold ends the connection,
+    not the request. Zero for anything that is not a Keystone app."""
+    settings = getattr(getattr(getattr(app, "app", None), "state", None), "settings", None)
+    approvals = getattr(settings, "approvals", None)
+    return float(approvals.wait_seconds) if approvals is not None else 0.0
+
+
 McpConnect = Callable[..., AbstractAsyncContextManager[Client]]
 
 
@@ -257,6 +276,8 @@ def mcp_client(fake_idp: FakeIdp) -> McpConnect:  # noqa: F811
     `user` and `agent` choose another demo user (a test that calls a high-risk tool uses
     `user="olivia"`, an operator). `token` sends that exact token instead, and `token=""` sends
     none. `headers` are sent on every request besides the token (a `traceparent`, for example).
+    `patience` is how many seconds the client waits for an answer: 15 more than the longest the
+    app holds a call for approval, unless a test says otherwise (an await can wait up to 120).
     Other keyword arguments go to the MCP client.
     """
 
@@ -268,12 +289,14 @@ def mcp_client(fake_idp: FakeIdp) -> McpConnect:  # noqa: F811
         user: str = "alice",
         agent: str | None = None,
         headers: Mapping[str, str] | None = None,
+        patience: float | None = None,
         **client_options: Any,
     ) -> AsyncIterator[Client]:
         bearer = fake_idp.token_for(user, agent) if token is None else token
         sent = {"Authorization": f"Bearer {bearer}"} if bearer else {}
         sent.update(headers or {})
-        async with httpx2.AsyncClient(headers=sent, timeout=httpx2.Timeout(15)) as http:
+        wait = PATIENCE_S + hold_time(app) if patience is None else patience
+        async with httpx2.AsyncClient(headers=sent, timeout=httpx2.Timeout(wait)) as http:
             transport = streamable_http_client(app.url, http_client=http)
             async with Client(transport, **client_options) as client:
                 yield client

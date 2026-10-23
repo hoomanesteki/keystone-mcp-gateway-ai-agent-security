@@ -6,12 +6,15 @@ import anyio
 import structlog
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
+from pydantic import SecretStr
 from redis.asyncio import Redis
 
 from keystone import __version__
 from keystone.admin.api import PREFIX, AdminDeps, create_admin_app
 from keystone.admin.auth import AdminAuth
 from keystone.admin.tools import ToolAdmin
+from keystone.approvals.notifier import WEBHOOK_SECRET_ENV, ApprovalConfigError, ApprovalNotifier
+from keystone.approvals.service import ApprovalService
 from keystone.audit.redact import RedactionConfig
 from keystone.audit.sink import PostgresAuditSink
 from keystone.db.session import create_engine, make_sessionmaker
@@ -29,12 +32,13 @@ from keystone.gateway.sessions import (
     SessionStore,
 )
 from keystone.gateway.upstreams import UpstreamDirectory, UpstreamPool, directory_client_factory
+from keystone.gateway.virtual_tools import VirtualTools
 from keystone.gateway.wiring import PipelineDeps, build_pipeline
 from keystone.health import check_dependencies, upstream_statuses
 from keystone.identity.credential_repo import vault_from_settings
 from keystone.identity.metadata import add_metadata_route
 from keystone.identity.middleware import Authenticator
-from keystone.identity.vault import VaultError
+from keystone.identity.vault import Vault, VaultError
 from keystone.policy.engine import CedarPolicyEngine, ObservedEngine
 from keystone.policy.schema_info import args_fields
 from keystone.policy.store import PolicyStore, reload_on_sighup
@@ -55,6 +59,30 @@ from keystone.telemetry.tracing import Tracer, build_tracer
 log = structlog.get_logger()
 
 TRACER_SHUTDOWN_S = 10.0
+
+
+def approval_notifier(
+    settings: Settings, environ: Mapping[str, str], vault: Vault | None
+) -> ApprovalNotifier | None:
+    """The webhook and the Slack message for new approval requests, if either is configured. The
+    signing secret is read from the environment and from nowhere else. A webhook that cannot be
+    signed, or that has no approvals to announce, stops startup with a message that says why."""
+    config = settings.approvals
+    if not (config.webhook_url or config.slack_webhook_url):
+        return None
+    if vault is None:
+        raise ApprovalConfigError(
+            "approvals.webhook_url or approvals.slack_webhook_url is set, but approvals need "
+            "KEYSTONE_MASTER_KEYS"
+        )
+    secret = environ.get(WEBHOOK_SECRET_ENV)
+    return ApprovalNotifier(
+        console_origin=settings.console_origin,
+        webhook_url=config.webhook_url,
+        webhook_secret=SecretStr(secret) if secret else None,
+        slack_url=config.slack_webhook_url,
+        backoff_s=config.webhook_backoff_s,
+    )
 
 
 def create_app(
@@ -130,7 +158,34 @@ def create_app(
     audit = audit or PostgresAuditSink(
         sessions, metrics=metrics, redaction=RedactionConfig.of(settings.audit.redact_keys)
     )
-    dispatcher: Dispatcher = UpstreamDispatcher(pool, health)
+    # An empty KEYSTONE_REDIS_URL keeps session state in this process, for a single-process setup.
+    redis = (
+        Redis.from_url(settings.redis_url.get_secret_value(), decode_responses=True)
+        if settings.redis_url.get_secret_value()
+        else None
+    )
+    # An approval keeps the call's arguments encrypted with the vault's keys, so without
+    # KEYSTONE_MASTER_KEYS there are no approvals: the approval slot stays the stub that refuses.
+    notifier = approval_notifier(settings, os.environ if environ is None else environ, vault)
+    approvals = (
+        ApprovalService(
+            sessions,
+            vault.cipher,
+            redis=redis,
+            ttl_s=settings.approvals.ttl_seconds,
+            poll_interval_s=settings.approvals.poll_interval_s,
+            sweep_interval_s=settings.approvals.sweep_interval_s,
+            redaction=RedactionConfig.of(settings.audit.redact_keys),
+            metrics=metrics,
+            on_request=notifier.notify if notifier is not None else None,
+        )
+        if vault is not None
+        else None
+    )
+    # keystone__await_approval and keystone__whoami: served by the dispatcher, listed by the
+    # gateway. The pipeline they run calls through is bound below, once it is built.
+    virtual = VirtualTools(approvals, registry)
+    dispatcher: Dispatcher = UpstreamDispatcher(pool, health, virtual=virtual)
     if wrap_dispatcher is not None:
         dispatcher = wrap_dispatcher(dispatcher)
     policy_engine = ObservedEngine(CedarPolicyEngine(policies), metrics.policy_evaluated)
@@ -144,15 +199,11 @@ def create_app(
             tool_states=registry,
             vault=vault,
             policy=policy_engine,
+            approvals=approvals,
         ),
         interceptors,
     )
-    # An empty KEYSTONE_REDIS_URL keeps session state in this process, for a single-process setup.
-    redis = (
-        Redis.from_url(settings.redis_url.get_secret_value(), decode_responses=True)
-        if settings.redis_url.get_secret_value()
-        else None
-    )
+    virtual.bind(pipeline)
     session_store: SessionStore = (
         RedisSessionStore(redis, SessionRepo(sessions)) if redis else InMemorySessionStore()
     )
@@ -161,7 +212,7 @@ def create_app(
         RedisListCache(redis) if redis else MemoryListCache(),
         ttl_s=settings.policy.list_cache_ttl_s,
     )
-    gateway = Gateway(settings, registry, session_store, pipeline, tool_filter)
+    gateway = Gateway(settings, registry, session_store, pipeline, tool_filter, virtual)
     registry.add_listener(gateway.notify_tools_changed)
 
     @asynccontextmanager
@@ -197,7 +248,7 @@ def create_app(
                 for report in await registry.sync_all():
                     log.info("startup_sync", **report.model_dump())
                 await stack.enter_async_context(
-                    background_tasks(registry, health, settings, policies)
+                    background_tasks(registry, health, settings, policies, approvals, notifier)
                 )
                 await stack.enter_async_context(manager.run())
                 yield
@@ -231,6 +282,7 @@ def create_app(
     app.state.authenticator = authenticator
     app.state.vault = vault
     app.state.policies = policies
+    app.state.approvals = approvals
     # The admin API is an app of its own under a prefix: its own schema, errors and CORS rule.
     admin_api = create_admin_app(
         AdminDeps(
@@ -242,6 +294,7 @@ def create_app(
             session_directory=session_store
             if isinstance(session_store, SessionDirectory)
             else None,
+            approvals=approvals,
         )
     )
     app.mount(PREFIX, admin_api)
@@ -286,14 +339,24 @@ def create_app(
 
 @asynccontextmanager
 async def background_tasks(
-    registry: RegistryService, health: UpstreamHealth, settings: Settings, policies: PolicyStore
+    registry: RegistryService,
+    health: UpstreamHealth,
+    settings: Settings,
+    policies: PolicyStore,
+    approvals: ApprovalService | None = None,
+    notifier: ApprovalNotifier | None = None,
 ) -> AsyncIterator[None]:
     """Run the periodic sync (unless its interval is 0), the watch for changes made by other
-    processes, the health probes (unless their interval is 0) and the policy reload on SIGHUP
-    while the body of the `with` runs."""
+    processes, the health probes (unless their interval is 0), the policy reload on SIGHUP, the
+    sweep of expired approvals and the delivery of their webhooks while the body of the `with`
+    runs."""
     async with anyio.create_task_group() as group:
         group.start_soon(registry.run_watch)
         group.start_soon(reload_on_sighup, policies)
+        if approvals is not None:
+            group.start_soon(approvals.run_sweeper)
+        if notifier is not None:
+            group.start_soon(notifier.run)
         if settings.registry.sync_interval_s > 0:
             group.start_soon(registry.run_periodic, settings.registry.sync_interval_s)
         if settings.health.interval_s > 0:

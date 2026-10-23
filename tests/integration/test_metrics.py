@@ -2,6 +2,7 @@
 
 from typing import Any
 
+import anyio
 import httpx2
 import pytest
 from prometheus_client.parser import text_string_to_metric_families
@@ -43,9 +44,12 @@ async def test_metrics_endpoint_exposes_counters(
         "keystone_policy_eval_seconds_count",
         "keystone_audit_queue_depth",
     } <= names
-    # The metrics of later phases are declared and have no samples yet.
+    # The metrics of Phases 7 and 8 are declared and have no samples yet. The pending approvals
+    # gauge is set from the table (KS-604): 0 for the tenant of the config.
     assert "# TYPE keystone_approvals_pending gauge" in response.text
-    assert not any(name.startswith("keystone_approvals_pending") for name in names)
+    assert not any(name.startswith("keystone_rate_limited") for name in names)
+    assert not any(name.startswith("keystone_llm_tokens") for name in names)
+    assert not any(name.startswith("keystone_sessions_tainted") for name in names)
 
 
 async def test_call_increments_counter_with_labels(
@@ -105,3 +109,18 @@ async def test_the_quarantined_tools_gauge_follows_the_registry(
 
     assert value(found, "keystone_quarantined_tools", tenant="acme") == 0
     assert ("keystone_quarantined_tools", (("tenant", "acme"),)) in found
+
+
+@pytest.mark.phase(6)
+async def test_the_pending_approvals_gauge_starts_at_zero_for_the_tenant(
+    keystone_app: KeystoneApp,
+) -> None:
+    # The sweeper sets it as it starts, a moment after the app does.
+    with anyio.fail_after(10):
+        while True:
+            _, found = scrape(keystone_app)
+            if ("keystone_approvals_pending", (("tenant", "acme"),)) in found:
+                break
+            await anyio.sleep(0.1)
+
+    assert value(found, "keystone_approvals_pending", tenant="acme") == 0

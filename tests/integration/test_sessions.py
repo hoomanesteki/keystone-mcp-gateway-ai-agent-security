@@ -253,3 +253,22 @@ async def test_a_call_is_refused_and_audited_when_the_session_state_cannot_be_re
         "KS_DENIED",
         False,
     )
+
+
+@pytest.mark.phase(6)
+async def test_peek_does_not_keep_a_session_alive(redis: Redis, sessionmaker: Sessions) -> None:
+    store = await store_with_rows(redis, sessionmaker, ttl_s=10)
+    await store.create("s-1", OLIVIA)
+    await anyio.sleep(1.2)
+
+    peeked = await store.peek("s-1")
+    after_peek = await redis.pttl(session_key("s-1"))
+    await store.get("s-1")
+    after_get = await redis.pttl(session_key("s-1"))
+
+    assert peeked is not None and peeked.principal == OLIVIA
+    assert after_peek < 9_000  # the clock kept running
+    assert after_get > 9_500  # a call restarts it, a look does not
+    assert await store.peek("missing") is None
+    await redis.set(session_key("broken"), "not json")
+    assert await store.peek("broken") is None

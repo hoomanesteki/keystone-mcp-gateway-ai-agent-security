@@ -75,6 +75,10 @@ class _Known:
         self._seen: set[str] = set()
         self._fallback = fallback
 
+    def values(self) -> frozenset[str]:
+        """The values the label can take now: the known ones, or the ones seen so far."""
+        return self._known if self._known is not None else frozenset(self._seen)
+
     def __call__(self, value: str) -> str:
         if self._known is not None:
             return value if value in self._known else self._fallback
@@ -145,10 +149,12 @@ class Metrics:
             ["reason"],
         )
 
-        # Declared for later phases. Nothing sets these yet.
+        # Set by the approval service from the table (KS-604), on every request, decision and
+        # sweep.
         self.approvals_pending = self._gauge(
-            "keystone_approvals_pending", "Approvals waiting for a decision (Phase 6)", ["tenant"]
+            "keystone_approvals_pending", "Approvals waiting for a decision", ["tenant"]
         )
+        # Declared for later phases. Nothing sets these yet.
         self.sessions_tainted = self._counter(
             "keystone_sessions_tainted", "Sessions marked tainted (Phase 7)", ["tenant"]
         )
@@ -219,6 +225,19 @@ class Metrics:
 
     def policy_evaluated(self, seconds: float) -> None:
         self.policy_eval_seconds.observe(seconds)
+
+    def approvals_changed(self, pending: Mapping[str, int]) -> None:
+        """The requests waiting for a decision, by tenant, as counted in the table. A tenant that
+        is known and not in `pending` has none, so its gauge goes down to 0 when the last request
+        is decided and is not left at its old value."""
+        counts: dict[str, int] = {}
+        for tenant, count in pending.items():
+            label = self._tenant(tenant)
+            counts[label] = counts.get(label, 0) + count
+        for tenant in self._tenant.values():
+            counts.setdefault(tenant, 0)
+        for tenant, count in counts.items():
+            self.approvals_pending.labels(tenant=tenant).set(count)
 
     def tools_loaded(self, tenant: str, tools: Mapping[str, ToolRef]) -> None:
         """The registry loaded a tenant's tools: count the ones held for review."""

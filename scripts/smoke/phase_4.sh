@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Phase 4 smoke, against the compose stack (make up):
-#   1. Alice (support) asks for a transfer: KS_DENIED, reason default-deny. Her tool list has 13
-#      tools; the two high-risk ones are hidden from her.
+#   1. Alice (support) asks for a transfer: KS_DENIED, reason default-deny. Her tool list has 15
+#      tools: 13 of acme's (the two high-risk ones are hidden from her) and the 2 that Keystone
+#      offers every caller.
 #   2. Olivia (an operator) transfers 900: the audit shows require_approval with the reason
-#      approve-transfer-over-500. The approval stub then refuses it, because approvals arrive in
-#      Phase 6, and nothing moves.
+#      approve-transfer-over-500. Since Phase 6 the call is held for a person, where the approval
+#      stub used to refuse it at once. The call is made in the background, lena finds the request
+#      through the admin API and rejects it, olivia is told KS_APPROVAL_REJECTED, and nothing moves.
 #   3. Olivia transfers 100: it is dispatched.
 #   4. A policy file is broken on the host and reloaded as root: 422, and the version in force does
 #      not change. The file is put back and a reload succeeds with the same version.
@@ -43,6 +45,8 @@ probe_as() {
 # audit_entry CALL_ID prints the record of a call as `effect reasons` (scripts/smoke/audit_lib.sh).
 # shellcheck source=scripts/smoke/audit_lib.sh
 . scripts/smoke/audit_lib.sh
+# shellcheck source=scripts/smoke/approvals_lib.sh
+. scripts/smoke/approvals_lib.sh
 
 call_id_of() { sed -n 's/.* call_id=\([0-9A-Z]\{26\}\).*/\1/p' <<<"$1" | head -1; }
 
@@ -75,17 +79,35 @@ echo "audit: $entry"
 [ "$entry" = "deny default-deny" ] || fail "the audit shows '$entry', not 'deny default-deny'"
 alice_tools=$(probe_as alice support-agent list)
 echo "$alice_tools" | sed -n '1p'
-grep -qx 'tools: 13' <<<"$alice_tools" || fail "alice should see 13 tools"
+grep -qx 'tools: 15' <<<"$alice_tools" || fail "alice should see 15 tools"
 grep -qxE 'bank__transfer|mail__send_email' <<<"$alice_tools" && fail "alice sees a high-risk tool"
 
-step "2. olivia transfers 900 and the audit asks for approval"
-asked=$(probe_as olivia ops-agent call bank__transfer "$BIG")
+step "2. olivia transfers 900, the policy asks for approval and lena rejects it"
+# The call is held for a person, so it is made in the background. The requests that are waiting
+# already (from an earlier run) are not this one.
+waiting=$(approvals_pending_ids)
+held=$(mktemp)
+probe_as olivia ops-agent call bank__transfer "$BIG" >"$held" 2>&1 &
+holding=$!
+request=$(approvals_find 900 "$waiting") || { fail "no request for approval appeared"; request=""; }
+if [ -n "$request" ]; then
+  detail=$(approvals_api GET "/approvals/${request}")
+  echo "request ${request}: reasons $(json_field "$detail" reasons)"
+  [ "$(json_field "$detail" reasons)" = "['approve-transfer-over-500']" ] \
+    || fail "the request does not name approve-transfer-over-500"
+  decided=$(approvals_decide "$request" false "smoke: the policy asks for a person to look")
+  echo "lena rejects: $(status_of "$decided")"
+  [ "$(status_of "$decided")" = 200 ] || fail "the rejection answered $(status_of "$decided")"
+fi
+wait "$holding"
+asked=$(cat "$held")
+rm -f "$held"
 echo "$asked"
 entry=$(audit_entry "$(call_id_of "$asked")")
 echo "audit: $entry"
 [ "$entry" = "require_approval approve-transfer-over-500" ] \
   || fail "the audit shows '$entry', not 'require_approval approve-transfer-over-500'"
-grep -q 'code=KS_DENIED' <<<"$asked" || fail "the approval stub did not refuse the transfer"
+grep -q 'code=KS_APPROVAL_REJECTED' <<<"$asked" || fail "the held transfer was not answered KS_APPROVAL_REJECTED"
 
 step "3. olivia transfers 100"
 sent=$(probe_as olivia ops-agent call bank__transfer "$SMALL")

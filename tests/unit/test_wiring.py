@@ -2,6 +2,7 @@ import pytest
 
 from keystone.audit.sink import InMemoryAuditSink
 from keystone.core.types import CallContext, Effect, ToolResult
+from keystone.gateway.interceptors.approval import ApprovalInterceptor as RealApprovalInterceptor
 from keystone.gateway.interceptors.policy import PolicyInterceptor
 from keystone.gateway.stubs import ApprovalInterceptor
 from keystone.gateway.wiring import INTERCEPTOR_ORDER, PipelineDeps, build_pipeline
@@ -88,3 +89,24 @@ def test_with_an_engine_the_policy_slot_is_the_real_interceptor(settings: Settin
     slot = INTERCEPTOR_ORDER.index("policy")
     assert isinstance(real.interceptors[slot], PolicyInterceptor)
     assert not isinstance(stub.interceptors[slot], PolicyInterceptor)
+
+
+@pytest.mark.phase(6)
+def test_with_an_approval_service_the_approval_slot_is_the_real_interceptor(
+    settings: Settings,
+) -> None:
+    class Service:
+        pass
+
+    with_approvals = PipelineDeps(
+        dispatcher=Echoing(),
+        audit=InMemoryAuditSink(),
+        approvals=Service(),  # type: ignore[arg-type]
+    )
+
+    real = build_pipeline(settings, with_approvals)
+    stub = build_pipeline(settings, deps())
+
+    slot = INTERCEPTOR_ORDER.index("approval")
+    assert isinstance(real.interceptors[slot], RealApprovalInterceptor)
+    assert type(stub.interceptors[slot]) is ApprovalInterceptor  # the stub, which refuses

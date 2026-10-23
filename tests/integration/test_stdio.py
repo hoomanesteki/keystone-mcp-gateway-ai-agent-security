@@ -22,6 +22,7 @@ from keystone.gateway.upstreams import (
 )
 from keystone.registry.config import UpstreamConfig
 from keystone.registry.repo import UpstreamRepo
+from tests.fixtures.approvals import VIRTUAL_TOOLS
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.mcp_results import texts
 
@@ -69,7 +70,8 @@ async def test_stdio_list_and_call(
         tools = sorted(t.name for t in (await client.list_tools()).tools)
         result = await client.call_tool("echostd__echo", {"payload": "over a pipe"})
 
-    assert tools == ["echostd__echo", "echostd__fail", "echostd__sleep"]
+    # The stdio upstream's three tools and the two that Keystone offers every caller (KS-603).
+    assert tools == ["echostd__echo", "echostd__fail", "echostd__sleep", *sorted(VIRTUAL_TOOLS)]
     assert not result.is_error
     assert texts(result) == ["over a pipe"]
     row = await UpstreamRepo(sessionmaker).get("echostd")

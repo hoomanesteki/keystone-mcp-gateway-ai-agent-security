@@ -17,6 +17,7 @@ from keystone.identity.credential_repo import CredentialRepo
 from keystone.identity.vault import Cipher, Vault, key_id
 from keystone.registry.config import UpstreamConfig
 from keystone.settings import HealthSettings
+from tests.fixtures.approvals import VIRTUAL_TOOLS
 from tests.fixtures.fake_idp import FakeIdp
 from tests.fixtures.keystone import TEST_MASTER_KEY, KeystoneApp, McpConnect
 from tests.fixtures.mcp_results import texts
@@ -57,7 +58,7 @@ async def test_upstream_receives_header(
         listed = await client.list_tools()
         read = await client.call_tool("mail__list_emails", {"folder": "inbox"})
 
-    assert len(listed.tools) == 12
+    assert len(listed.tools) == 12 + len(VIRTUAL_TOOLS)
     assert not read.is_error
     assert keyed_upstreams.state("mail")["api_key_received"] is True
     assert keyed_upstreams.state("mail")["calls"] == ["list_emails"]
@@ -157,7 +158,7 @@ async def test_sync_and_health_probes_use_the_upstreams_own_credential(
     statuses = httpx2.get(f"{app.base}/readyz", timeout=10).json()["upstreams"]
     assert statuses == dict.fromkeys(names, "up")
     async with mcp_client(app, user="olivia") as client:
-        assert len((await client.list_tools()).tools) == 12
+        assert len((await client.list_tools()).tools) == 12 + len(VIRTUAL_TOOLS)
 
 
 async def test_credentials_from_the_environment_are_stored_encrypted_and_not_rewritten(

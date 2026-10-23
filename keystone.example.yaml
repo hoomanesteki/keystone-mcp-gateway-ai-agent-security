@@ -93,3 +93,22 @@ audit:
   # Argument keys whose values the log replaces with [redacted], besides keys that look like
   # secrets. Whole names, any case. Also KEYSTONE_AUDIT__REDACT_KEYS (a JSON list).
   redact_keys: [ssn, date_of_birth]
+
+# Approvals: a call the policy sends to approval waits for a person (ADR-0010). The call is held
+# `wait_seconds` in line; the agent that gets no answer by then is told KS_APPROVAL_PENDING with an
+# id, and waits with the tool keystone__await_approval. A request can be decided and used for
+# `ttl_seconds` after it was made, and once. The arguments of the call are kept encrypted with the
+# vault's keys, so approvals need KEYSTONE_MASTER_KEYS. All of these can be set with
+# KEYSTONE_APPROVALS__<NAME>.
+approvals:
+  wait_seconds: 60       # 0 never holds a call; at most 300
+  ttl_seconds: 900
+  sweep_interval_s: 30   # how often requests that ran out of time are marked expired
+  poll_interval_s: 2     # how often a waiter looks at its request when Redis has not told it
+  # Tell others when a request is made (ADR-0010). The webhook gets a signed JSON body and needs
+  # KEYSTONE_APPROVALS_WEBHOOK_SECRET in the environment, at least 16 characters: the secret never
+  # goes in this file.
+  # A Slack incoming webhook gets a plain message. Its address is a secret, so prefer
+  # KEYSTONE_APPROVALS__SLACK_WEBHOOK_URL. Neither delays the call.
+  # webhook_url: https://hooks.example.test/keystone
+  # slack_webhook_url: https://hooks.slack.com/services/...

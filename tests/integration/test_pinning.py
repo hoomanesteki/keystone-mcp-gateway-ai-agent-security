@@ -16,6 +16,7 @@ from keystone.core.types import Risk, ToolStatus
 from keystone.registry.config import ToolOverride, UpstreamConfig
 from keystone.registry.pinning import OPERATOR_DISABLED
 from keystone.settings import RegistrySettings
+from tests.fixtures.approvals import VIRTUAL_TOOLS
 from tests.fixtures.cli import invoke
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.registry import FakeUpstream, running_registry, tool
@@ -273,7 +274,7 @@ async def test_quarantined_hidden_and_rejected(
 
     assert sync.exit_code == 0, sync.output
     assert "changed: echo__echo (quarantined)" in sync.output
-    assert len(names) == 11
+    assert len(names) == 11 + len(VIRTUAL_TOOLS)
     assert refused.is_error
     assert refused.meta is not None
     assert refused.meta["keystone/code"] == "KS_QUARANTINED"

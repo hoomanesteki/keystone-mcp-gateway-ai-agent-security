@@ -13,6 +13,7 @@ from typing import Protocol
 from pydantic import SecretStr
 
 from keystone.core.types import CallContext
+from keystone.registry.naming import is_virtual
 
 
 class HeaderSource(Protocol):
@@ -28,7 +29,7 @@ class CredentialInterceptor:
         self._vault = vault
 
     async def before_call(self, ctx: CallContext) -> None:
-        if self._vault is None:
+        if self._vault is None or is_virtual(ctx.tool):
             ctx.upstream_headers = {}
             return
         # A per_user upstream with no credential for this user raises Reject(DENIED) here.

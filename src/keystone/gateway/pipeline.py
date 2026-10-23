@@ -11,12 +11,15 @@ Rules the code below keeps:
   invariant I1 does not rest on the policy slot alone.
 - With `fail_closed`, a call is refused before anything runs while the audit sink is unhealthy
   (KS-501, ADR-0009): an action with no record is what the audit log exists to prevent.
+- A call that waited for a person is checked again before it goes on: `run_before` runs the slots
+  ahead of the approval slot a second time (KS-691), so it is dispatched under the rules of the
+  moment it is dispatched and not those of the moment it arrived.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from typing import Literal, Protocol
 
 import anyio
@@ -96,8 +99,8 @@ def require_dispatch_decision(ctx: CallContext) -> None:
     """Raise Reject(DENIED) unless ctx holds a decision that lets the call reach the upstream:
     `allow`, or `require_approval` with an approval id (structural invariant I1, KS-191).
 
-    The approval interceptor (Phase 6) must set `ctx.approval_id` only after `consume` succeeded
-    on an approved request. Setting it on any other path turns a pending approval into an allow.
+    The approval interceptor (KS-602) sets `ctx.approval_id` only after `consume` succeeded on an
+    approved request. Setting it on any other path turns a pending approval into an allow.
     """
     decision = ctx.decision
     if decision is not None and (
@@ -169,6 +172,34 @@ class Pipeline:
                 self._describe(span, ctx, outcome, reject)
                 self._count(ctx, outcome, reject, started)
                 await self._audit(ctx, outcome, reject)
+
+    async def run_before(self, ctx: CallContext, slot: str, *, skip: Collection[str] = ()) -> None:
+        """Run the `before_call` of every slot ahead of `slot` again, on a call that has waited.
+
+        The approval slot holds a call for a person, for up to `approvals.wait_seconds`, and the
+        slots ahead of it decided the call before the wait. In that time a tool can be
+        quarantined, a policy reloaded, a budget spent, the audit log fall behind. The approval
+        slot calls this once the person has approved and before it uses the approval, so a call
+        is never dispatched on the strength of a check that is out of date.
+
+        What a slot says is raised as it is: a refusal stops the call, and the approval is not
+        used. A slot that crashes is a denial that says nothing of the cause, as in `run`. A slot
+        in `skip` is left out: the rate limit charges a call once, when it arrives. A name that is
+        no slot is an error before anything runs, so that a typo cannot make this check nothing.
+
+        It decides again and changes `ctx` as the slots do (the decision above all), and it does
+        not dispatch, run the after hooks or write the record: the call goes on in `run`.
+        """
+        names = [interceptor.name for interceptor in self.interceptors]
+        if slot not in names:
+            raise ValueError(f"no interceptor is named {slot!r}")
+        unknown = sorted(set(skip) - set(names))
+        if unknown:
+            raise ValueError(f"no interceptor is named {', '.join(map(repr, unknown))}")
+        self._require_audit(ctx)
+        for interceptor in self.interceptors[: names.index(slot)]:
+            if interceptor.name not in skip:
+                await self._hook(interceptor, interceptor.before_call, ctx, Code.DENIED)
 
     async def reject(self, ctx: CallContext, reject: Reject) -> ToolResult:
         """Refuse a call that cannot enter the pipeline (a tool that does not exist). The

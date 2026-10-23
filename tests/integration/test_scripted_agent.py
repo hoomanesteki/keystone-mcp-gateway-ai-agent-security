@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import anyio
 import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -8,12 +9,14 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from examples.agents.scripted_agent import Step, load_steps, main, run_script
+from tests.fixtures.approvals import Approver
 from tests.fixtures.fake_idp import FakeIdp
 from tests.fixtures.keystone import KeystoneApp
 from tests.fixtures.servers import ServerThread
 from tests.fixtures.upstreams import DemoUpstreams
 
-DEMO = Path(__file__).resolve().parents[2] / "examples" / "agents" / "scripts" / "demo_p1.yaml"
+SCRIPTS = Path(__file__).resolve().parents[2] / "examples" / "agents" / "scripts"
+DEMO = SCRIPTS / "demo_p1.yaml"
 
 
 @pytest.mark.services
@@ -131,3 +134,88 @@ def test_the_command_line_reads_the_token_from_the_environment(
     scripted_agent.main(["--url", keystone_app.url, "--script", str(DEMO)])
 
     assert captured["token"] == "from-env"
+
+
+@pytest.mark.services
+@pytest.mark.phase(6)
+@pytest.mark.parametrize("approved_after_s", [0.0, 2.5], ids=["in the wait", "after the wait"])
+async def test_the_approval_demo_completes_when_an_approver_says_yes(
+    keystone_app: KeystoneApp,
+    demo_upstreams: DemoUpstreams,
+    fake_idp: FakeIdp,
+    approver: Approver,
+    approved_after_s: float,
+) -> None:
+    """The app holds a call for a second. An approval inside that time completes the call; one
+    after it is waited for by the agent itself, with keystone__await_approval."""
+
+    async def approve() -> None:
+        await anyio.sleep(approved_after_s)
+        await approver.approve("fine")
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(approve)
+        transcript = await run_script(
+            keystone_app.url,
+            load_steps(SCRIPTS / "approval_demo.yaml"),
+            token=fake_idp.token_for("olivia"),
+        )
+
+    assert transcript.ok, transcript.text()
+    transfer, second = transcript.calls
+    assert transfer.tool == "bank__transfer" and "completed" in transfer.text
+    assert (transfer.awaited is not None) == (approved_after_s > 1)
+    # The second step has nothing left to wait for.
+    assert second.tool == "keystone__await_approval" and "nothing to wait for" in second.text
+    assert [t["amount"] for t in demo_upstreams.state("bank")["transfers"]] == [900.0]  # type: ignore[attr-defined]
+
+
+@pytest.mark.services
+@pytest.mark.phase(6)
+async def test_the_reject_script_passes_only_on_a_rejection_with_the_note(
+    keystone_app: KeystoneApp,
+    demo_upstreams: DemoUpstreams,
+    fake_idp: FakeIdp,
+    approver: Approver,
+) -> None:
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(approver.reject, "not this quarter")
+        transcript = await run_script(
+            keystone_app.url,
+            load_steps(SCRIPTS / "approval_reject.yaml"),
+            token=fake_idp.token_for("olivia"),
+        )
+
+    assert transcript.ok, transcript.text()
+    [transfer] = transcript.calls
+    assert transfer.error_code == "KS_APPROVAL_REJECTED" and "not this quarter" in transfer.text
+    assert demo_upstreams.state("bank")["transfers"] == []
+
+
+@pytest.mark.services
+@pytest.mark.phase(6)
+async def test_the_pending_script_stops_at_pending_and_waits_only_when_it_asks(
+    keystone_app: KeystoneApp,
+    demo_upstreams: DemoUpstreams,
+    fake_idp: FakeIdp,
+    approver: Approver,
+) -> None:
+    async def approve_late() -> None:
+        await anyio.sleep(2.5)  # after the first step has been told it is pending
+        await approver.approve("late but fine")
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(approve_late)
+        transcript = await run_script(
+            keystone_app.url,
+            load_steps(SCRIPTS / "approval_pending.yaml"),
+            token=fake_idp.token_for("olivia"),
+        )
+
+    assert transcript.ok, transcript.text()
+    pending, awaited = transcript.calls
+    assert pending.error_code == "KS_APPROVAL_PENDING" and pending.awaited is None
+    assert awaited.tool == "keystone__await_approval" and "completed" in awaited.text
+    # The step waited for the request it was told about.
+    assert awaited.arguments["approval_id"] == pending.content[0]["_meta"]["keystone/approval_id"]
+    assert [t["amount"] for t in demo_upstreams.state("bank")["transfers"]] == [600.0]  # type: ignore[attr-defined]

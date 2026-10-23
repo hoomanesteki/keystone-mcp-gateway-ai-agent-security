@@ -19,11 +19,12 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from pydantic import SecretStr
 
+from keystone.core.canonical import canonical_json
 from keystone.core.errors import Code, Reject
 from keystone.logging import register_secret
 
@@ -50,6 +51,7 @@ RESERVED_HEADERS = frozenset(
 # refuses them: a key that anyone can read in .env.example protects nothing.
 PUBLISHED_KEY_IDS = frozenset({"a5bdf0770eeb"})
 UNDECRYPTABLE = "a stored credential cannot be decrypted with any master key"
+UNDECRYPTABLE_DATA = "stored data cannot be decrypted with any master key"
 
 
 class VaultError(Exception):
@@ -131,6 +133,21 @@ class Cipher:
             register_secret(value)
         return payload
 
+    def encrypt_json(self, value: Any) -> bytes:
+        """Any JSON value, encrypted under the first master key. The approval service keeps the
+        arguments of a call this way (KS-601). They are not credentials, so nothing here is
+        registered with the log scrubber, and no key id is returned: a row of arguments lives for
+        minutes, and every master key decrypts, so a rotation needs no re-encryption of them."""
+        return self._fernet.encrypt(canonical_json(value))
+
+    def decrypt_json(self, ciphertext: bytes) -> Any:
+        try:
+            return json.loads(self._fernet.decrypt(ciphertext))
+        except InvalidToken:
+            raise VaultError(UNDECRYPTABLE_DATA) from None
+        except ValueError:
+            raise VaultError("stored data is not what Keystone wrote") from None
+
     def rotate(self, ciphertext: bytes) -> tuple[bytes, str]:
         """The same credential encrypted under the first key."""
         try:
@@ -198,6 +215,11 @@ class Vault:
     def __init__(self, cipher: Cipher, store: CredentialStore) -> None:
         self._cipher = cipher
         self._store = store
+
+    @property
+    def cipher(self) -> Cipher:
+        """The keys, for what else Keystone keeps encrypted (the arguments of an approval)."""
+        return self._cipher
 
     async def set(
         self,

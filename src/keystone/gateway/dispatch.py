@@ -10,6 +10,7 @@ from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, ToolResult
 from keystone.gateway.scrub import scrub_result
 from keystone.gateway.upstreams import UpstreamPool
+from keystone.registry.naming import is_virtual
 from keystone.telemetry.tracing import trace_context_meta
 
 log = structlog.get_logger()
@@ -19,12 +20,29 @@ class DownCheck(Protocol):
     def is_down(self, upstream_id: str) -> bool: ...
 
 
+class VirtualRunner(Protocol):
+    """The tools Keystone serves itself (`gateway/virtual_tools.py`)."""
+
+    async def call(self, ctx: CallContext) -> ToolResult: ...
+
+
 class UpstreamDispatcher:
-    def __init__(self, pool: UpstreamPool, health: DownCheck | None = None) -> None:
+    def __init__(
+        self,
+        pool: UpstreamPool,
+        health: DownCheck | None = None,
+        virtual: VirtualRunner | None = None,
+    ) -> None:
         self.pool = pool
         self.health = health
+        self.virtual = virtual
 
     async def dispatch(self, ctx: CallContext) -> ToolResult:
+        if is_virtual(ctx.tool):
+            # No upstream is called: the tool is Keystone's own (KS-603).
+            if self.virtual is None:
+                raise Reject(Code.TOOL_NOT_FOUND, f"there is no tool named {ctx.tool.name!r}")
+            return await self.virtual.call(ctx)
         upstream_id = ctx.tool.upstream_id
         if self.health is not None and self.health.is_down(upstream_id):
             # Refused without a connection attempt, so the call never reached the upstream.

@@ -24,8 +24,10 @@ flowchart TD
   `default-deny` when nothing allowed the call.
 - **The approval set** is asked only when access allowed, and holds `permit` policies only. If one
   matches, the call needs a person's approval, and the matching ids are the reasons. If none
-  matches, the call is allowed, and the reasons are the access permits that allowed it. Until
-  Phase 6 the approval step refuses such a call, so it does not run.
+  matches, the call is allowed, and the reasons are the access permits that allowed it. A call
+  that needs approval is held for a person, and runs only if one approves it, with the arguments
+  that were approved and once (the runbook's Approvals section says how). The policy decides it
+  again when it runs, so a rule tightened in between refuses it.
 - **A tool listing** stops after the access set. A tool the caller may not use is not listed, and
   a tool that needs approval still is.
 - **Everything else is a deny.** A policy that fails to evaluate in either pass, a context the
@@ -160,6 +162,71 @@ trust `low` when `auth.allow_unknown_agents` is on. This keeps it from any tool 
 forbid (principal, action == Keystone::Action::"call_tool", resource)
 when { context.agent_trust == "low" && resource.tags.contains("external_effect") };
 ```
+
+## The policies Keystone ships
+
+Every id below is a heading, so a reason in the audit log or in an approval request has a page to
+go to: `docs/policies.md#<id>`. The console links its reasons here, and a test fails when a
+shipped policy has no heading. The pack is in `policies/`; `include_demo` (on in compose) adds
+the demo rules.
+
+### same-tenant-low-medium
+
+A permit in `default/access/base.cedar`. Any caller may list and call a tool of low or medium
+risk in the caller's own tenant. Nothing else is allowed by this one: a high or critical tool
+needs one of the next two.
+
+### operators-high
+
+A permit in `default/access/base.cedar`. Members of the `operators` group may list and call high
+risk tools of their own tenant, such as a bank transfer or sending mail.
+
+### admins-critical
+
+A permit in `default/access/base.cedar`. Members of the `admins` group may list and call critical
+risk tools of their own tenant.
+
+### deny-cross-tenant
+
+A forbid in `default/access/base.cedar`. No caller uses a tool of another tenant, whatever else
+allows it. A forbid beats every permit, so this holds for the rules a tenant adds as well.
+
+### approve-transfer-over-500
+
+A rule of the approval set in `demo/approval/bank.cedar`. A transfer over 500 needs a person's
+approval, and so does one whose amount could not be read. The limit is in cents (50000), because
+the transfer tool's extractor reads cents. Example 3 above shows it.
+
+### external-email-needs-approval
+
+A rule of the approval set in `acme/approval/mail.cedar`. A message to anyone outside
+`acme.test` needs a person's approval, and so does one whose recipient domain could not be read.
+It is scoped to `mail__send_email`. Example 4 above shows it.
+
+## Reasons Keystone writes itself
+
+Some reasons are not policies. They have headings for the same reason.
+
+### default-deny
+
+No permit matched, so the call was refused. The access set denies unless some permit allows.
+
+### policy-error
+
+A policy failed to evaluate, or the context did not fit the schema, or the tenant has no
+policies. The call is refused and the cause goes to the log. Cedar skips a policy that errors, so
+without this a broken forbid would not forbid.
+
+### no-decision
+
+The call reached the end of the pipeline with no decision, which a call must never do. It is
+refused (KS-191).
+
+### virtual-tool
+
+The call is to one of Keystone's own tools (`keystone__await_approval`, `keystone__whoami`). They
+are not tools of an upstream, so the policy is not asked. A reason of the form `approval:<id>`
+ends the reasons of a call that ran on an approval, and names it.
 
 ## Testing policies
 

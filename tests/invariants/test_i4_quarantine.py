@@ -1,4 +1,8 @@
-"""I4: a quarantined or disabled tool never appears in tools/list and never dispatches."""
+"""I4: a quarantined or disabled tool never appears in tools/list and never dispatches.
+
+That includes a call that is held for approval when the quarantine lands: it passed the pinning
+slot before the wait, and is checked again before the approval is used (KS-691).
+"""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -11,7 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from keystone.core.types import ToolStatus
 from keystone.registry.pinning import OPERATOR_DISABLED, REMOVED
 from keystone.registry.repo import ToolRepo, UpstreamRepo
-from keystone.settings import RegistrySettings
+from keystone.settings import ApprovalSettings, RegistrySettings
+from tests.fixtures.approvals import VIRTUAL_TOOLS, Approver
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.upstreams import DemoUpstreams
 
@@ -74,7 +79,7 @@ async def test_i4(
     at once, with no wait: the cache expiring must not be what stops them."""
     app = keystone_app_factory(registry=RegistrySettings(cache_ttl_s=0.3))
     async with mcp_client(app, user="olivia") as client:  # an operator lists all twelve tools
-        assert len((await client.list_tools()).tools) == 12
+        assert len((await client.list_tools()).tools) == 12 + len(VIRTUAL_TOOLS)
 
         for way in WAYS:
             await way.change(sessionmaker)
@@ -96,7 +101,46 @@ async def test_i4(
         calls: Any = demo_upstreams.state(way.upstream)["calls"]
         assert way.upstream_tool not in calls, way.tool
     # Three single tools are gone, and so are all three tools of the disabled upstream.
-    assert len(names) == 12 - 3 - 3
+    assert len(names) == 12 - 3 - 3 + len(VIRTUAL_TOOLS)
     refused = [r for r in app.audit.records if r["tool_name"] in gone]
     assert len(refused) == 4
     assert all(r["dispatched"] is False and r["outcome"] == "rejected" for r in refused)
+
+
+@pytest.mark.services
+@pytest.mark.phase(6)
+async def test_i4_a_tool_quarantined_while_a_call_waits_for_approval_is_not_called(
+    keystone_app_factory: Callable[..., KeystoneApp],
+    mcp_client: McpConnect,
+    demo_upstreams: DemoUpstreams,
+    sessionmaker: Sessions,
+    approver: Approver,
+) -> None:
+    """Olivia's transfer is held for a person. While it waits, the tool is quarantined behind the
+    gateway's back, and then a person approves the request, as they would without knowing. The
+    real pinning slot asks the database again before the approval is used."""
+    app = keystone_app_factory(
+        settings={"approvals": ApprovalSettings(wait_seconds=20, poll_interval_s=0.2)}
+    )
+
+    async def quarantine_then_approve() -> None:
+        await approver.pending()  # the call is held
+        await ToolRepo(sessionmaker).set_pending(
+            "acme",
+            "bank__transfer",
+            description="changed",
+            input_schema={"type": "object"},
+            reason="schema_changed",
+        )
+        await approver.approve("looks right")
+
+    transfer = {"from_account": "CHK-001", "to": "SAV-002", "amount": 900}
+    async with mcp_client(app, user="olivia") as olivia, anyio.create_task_group() as tasks:
+        tasks.start_soon(quarantine_then_approve)
+        result = await olivia.call_tool("bank__transfer", transfer)
+
+    assert result.is_error and result.meta is not None
+    assert result.meta["keystone/code"] == "KS_QUARANTINED"
+    assert demo_upstreams.state("bank")["transfers"] == []
+    [record] = [r for r in app.audit.records if r["tool_name"] == "bank__transfer"]
+    assert record["dispatched"] is False and record["outcome"] == "rejected"

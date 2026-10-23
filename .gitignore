@@ -221,3 +221,13 @@ __marimo__/
 
 # Local config copied from keystone.example.yaml
 /keystone.yaml
+
+# Console (Node). console/dist is covered by dist/ above. openapi.json is made by
+# `make console-types` from the API's schema and is not kept. The Python rule `lib/` above would
+# hide console/src/lib, which holds source.
+!console/src/lib/
+console/node_modules/
+console/openapi.json
+console/playwright-report/
+console/test-results/
+*.tsbuildinfo

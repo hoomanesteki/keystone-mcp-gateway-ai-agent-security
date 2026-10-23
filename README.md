@@ -10,8 +10,9 @@ and never hold an upstream credential: Keystone keeps it encrypted and adds it t
 Cedar policies kept in files decide every call and every tool list, as allow, deny or require
 approval, with the ids of the policies that decided as the reasons. A bad edit is refused when the
 files are reloaded and the old rules stay in force, and `keystone policy test` checks the rules
-against cases in CI. The approval, scanner, rate limit and metering slots are still stubs, so a
-call that needs a person's approval is refused until Phase 6. `make demo` shows it working.
+against cases in CI. A call the policy sends to approval is held until a person decides it, runs
+only with the arguments that were approved, and only once. The scanner, rate limit and metering
+slots are still stubs. `make demo` shows it working.
 
 - Progress per story: [docs/progress.md](docs/progress.md)
 - Writing policies: [docs/policies.md](docs/policies.md)

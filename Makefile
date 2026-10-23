@@ -10,7 +10,10 @@ endef
 # Compose reads .env from the compose file's directory by default. Point it at the repo root instead.
 COMPOSE := docker compose -f deploy/docker-compose.yml $(if $(wildcard .env),--env-file .env)
 
-.PHONY: help prose commits setup lint fmt type policy test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo github-setup
+# The console has its own package, and console/.nvmrc names the Node version it runs on.
+CONSOLE := pnpm --dir console
+
+.PHONY: help prose commits setup lint fmt type policy test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo github-setup console-types console-check console-e2e
 
 help:
 	@grep -E '^[a-z0-9-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | column -t -s $$'\t'
@@ -52,7 +55,7 @@ test-e2e: ## end-to-end tests against the compose stack
 
 test: test-unit test-int ## unit plus integration
 
-check: up-core lint type test-unit test-int ## lint, types, unit, integration
+check: up-core lint type test-unit test-int console-check ## lint, types, unit, integration, console
 
 migrate: ## apply database migrations to KEYSTONE_DATABASE_URL
 	$(RUN) alembic upgrade head
@@ -60,6 +63,9 @@ migrate: ## apply database migrations to KEYSTONE_DATABASE_URL
 ci-local: up-core ## the same steps as CI, run locally
 	uv sync --locked
 	$(MAKE) lint type policy test-unit test-int
+	$(MAKE) console-types
+	git diff --exit-code -- console/src/api/schema.d.ts
+	$(MAKE) console-check
 	gitleaks git --no-banner --redact .
 	@req=$$(mktemp) && uv export --no-emit-project -o $$req >/dev/null \
 		&& $(RUN) pip-audit -r $$req --no-deps --disable-pip; rc=$$?; rm -f $$req; exit $$rc
@@ -73,11 +79,28 @@ gate: up ## everything a phase gate runs: make gate PHASE=N
 	$(MAKE) lint type
 	@if [ $(PHASE) -ge 4 ]; then $(MAKE) policy; fi
 	$(RUN) pytest --phase $(PHASE) tests/unit tests/integration tests/invariants tests/e2e
+	@if [ $(PHASE) -ge 6 ]; then $(MAKE) console-check console-e2e; fi
 	@k=0; while [ $$k -le $(PHASE) ]; do \
 		f=scripts/smoke/phase_$$k.sh; \
 		if [ -f $$f ]; then echo "== smoke: phase $$k"; bash $$f || exit 1; fi; \
 		k=$$((k+1)); \
 	done
+
+console-types: ## regenerate console/src/api/schema.d.ts from the admin API's schema
+	$(RUN) python scripts/dump_openapi.py console/openapi.json
+	$(CONSOLE) install --frozen-lockfile
+	$(CONSOLE) gen:api
+
+console-check: ## console: lint, unit tests and the production build
+	$(CONSOLE) install --frozen-lockfile
+	$(CONSOLE) lint
+	$(CONSOLE) test
+	$(CONSOLE) build
+
+console-e2e: ## console: the Playwright test, in headless chromium, against the compose stack
+	$(CONSOLE) install --frozen-lockfile
+	$(CONSOLE) exec playwright install chromium
+	$(CONSOLE) e2e
 
 up: ## build and start the local stack and wait until every service is healthy
 	$(COMPOSE) up -d --build --wait
