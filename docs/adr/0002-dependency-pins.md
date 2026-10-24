@@ -50,6 +50,12 @@ is newer than the plan: see "Console: where a pin differs" below.
 | gitleaks | 8.30.1 | downloaded in the security job and checked against its SHA-256 |
 | actions/setup-node | v7 | the console and nightly jobs; Node's version is read from `console/.nvmrc` |
 | pnpm/action-setup | v6 | the console and nightly jobs; pnpm's version is read from `console/package.json` |
+| hashicorp/setup-terraform | v3 | the terraform job (KS-905) |
+| terraform-linters/setup-tflint | v4 | the terraform job |
+| terraform | 1.17.0 | the terraform job; `deploy/terraform/aws/versions.tf` accepts 1.6 and later |
+| tflint | v0.55.1 | the terraform job, with the bundled `terraform` ruleset (recommended preset) |
+| hashicorp/aws provider | ~> 5.80 | `deploy/terraform/aws`, locked in `.terraform.lock.hcl` |
+| hashicorp/random provider | ~> 3.6 | `deploy/terraform/aws`, locked in `.terraform.lock.hcl` |
 | ubuntu runner | ubuntu-24.04 | pinned so the toolchain does not move with the `latest` label |
 
 ## Python packages: direct runtime dependencies
