@@ -2231,3 +2231,9 @@ a 1 second limit each and returns 503 if either is down.
 | `docker` tests are skipped: "no Docker daemon" or "the sandbox image ... is not built" | The tests need the daemon and the image from `make sandbox-image`. Set `KEYSTONE_REQUIRE_DOCKER=1` to make that a failure instead of a skip. |
 | The sandbox says the Docker daemon cannot be reached | Keystone has no socket, or may not use it. In compose check `docker compose exec keystone ls -l /var/run/docker.sock` and `DOCKER_SOCKET_GID`; on Linux the group of the socket is not 0. |
 | `ModuleNotFoundError: keystone` right after `uv sync` (macOS) | A background process flagged `.venv` as hidden, and Python skips hidden `.pth` files. Check with `ls -lO .venv/lib/python3.12/site-packages/keystone.pth`. Set `UV_PROJECT_ENVIRONMENT` to a path outside the repo, for example `$HOME/.cache/keystone-venv`, then run `uv sync`. |
+
+## AWS (Terraform)
+
+`deploy/terraform/aws/` runs Keystone on ECS Fargate with RDS, ElastiCache and an ALB. Steps, the
+cost per day and the limits (no sandbox on Fargate) are in its README. `make tf-plan` plans it with
+the example variables and needs AWS credentials. Run `terraform destroy` after a demo.

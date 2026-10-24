@@ -32,6 +32,7 @@ def test_workflow_has_the_planned_jobs() -> None:
         "docker",
         "commits",
         "docs",
+        "terraform",
     }
     for job_id, job in WORKFLOW["jobs"].items():
         assert job["name"] == job_id, "required-check names must equal the job ids"
