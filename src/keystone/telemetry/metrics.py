@@ -62,6 +62,8 @@ SCORE_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 SCAN_STAGES = ("rules", "classifier", "action")
 # The scopes of a rate limit (settings.RateLimitSettings).
 RATE_SCOPES = ("per_tenant", "per_user", "per_agent", "per_tool")
+# The scopes of a budget (settings.BudgetConfig).
+BUDGET_SCOPES = ("tenant", "user", "agent")
 
 
 @dataclass(frozen=True)
@@ -185,9 +187,11 @@ class Metrics:
             ["tenant", "scope"],
         )
         # Declared for Phase 8. Nothing sets this yet.
+        # Set by the budget service (KS-805): for each tenant and scope, the highest spend in the
+        # current window among the budgets of that scope.
         self.budget_spent_usd = self._gauge(
             "keystone_budget_spent_usd",
-            "Spend in the current budget window (Phase 8)",
+            "Highest spend in the current window among the budgets of a scope, in US dollars",
             ["tenant", "scope"],
         )
         self.llm_tokens = self._counter(
@@ -233,6 +237,12 @@ class Metrics:
         self.rate_limited.labels(
             tenant=self._tenant(tenant), scope=scope if scope in RATE_SCOPES else OTHER
         ).inc()
+
+    def budget_spent(self, tenant: str, scope: str, usd: float) -> None:
+        """The highest spend, in the window it is in now, among a tenant's budgets of one scope."""
+        self.budget_spent_usd.labels(
+            tenant=self._tenant(tenant), scope=scope if scope in BUDGET_SCOPES else OTHER
+        ).set(usd)
 
     def session_tainted(self, tenant: str) -> None:
         """An injection tainted a session that was not tainted when the call began."""

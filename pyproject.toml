@@ -113,6 +113,8 @@ module = [
     "keystone.defense.*",
     "keystone.sandbox",
     "keystone.sandbox.*",
+    "keystone.metering",
+    "keystone.metering.*",
 ]
 disallow_any_generics = true
 disallow_subclassing_any = true
