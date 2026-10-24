@@ -17,7 +17,7 @@ from keystone.settings import RegistrySettings
 from tests.fixtures.fake_idp import FakeIdp
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.mcp_results import texts
-from tests.fixtures.sandbox import CONTAINER_LABEL, wait_until
+from tests.fixtures.sandbox import CONTAINER_LABEL, list_containers, wait_until
 
 pytestmark = [pytest.mark.phase(8), pytest.mark.services, pytest.mark.docker]
 
@@ -34,8 +34,7 @@ def container_upstream(image: str, name: str = "echoc", **options: Any) -> Upstr
 
 
 def running(docker_client: Any) -> list[Any]:
-    found: list[Any] = docker_client.containers.list(filters={"label": f"{CONTAINER_LABEL}=1"})
-    return found
+    return list_containers(docker_client, f"{CONTAINER_LABEL}=1")
 
 
 async def test_container_stdio_list_and_call(

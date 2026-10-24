@@ -487,14 +487,16 @@ class SandboxRunner:
         client = self.docker()
         now = self._clock()
         removed = 0
-        for container in client.containers.list(all=True, filters={"label": f"{SANDBOX_LABEL}=1"}):
-            created = _created_at(container.attrs)
+        # The low-level listing. The model's `list` inspects each container after it has listed it,
+        # and a run that removes its own container in between fails the whole round with NotFound.
+        for found in client.api.containers(all=True, filters={"label": f"{SANDBOX_LABEL}=1"}):
+            created = _created_at(found)
             if created is not None and now - created < max_age_s:
                 continue
             try:
-                container.remove(force=True, v=True)
+                client.api.remove_container(found["Id"], force=True, v=True)
                 removed += 1
-                log.warning("sandbox_container_reaped", container=container.short_id)
+                log.warning("sandbox_container_reaped", container=str(found["Id"])[:12])
             except NotFound:
                 pass  # a run finished and removed it first
             except (DockerException, OSError) as error:

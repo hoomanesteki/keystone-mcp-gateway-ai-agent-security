@@ -15,7 +15,7 @@ from typing import Any, NoReturn
 
 import docker
 import pytest
-from docker.errors import DockerException, ImageNotFound
+from docker.errors import DockerException, ImageNotFound, NotFound
 
 from keystone.sandbox.runner import CALL_LABEL, SANDBOX_LABEL, SandboxRunner
 
@@ -71,6 +71,19 @@ def runner(docker_client: Any, sandbox_image: str) -> SandboxRunner:
     return SandboxRunner(docker_client)
 
 
+def list_containers(client: Any, label: str, *, everything: bool = False) -> list[Any]:
+    """The containers with this label (`key=value`), running or all. The model's own `list` fails
+    with NotFound when a container goes between the listing and the inspect that follows it, which
+    is what a run that is ending does."""
+    found: list[Any] = []
+    for item in client.api.containers(all=everything, filters={"label": label}):
+        try:
+            found.append(client.containers.get(item["Id"]))
+        except NotFound:
+            continue
+    return found
+
+
 @pytest.fixture(autouse=True)
 def _no_sandbox_container_is_left(request: pytest.FixtureRequest) -> Iterator[None]:
     """A test that used Docker leaves no container of Keystone's behind, even when it failed."""
@@ -79,16 +92,14 @@ def _no_sandbox_container_is_left(request: pytest.FixtureRequest) -> Iterator[No
         return
     client = request.getfixturevalue("docker_client")
     for label in (SANDBOX_LABEL, CONTAINER_LABEL):
-        for container in client.containers.list(all=True, filters={"label": f"{label}=1"}):
+        for container in list_containers(client, f"{label}=1", everything=True):
             with contextlib.suppress(DockerException):
                 container.remove(force=True, v=True)
 
 
 def containers_of(client: Any, call_id: str) -> list[Any]:
     """Every container, running or not, that carries this call id."""
-    labelled = {"label": f"{CALL_LABEL}={call_id}"}
-    found: list[Any] = client.containers.list(all=True, filters=labelled)
-    return found
+    return list_containers(client, f"{CALL_LABEL}={call_id}", everything=True)
 
 
 def wait_until(condition: Callable[[], Any], seconds: float = 15.0) -> Any:
