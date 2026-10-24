@@ -184,9 +184,10 @@ The call is the first one a restarted Keystone serves for that tool. Keystone's 
 to 20 to 28 ms for it (`keystone_tool_call_duration_seconds`; the rate limit is 1.0 to 1.2 ms of
 that, the only stage of Phase 8 that does I/O on this path), the probe measures 44 to 58 ms for the
 same call, and a refusal made when the caches are warm has a median of 20.4 ms and a 99th
-percentile of 59 ms over 100 calls. The bound dates from Phase 2, when the path had three stages
-and took 23.3 ms, and it now sits on the edge of what the path costs on this machine. The test is
-unchanged. Its bound is the owner's to move, or the script could take the median of several calls.
+percentile of 59 ms over 100 calls. The bound dates from Phase 2, when most of the slots were
+stubs and the call took 23.3 ms, and it now sits on the edge of what the path costs on this
+machine. The test is unchanged. Its bound is the owner's to move, or the script could take the
+median of several calls.
 
 The health check of the sandbox delays the event loop a little. With the sandbox on and a probe
 every 2 s, which is what the Phase 2 smoke sets, 21 of 1,331 requests to `/healthz` took over
