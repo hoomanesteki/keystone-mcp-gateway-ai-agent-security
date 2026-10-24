@@ -35,8 +35,10 @@ is newer than the plan: see "Console: where a pin differs" below.
 | grafana/grafana | 13.2.4 | `deploy/docker-compose.yml` |
 | python | 3.12.15-slim-trixie | `Dockerfile`, `deploy/Dockerfile.upstreams` and `deploy/sandbox/Dockerfile.python`, build and runtime stages |
 | ghcr.io/astral-sh/uv | 0.12.3 | `Dockerfile` and `deploy/Dockerfile.upstreams` (copy the uv binary) |
+| docker | 29.6.2-cli | `Dockerfile` (copies the `docker` binary, which starts the containerized stdio upstreams of KS-803; the version of the daemon on the machine I develop on) |
 | keystone | dev | built locally from `Dockerfile`, never pulled; compose names the built image |
 | keystone-upstreams | dev | built locally from `deploy/Dockerfile.upstreams`, never pulled; the tag is the compose service name for the build |
+| keystone-echo-stdio | dev | built locally from `examples/upstreams/Dockerfile.echo` (`make echo-image`), never pulled. The echo and probe servers of the demo upstreams, for the tests of the containerized stdio transport (KS-803) |
 | keystone-sandbox-python | dev | built locally from `deploy/sandbox/Dockerfile.python` (`make sandbox-image`, or the compose service `sandbox-image`), never pulled. The sandbox runs code in containers made from it (KS-801, ADR-0012) |
 
 ## CI actions and tools
@@ -112,6 +114,17 @@ the release of the base image, and is not pinned further.
 | six | 1.17.0 | a dependency of python-dateutil |
 | tzdata | 2026.5 | a dependency of pandas |
 | wget | Debian trixie | so that "there is no network" can be shown with the tool people reach for first |
+
+## Packages of the echo server image
+
+`examples/upstreams/Dockerfile.echo` (KS-803) installs the two packages the demo servers import, at
+the versions of `uv.lock`, so that the image stays small. Their dependencies are resolved when the
+image is built.
+
+| Package | Version | Used for |
+|---|---|---|
+| mcp | 2.3.0 | the MCP server SDK (ADR-0003) |
+| uvicorn | 0.54.0 | imported by the helper the demo servers share, though a stdio server never starts it |
 
 ## Models
 

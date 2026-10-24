@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1
+# The echo server and the probe server of the demo upstreams as an image that speaks MCP over stdio,
+# for the containerized stdio transport (KS-803, ADR-0012). Keystone starts it with `docker run -i`,
+# no network and a read-only root, and talks to it over the pipe.
+# Build it from the repository root:
+#   docker build -t keystone-echo-stdio:dev -f examples/upstreams/Dockerfile.echo .
+# The base image and the two packages are pinned. See docs/adr/0002-dependency-pins.md.
+#
+# There is no ENTRYPOINT, so a `command` in the config replaces CMD: the echo server by default,
+# `python -m examples.upstreams.probe_server --transport stdio` for the probe.
+
+FROM python:3.12.15-slim-trixie
+
+RUN pip install --no-cache-dir mcp==2.3.0 uvicorn==0.54.0 \
+    && useradd --system --uid 10001 --user-group --home-dir /nonexistent --no-create-home keystone
+
+WORKDIR /app
+COPY examples ./examples
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+USER 10001:10001
+CMD ["python", "-m", "examples.upstreams.echo_server", "--transport", "stdio"]

@@ -19,7 +19,12 @@ from docker.errors import DockerException, ImageNotFound
 
 from keystone.sandbox.runner import CALL_LABEL, SANDBOX_LABEL, SandboxRunner
 
+# The label `docker run` puts on a containerized stdio server (gateway/upstreams.py).
+CONTAINER_LABEL = "keystone.container_stdio"
+
 IMAGE = os.environ.get("KEYSTONE_SANDBOX_IMAGE", "keystone-sandbox-python:dev")
+# The demo echo and probe servers as a stdio image (examples/upstreams/Dockerfile.echo, KS-803).
+ECHO_IMAGE = "keystone-echo-stdio:dev"
 
 
 def docker_required() -> bool:
@@ -52,6 +57,15 @@ def sandbox_image(docker_client: Any) -> str:
     return IMAGE
 
 
+@pytest.fixture(scope="session")
+def echo_image(docker_client: Any) -> str:
+    try:
+        docker_client.images.get(ECHO_IMAGE)
+    except ImageNotFound:
+        unavailable(f"the image {ECHO_IMAGE} is not built; run `make echo-image`")
+    return ECHO_IMAGE
+
+
 @pytest.fixture
 def runner(docker_client: Any, sandbox_image: str) -> SandboxRunner:
     return SandboxRunner(docker_client)
@@ -59,14 +73,15 @@ def runner(docker_client: Any, sandbox_image: str) -> SandboxRunner:
 
 @pytest.fixture(autouse=True)
 def _no_sandbox_container_is_left(request: pytest.FixtureRequest) -> Iterator[None]:
-    """A test that used the sandbox leaves no sandbox container behind, even when it failed."""
+    """A test that used Docker leaves no container of Keystone's behind, even when it failed."""
     yield
     if "docker_client" not in request.fixturenames:
         return
     client = request.getfixturevalue("docker_client")
-    for container in client.containers.list(all=True, filters={"label": f"{SANDBOX_LABEL}=1"}):
-        with contextlib.suppress(DockerException):
-            container.remove(force=True, v=True)
+    for label in (SANDBOX_LABEL, CONTAINER_LABEL):
+        for container in client.containers.list(all=True, filters={"label": f"{label}=1"}):
+            with contextlib.suppress(DockerException):
+                container.remove(force=True, v=True)
 
 
 def containers_of(client: Any, call_id: str) -> list[Any]:

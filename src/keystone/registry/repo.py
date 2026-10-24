@@ -28,7 +28,7 @@ from keystone.registry.pinning import pending_fingerprint
 
 Sessionmaker = async_sessionmaker[AsyncSession]
 
-Transport = Literal["http", "stdio", "container_stdio"]
+Transport = Literal["http", "stdio", "container_stdio", "builtin"]
 CredentialMode = Literal["none", "static", "per_user"]
 UpstreamSource = Literal["config", "cli"]
 UpstreamStatus = Literal["unknown", "up", "degraded", "down", "disabled"]

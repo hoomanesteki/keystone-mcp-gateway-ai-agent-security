@@ -106,10 +106,12 @@ jobs:
       - run: uv sync
       - name: migrate
         run: uv run alembic upgrade head
-      # The tests marked `docker` run code in the sandbox, and the runner is built from this image
-      # (KS-801). The runner has Docker.
+      # The tests marked `docker` run code in the sandbox (KS-801) and a stdio server in a container
+      # (KS-803). The runner has Docker, and these are the two images they use.
       - name: build the sandbox image
         run: docker build -q -t keystone-sandbox-python:dev -f deploy/sandbox/Dockerfile.python deploy/sandbox
+      - name: build the echo server image
+        run: docker build -q -t keystone-echo-stdio:dev -f examples/upstreams/Dockerfile.echo .
       - name: pytest
         env:
           # A missing daemon or image fails a docker test here, and does not skip it.

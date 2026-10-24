@@ -21,13 +21,16 @@ from keystone.core.types import Risk, ToolTag
 from keystone.identity.vault import HEADER_NAME, Vault
 from keystone.policy.extractors import check_extractors
 from keystone.policy.schema_info import ArgField
-from keystone.registry.naming import check_upstream_id
+from keystone.registry.naming import BUILTIN_UPSTREAM_IDS, check_upstream_id
 from keystone.registry.repo import CredentialMode, UpstreamRepo, UpstreamSpec
 from keystone.registry.ssrf import UnsafeUpstreamUrl, check_upstream_url
 
 log = structlog.get_logger()
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# An image is given to `docker run` after the options, and a name that starts with a dash would be
+# read as one.
+_IMAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,254}")
 
 
 class ConfigError(ValueError):
@@ -57,12 +60,21 @@ class UpstreamConfig(BaseModel):
 
     id: str
     tenant: str | None = None
-    transport: Literal["http", "stdio", "builtin"] = "http"
+    # `builtin` is an upstream that Keystone runs itself: the sandbox (KS-802). `container_stdio` is
+    # a stdio server that runs in a container with no network (KS-803, ADR-0012).
+    transport: Literal["http", "stdio", "container_stdio", "builtin"] = "http"
     url: str | None = None
+    # For stdio, the program and its arguments. For container_stdio, what runs in the container in
+    # place of the image's own command (optional).
     command: list[str] | None = None
-    # Environment for a stdio child, on top of PATH. Keystone's own environment is never passed.
-    # It holds settings, not secrets: this file is not a secret store.
+    # Environment for a stdio child, on top of PATH, or for the container of a container_stdio
+    # one. Keystone's own environment is never passed. It holds settings, not secrets: this file is
+    # not a secret store.
     env: dict[str, str] = Field(default_factory=dict)
+    # container_stdio only: the image to run, which must be built on the host already, and whether
+    # the container gets a network. `bridge` is a decision to let a third-party server reach out.
+    image: str | None = None
+    network: Literal["none", "bridge"] = "none"
     credential_mode: CredentialMode = "none"
     # Header name -> the environment variable that holds its value. At startup Keystone reads the
     # variables and stores them in the vault as the upstream's credential, so the secret is in the
@@ -74,6 +86,13 @@ class UpstreamConfig(BaseModel):
     @classmethod
     def _valid_id(cls, value: str) -> str:
         check_upstream_id(value)
+        return value
+
+    @field_validator("image")
+    @classmethod
+    def _an_image_name(cls, value: str | None) -> str | None:
+        if value is not None and not _IMAGE.fullmatch(value):
+            raise ValueError(f"image {value!r} is not a Docker image name such as img:1")
         return value
 
     @field_validator("env")
@@ -108,6 +127,11 @@ def stdio_environments(upstreams: Sequence[UpstreamConfig]) -> dict[str, dict[st
     return {u.id: dict(u.env) for u in upstreams if u.env}
 
 
+def container_networks(upstreams: Sequence[UpstreamConfig]) -> dict[str, str]:
+    """The network each containerized stdio upstream was given, by upstream id."""
+    return {u.id: u.network for u in upstreams if u.transport == "container_stdio"}
+
+
 def tool_overrides(upstreams: Sequence[UpstreamConfig]) -> dict[str, dict[str, ToolOverride]]:
     """Per-tool settings by upstream id, then by the upstream's own tool name."""
     return {u.id: dict(u.tools) for u in upstreams if u.tools}
@@ -139,12 +163,17 @@ async def _problems(
             for tool_name, override in upstream.tools.items():
                 for problem in check_extractors(override.extract, args):
                     problems.append(f"{name} tool {tool_name!r}: {problem}")
-        if upstream.transport == "builtin":
-            continue
+        if upstream.transport == "builtin" and upstream.id not in BUILTIN_UPSTREAM_IDS:
+            known = ", ".join(sorted(BUILTIN_UPSTREAM_IDS))
+            problems.append(
+                f"there is no built-in upstream named {upstream.id!r} (built in: {known})"
+            )
         if upstream.tenant is None:
             problems.append(f"{name} needs a tenant")
         elif upstream.tenant not in tenant_ids:
             problems.append(f"{name} names tenant {upstream.tenant!r}, which is not in `tenants`")
+        if upstream.transport == "builtin":
+            continue
         if upstream.transport == "http":
             if upstream.url is None:
                 problems.append(f"{name} needs a url")
@@ -154,10 +183,23 @@ async def _problems(
                 await anyio.to_thread.run_sync(check_upstream_url, upstream.url, allow_private)
             except UnsafeUpstreamUrl as exc:
                 problems.append(f"{name}: {exc}")
+        elif upstream.transport == "container_stdio":
+            if not upstream.image:
+                problems.append(f"{name} needs an image")
+            if upstream.url:
+                problems.append(f"{name} is container_stdio, so `url` does not apply")
+            for variable in upstream.env:
+                if variable.upper().startswith("DOCKER_"):
+                    # It would reconfigure the docker command that starts the container.
+                    problems.append(
+                        f"{name} passes {variable} to its container, and docker reads it too"
+                    )
         elif not upstream.command:
             problems.append(f"{name} needs a command")
         if upstream.transport == "http" and (upstream.command or upstream.env):
             problems.append(f"{name} is http, so `command` and `env` do not apply")
+        if upstream.image and upstream.transport != "container_stdio":
+            problems.append(f"{name} is not container_stdio, so `image` does not apply")
         if upstream.credential_env and upstream.transport != "http":
             problems.append(f"{name} is not http, so it has no headers for `credential_env`")
         if upstream.credential_env and upstream.credential_mode == "none":
@@ -174,10 +216,17 @@ async def apply_config_upstreams(
     *,
     allow_private: bool = False,
     args: Mapping[str, ArgField] | None = None,
+    builtins: Collection[str] = (),
 ) -> ConfigReport:
     """Make the database match the config. Raises ConfigError, before writing anything, when an
     entry is unusable. `args` are the fields of the schema's args record (KS-405): an `extract`
-    key or spec that does not fit them is a problem. Without it the extractors are not checked."""
+    key or spec that does not fit them is a problem. Without it the extractors are not checked.
+
+    `builtins` are the ids of the built-in upstreams this process serves (the sandbox, when it is
+    on). A built-in entry in the config is stored when its id is among them and is otherwise
+    skipped, and a skipped one that was stored before is disabled with the other config upstreams
+    that left the file: turning the sandbox off takes its tools away on the next start.
+    """
     problems = await _problems(upstreams, tenant_ids, allow_private, args)
     if problems:
         raise ConfigError("; ".join(problems))
@@ -185,7 +234,7 @@ async def apply_config_upstreams(
     report = ConfigReport()
     kept: set[str] = set()
     for upstream in upstreams:
-        if upstream.transport == "builtin":
+        if upstream.transport == "builtin" and upstream.id not in builtins:
             report.skipped.append(upstream.id)
             continue
         if upstream.tenant is None:  # _problems has already refused this
@@ -196,6 +245,7 @@ async def apply_config_upstreams(
             transport=upstream.transport,
             url=upstream.url,
             command=upstream.command,
+            image=upstream.image,
             credential_mode=upstream.credential_mode,
             source="config",
         )
@@ -210,7 +260,7 @@ async def apply_config_upstreams(
         report.upserted.append(upstream.id)
 
     for row in await repo.list(include_disabled=False):
-        if row.source == "config" and row.id not in kept and row.id not in report.skipped:
+        if row.source == "config" and row.id not in kept:
             await repo.set_status(row.id, "disabled")
             report.disabled.append(row.id)
             log.info("config_upstream_disabled", upstream=row.id)

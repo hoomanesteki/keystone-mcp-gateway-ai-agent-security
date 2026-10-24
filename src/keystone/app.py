@@ -48,13 +48,19 @@ from keystone.policy.store import PolicyStore, reload_on_sighup
 from keystone.policy.versions import PolicyVersionRepo
 from keystone.registry.config import (
     apply_config_upstreams,
+    container_networks,
     seed_credentials,
     stdio_environments,
-    tool_overrides,
 )
 from keystone.registry.repo import ToolRepo, UpstreamRepo
 from keystone.registry.service import RegistryService
 from keystone.registry.sync import RegistrySyncer
+from keystone.sandbox.builtin_upstream import (
+    builtin_clients,
+    sandbox_registered,
+    with_sandbox_defaults,
+)
+from keystone.sandbox.runner import SandboxRunner
 from keystone.settings import Settings
 from keystone.telemetry.metrics import CONTENT_TYPE_LATEST, Metrics
 from keystone.telemetry.tracing import Tracer, build_tracer
@@ -134,17 +140,31 @@ def create_app(
     # like an instruction (KS-706). The admin API shows what it finds.
     screener = Screener.from_settings(settings.scanner)
     directory = UpstreamDirectory()
+    # The sandbox runs code in containers it starts through the Docker socket (KS-801). It exists
+    # when the setting is on and the config lists the `sandbox` upstream, and then the pool serves
+    # that upstream with a client that runs there. Building the runner needs no daemon.
+    sandbox = (
+        SandboxRunner(
+            runtime=settings.sandbox.runtime, max_concurrent=settings.sandbox.max_concurrent
+        )
+        if sandbox_registered(settings)
+        else None
+    )
+    builtins = builtin_clients(settings, sandbox)
     pool = UpstreamPool(
-        directory_client_factory(directory, health_timeout_s=settings.health.timeout_s)
+        directory_client_factory(
+            directory, health_timeout_s=settings.health.timeout_s, builtins=builtins
+        )
     )
     syncer = RegistrySyncer(
         UpstreamRepo(sessions),
         ToolRepo(sessions),
         pool,
         directory,
-        overrides=tool_overrides(settings.upstreams),
+        overrides=with_sandbox_defaults(settings),
         timeout_s=settings.registry.sync_timeout_s,
         environments=stdio_environments(settings.upstreams),
+        networks=container_networks(settings.upstreams),
         service_headers=service_headers,
         screener=screener,
     )
@@ -248,6 +268,7 @@ def create_app(
                 [t.id for t in settings.tenants],
                 allow_private=settings.allow_private_upstreams,
                 args=args_fields(policies.current.schema.text),
+                builtins=builtins.keys(),
             )
             # Credentials given in the environment go into the vault now, before the first sync
             # needs them.
@@ -269,7 +290,7 @@ def create_app(
                     log.info("startup_sync", **report.model_dump())
                 await stack.enter_async_context(
                     background_tasks(
-                        registry, health, settings, policies, approvals, notifier, warmed
+                        registry, health, settings, policies, approvals, notifier, warmed, sandbox
                     )
                 )
                 await stack.enter_async_context(manager.run())
@@ -369,11 +390,12 @@ async def background_tasks(
     approvals: ApprovalService | None = None,
     notifier: ApprovalNotifier | None = None,
     classifier: Classifier | None = None,
+    sandbox: SandboxRunner | None = None,
 ) -> AsyncIterator[None]:
     """Run the periodic sync (unless its interval is 0), the watch for changes made by other
     processes, the health probes (unless their interval is 0), the policy reload on SIGHUP, the
-    sweep of expired approvals, the delivery of their webhooks and the loading of the scanner's
-    model while the body of the `with` runs."""
+    sweep of expired approvals, the delivery of their webhooks, the loading of the scanner's model
+    and the reaper of the sandbox's containers while the body of the `with` runs."""
     async with anyio.create_task_group() as group:
         group.start_soon(registry.run_watch)
         group.start_soon(reload_on_sighup, policies)
@@ -383,6 +405,8 @@ async def background_tasks(
             group.start_soon(approvals.run_sweeper)
         if notifier is not None:
             group.start_soon(notifier.run)
+        if sandbox is not None:
+            group.start_soon(sandbox.run_reaper)
         if settings.registry.sync_interval_s > 0:
             group.start_soon(registry.run_periodic, settings.registry.sync_interval_s)
         if settings.health.interval_s > 0:

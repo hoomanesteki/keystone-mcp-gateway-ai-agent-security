@@ -174,7 +174,12 @@ def _detail(row: Tool, screener: Screener) -> ToolDetail:
 
 def _target(row: Upstream) -> str:
     """Where an upstream is, without anything that could be a credential: a URL loses its user
-    info and query, a stdio server shows its program and how many arguments it has."""
+    info and query, a stdio server shows its program and how many arguments it has, a container
+    shows its image, and a built-in upstream says so."""
+    if row.transport == "builtin":
+        return "built in"
+    if row.transport == "container_stdio":
+        return f"image {row.image}" if row.image else "-"
     if row.url:
         parts = urlsplit(row.url)
         host = parts.hostname or ""
