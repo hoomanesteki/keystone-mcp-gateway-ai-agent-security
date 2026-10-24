@@ -17,6 +17,7 @@ from eval.perf.report import (
     START,
     added,
     generator_busy,
+    kinds_text,
     load,
     render_section,
     runs_of,
@@ -390,18 +391,36 @@ def test_the_committed_document_is_what_the_report_renders_from_the_committed_fi
     assert section_in(text) == rendered.strip()
 
 
-def test_what_failed_is_listed_with_the_events_the_gateway_logged() -> None:
+def test_what_failed_is_listed_with_where_it_began_and_the_events_the_gateway_logged() -> None:
     doc = document()
     run_ = doc["targets"]["scanner-off"]["runs"][0]
+    run_["summary"]["errors"] = 10
     run_["errors"] = {"tool error KS_DENIED: session state is unavailable": 6, "ReadTimeout": 4}
-    run_["log_events"] = {"session_store_failed": 6, "upstream_call_failed": 4}
+    run_["log_events"] = {"session_store_failed (MaxConnectionsError)": 10, "other_event": 1}
+    run_["failed_calls"] = [1] * 8 + [2, 3]
+    run_["failed_at_s"] = [0.0] * 7 + [1.5, 5.0, 9.0]
 
     section = render_section(doc)
 
     assert "### What failed" in section
+    # 100 calls succeeded and 10 failed: 10 of 110.
     assert (
         "| Keystone full, scanner off | 1 KB | 6 tool error KS_DENIED: session state is "
-        "unavailable; 4 ReadTimeout | 10.0% | 6 session_store_failed; 4 upstream_call_failed |"
+        "unavailable; 4 ReadTimeout | 9.1% | 8 of 10 were a first call; 8 began in the first "
+        "2 s | 10 session_store_failed (MaxConnectionsError); 1 other_event |"
     ) in section
+    assert (
+        "In the runs where a tenth of the calls or fewer failed, 8 of the 10 failures were the "
+        "first call of a session and 8 began in the first two seconds: the sessions start "
+        "together, and their first calls arrive at once." in section
+    )
     # No failure, no section.
     assert "### What failed" not in render_section(document())
+
+
+def test_the_commonest_kinds_of_failure_are_shown_and_the_rest_counted() -> None:
+    kinds = {"a": 5, "b": 9, "c": 1, "d": 2, "e": 3}
+
+    assert kinds_text(kinds) == "9 b; 5 a; 3 e; 3 of 2 other kinds"
+    assert kinds_text({"x": 1}) == "1 x"
+    assert kinds_text({}) == "none"

@@ -98,3 +98,25 @@ async def test_a_session_that_cannot_open_is_counted_and_does_not_hold_the_other
     assert result["opened"] == 0 and result["summary"] is None
     assert sum(result["errors"].values()) == 3
     assert all(kind.startswith("open: ") for kind in result["errors"])
+
+
+async def test_calls_that_fail_are_counted_by_cause_and_kept_apart_from_the_ones_that_succeed(
+    keystone_app: KeystoneApp, fake_idp: FakeIdp
+) -> None:
+    # A tool that does not exist: every call is refused by the gateway, and answered at once.
+    spec = through(keystone_app, fake_idp)
+    spec = Spec(spec.url, "echo__nothing", spec.headers, SESSIONS, CALLS, 1024)
+
+    result = await run_load(spec, processes=1)
+
+    summary = result["summary"]
+    assert result["opened"] == SESSIONS
+    # Fifty calls failed, none succeeded, and the percentiles say that nothing can be said of them.
+    assert summary["calls"] == SESSIONS * CALLS and summary["errors"] == SESSIONS * CALLS
+    assert summary["error_rate"] == 1.0 and summary["p50_ms"] is None
+    assert result["latencies_ms"] == [] and len(result["failed_ms"]) == SESSIONS * CALLS
+    [(kind, count)] = result["errors"].items()
+    assert kind.startswith("tool error KS_TOOL_NOT_FOUND: ") and count == SESSIONS * CALLS
+    # Where each failure was: which call of its session, and how long after the timed calls began.
+    assert sorted(result["failed_calls"]) == sorted(list(range(1, CALLS + 1)) * SESSIONS)
+    assert len(result["failed_at_s"]) == SESSIONS * CALLS and min(result["failed_at_s"]) >= 0

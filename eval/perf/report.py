@@ -166,33 +166,57 @@ def stage_table(document: Mapping[str, Any], sequential: bool = False) -> list[s
     return [table(header, rows)] if rows else []
 
 
+def failure_position(run: Mapping[str, Any]) -> str:
+    """Where in the run the failures of a run were, if the file says: how many were the first call
+    of their session, and how many began in the first two seconds of the timed calls."""
+    calls, at = run.get("failed_calls"), run.get("failed_at_s")
+    if not calls or not at:
+        return "-"
+    first = sum(1 for number in calls if number == 1)
+    early = sum(1 for moment in at if moment < 2.0)
+    return f"{first} of {len(calls)} were a first call; {early} began in the first 2 s"
+
+
+def kinds_text(kinds: Mapping[str, int], shown: int = 3) -> str:
+    """The commonest kinds of failure with their counts, and how many others there were."""
+    ordered = sorted(kinds.items(), key=lambda item: (-item[1], item[0]))
+    parts = [f"{n} {kind}" for kind, n in ordered[:shown]]
+    if len(ordered) > shown:
+        parts.append(f"{sum(n for _, n in ordered[shown:])} of {len(ordered) - shown} other kinds")
+    return "; ".join(parts) or "none"
+
+
 def failures_table(document: Mapping[str, Any]) -> list[str]:
-    """What failed in the runs that had a failure: the kinds of the calls that failed, and the
-    events the gateway logged at warning level or above while they were made."""
+    """What failed in the runs that had a failure: the kinds of the calls that failed, where in
+    the run they were, and the events the gateway logged at warning level or above."""
     rows = []
     for key in ORDER:
         entry = document["targets"].get(key)
         if not entry:
             continue
         for size, run in runs_of(document, key).items():
-            kinds = {**run.get("errors", {})}
+            summary = run.get("summary")
             events = run.get("log_events") or {}
-            if not kinds and not events:
+            if not summary or (not summary["errors"] and not events):
                 continue
-            made = len(run["latencies_ms"])
             rows.append(
                 [
                     entry["label"],
                     kb(size),
-                    "; ".join(
-                        f"{n} {kind}" for kind, n in sorted(kinds.items(), key=lambda i: -i[1])
-                    )
-                    or "none",
-                    f"{sum(kinds.values()) / made * 100:.1f}%" if made else NOT,
-                    "; ".join(f"{n} {event}" for event, n in list(events.items())[:4]) or "none",
+                    kinds_text(run.get("errors", {})),
+                    f"{summary_of(run)['error_rate'] * 100:.1f}%",
+                    failure_position(run),
+                    "; ".join(f"{n} {event}" for event, n in list(events.items())[:3]) or "none",
                 ]
             )
-    header = ["Target", "Payload", "Calls that failed", "Share", "Logged at warning or above"]
+    header = [
+        "Target",
+        "Payload",
+        "Calls that failed",
+        "Share",
+        "Where in the run",
+        "Logged at warning or above",
+    ]
     return [table(header, rows)] if rows else []
 
 
@@ -233,7 +257,7 @@ def failed_share(document: Mapping[str, Any], key: str, size: int) -> str:
     run = runs_of(document, key).get(size)
     if not run or not run["summary"] or not run["summary"]["errors"]:
         return ""
-    return f" ({run['summary']['error_rate'] * 100:.1f}% of the calls failed)"
+    return f" ({summary_of(run)['error_rate'] * 100:.1f}% of the calls failed)"
 
 
 def verdicts(document: Mapping[str, Any]) -> list[str]:
@@ -316,7 +340,8 @@ def reading(document: Mapping[str, Any]) -> list[str]:
         out.append(
             f"At {sessions} sessions the echo upstream alone serves {base['throughput']:.0f} calls "
             f"a second at a median of {base['p50_ms']:.1f} ms, and Keystone with the scanner off "
-            f"{mine['throughput']:.0f} calls a second at {mine['p50_ms']:.1f} ms."
+            f"{mine['throughput']:.0f} calls a second at {mine['p50_ms']:.1f} ms, "
+            f"{mine['throughput'] / base['throughput'] * 100:.0f}% of what the upstream does alone."
         )
         box = off.get("container") or {}
         allowed = (document["settings"].get("container") or {}).get("cpus")
@@ -371,6 +396,30 @@ def reading(document: Mapping[str, Any]) -> list[str]:
             + (f" and {rules_scan:.1f} ms with the rules alone" if rules_scan is not None else "")
             + f" at {kb(first)}."
         )
+    alone_cls = runs_of(document, "classifier", sequential=True).get(first)
+    alone_rules = runs_of(document, "rules-only", sequential=True).get(first)
+    if alone_cls and alone_rules and alone_cls.get("stages") and alone_rules.get("stages"):
+        slower = [
+            f"`{stage}` {alone_cls['stages'][stage]['mean_ms']:.1f} ms against "
+            f"{alone_rules['stages'][stage]['mean_ms']:.1f}"
+            for stage in ("pinning", "credential", "session_flags")
+            if stage in alone_cls["stages"] and stage in alone_rules["stages"]
+        ]
+        busy = (cls or {}).get("container") or {}
+        out.append(
+            "With the classifier every stage is slower, not only the scan, though none of them "
+            "waits for the model: "
+            + ", ".join(slower)
+            + " with one session at "
+            + f"{kb(first)}"
+            + (
+                f". While it worked the container used {busy['cpu_percent_mean']:.0f}% of CPU on "
+                "average, against about 100% without it"
+                if busy.get("samples")
+                else ""
+            )
+            + "."
+        )
     out += failure_lines(document)
     stopped = [
         f"{document['targets'][key]['label']} at {kb(size)}"
@@ -411,13 +460,13 @@ def failure_lines(document: Mapping[str, Any]) -> list[str]:
             summary = run.get("summary")
             if not summary or not summary["errors"]:
                 continue
-            shares.append(summary["error_rate"])
+            shares.append(summary_of(run)["error_rate"])
             for event, n in (run.get("log_events") or {}).items():
                 events[event] = events.get(event, 0) + n
     if not shares:
         return []
     top = max(events, key=lambda event: events[event], default=None)
-    return [
+    lines = [
         f"At {document['settings']['sessions']} sessions {min(shares) * 100:.1f}% to "
         f"{max(shares) * 100:.1f}% of the calls through Keystone failed, in "
         f"{len(shares)} of its runs, and none of the calls to the upstream alone"
@@ -428,6 +477,28 @@ def failure_lines(document: Mapping[str, Any]) -> list[str]:
         )
         + "."
     ]
+    first_calls = total = early = 0
+    for key in ORDER:
+        for run in runs_of(document, key).values():
+            summary = run.get("summary")
+            if key == "direct" or not summary or not 0 < summary_of(run)["error_rate"] <= 0.10:
+                continue
+            numbers, moments = run.get("failed_calls") or [], run.get("failed_at_s") or []
+            total += len(numbers)
+            first_calls += sum(1 for number in numbers if number == 1)
+            early += sum(1 for moment in moments if moment < 2.0)
+    if total:
+        lines.append(
+            f"In the runs where a tenth of the calls or fewer failed, {first_calls} of the "
+            f"{total} failures were the first call of a session and {early} began in the first "
+            "two seconds"
+            + (
+                ": the sessions start together, and their first calls arrive at once."
+                if first_calls * 2 >= total
+                else "."
+            )
+        )
+    return lines
 
 
 def incomplete_text(document: Mapping[str, Any]) -> list[str]:
@@ -453,9 +524,10 @@ def machine_text(machine: Mapping[str, Any], box: Mapping[str, Any]) -> str:
     )
     if box and box.get("cpus"):
         text += (
-            f" The keystone container was limited to {box['cpus']:g} CPUs and "
-            f"{gib(box.get('memory_bytes'))}, ran one uvicorn worker, and logged at warning level. "
-            "The sandbox was off, and the rate limits were high enough that no call was refused."
+            f" Docker reported the keystone container limited to {box['cpus']:g} CPUs and "
+            f"{gib(box.get('memory_bytes'))}. It ran one uvicorn worker and logged at warning "
+            "level, with the sandbox off and rate limits high enough that no call was refused "
+            "(`deploy/perf.override.yml`)."
         )
     return text
 
@@ -543,8 +615,9 @@ def render_section(document: Mapping[str, Any], source: Path | None = None) -> s
         out += [
             "### What failed",
             "",
-            "The calls that failed, by what Keystone answered, and what the gateway logged while "
-            "they were made. A call that failed is in the percentiles above, timed like the rest.",
+            "The calls that failed, by what Keystone answered, where in the run they were, and "
+            "what the gateway logged while they were made. A call that failed is counted in the "
+            "share and left out of the percentiles and the calls a second above.",
             "",
             *failed,
             "",

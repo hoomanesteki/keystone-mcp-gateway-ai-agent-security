@@ -149,6 +149,11 @@ class Collected:
     # The calls that succeeded, and the ones that failed, apart: see `summarize`.
     latencies_ms: list[float] = field(default_factory=list)
     failed_ms: list[float] = field(default_factory=list)
+    # For each call that failed: which call of its session it was (1 is the first), and how long
+    # after the timed calls began it started. A failure that is the first call of many sessions, in
+    # the first second, is a burst the gateway could not take; one that is spread out is not.
+    failed_calls: list[int] = field(default_factory=list)
+    failed_at_s: list[float] = field(default_factory=list)
     errors: Counter[str] = field(default_factory=Counter)
     opened: int = 0
     wall_s: float = 0.0
@@ -159,6 +164,8 @@ class Collected:
         return {
             "latencies_ms": self.latencies_ms,
             "failed_ms": self.failed_ms,
+            "failed_calls": self.failed_calls,
+            "failed_at_s": self.failed_at_s,
             "errors": dict(self.errors),
             "opened": self.opened,
             "wall_s": self.wall_s,
@@ -198,8 +205,9 @@ async def one_session(
         collected.opened += 1
         opened()
         await started.wait()
-        stop_at = time.perf_counter() + spec.max_s
-        for _ in range(spec.calls):
+        first = time.perf_counter()
+        stop_at = first + spec.max_s
+        for number in range(1, spec.calls + 1):
             if time.perf_counter() >= stop_at:
                 collected.stopped_early = True
                 break
@@ -216,6 +224,8 @@ async def one_session(
             if failed:
                 collected.errors[failed] += 1
                 collected.failed_ms.append(took)
+                collected.failed_calls.append(number)
+                collected.failed_at_s.append(round(time.perf_counter() - first - took / 1000, 1))
             else:
                 collected.latencies_ms.append(took)
 
@@ -319,6 +329,8 @@ async def run_children(
         Collected(
             latencies_ms=answer["latencies_ms"],
             failed_ms=answer["failed_ms"],
+            failed_calls=answer["failed_calls"],
+            failed_at_s=answer["failed_at_s"],
             errors=Counter(answer["errors"]),
             opened=answer["opened"],
             wall_s=answer["wall_s"],
@@ -348,10 +360,12 @@ async def run_load(
         parts = await run_children(spec, shares, on_go)
     latencies = [value for part in parts for value in part.latencies_ms]
     failed = [value for part in parts for value in part.failed_ms]
+    failed_calls = [value for part in parts for value in part.failed_calls]
+    failed_at = [value for part in parts for value in part.failed_at_s]
     errors: Counter[str] = Counter()
     for part in parts:
         errors.update(part.errors)
-    failed_calls = sum(n for kind, n in errors.items() if not kind.startswith("open: "))
+    failed_count = sum(n for kind, n in errors.items() if not kind.startswith("open: "))
     wall = max(part.wall_s for part in parts)
     return {
         "spec": {
@@ -364,13 +378,15 @@ async def run_load(
             "max_s": spec.max_s,
             "processes": processes,
         },
-        "summary": summarize(latencies, wall, failed_calls) if latencies or failed_calls else None,
+        "summary": summarize(latencies, wall, failed_count) if latencies or failed_count else None,
         "errors": dict(errors),
         "opened": sum(part.opened for part in parts),
         "stopped_early": any(part.stopped_early for part in parts),
         "generator": [{"wall_s": p.wall_s, "cpu_s": p.cpu_s} for p in parts],
         "latencies_ms": latencies,
         "failed_ms": failed,
+        "failed_calls": failed_calls,
+        "failed_at_s": failed_at,
     }
 
 

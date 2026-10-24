@@ -226,16 +226,20 @@ def container() -> str:
 
 
 def limits() -> dict[str, Any]:
-    """What the keystone container is limited to, from Docker."""
+    """What the keystone container is limited to, from Docker, and the image it runs."""
     raw = run(
         "docker",
         "inspect",
         container(),
         "--format",
-        "{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}",
+        "{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.Image}}",
     )
-    nanocpus, memory = (int(part) for part in raw.split())
-    return {"cpus": nanocpus / 1e9 if nanocpus else None, "memory_bytes": memory or None}
+    nanocpus, memory, image = raw.split()
+    return {
+        "cpus": int(nanocpus) / 1e9 if int(nanocpus) else None,
+        "memory_bytes": int(memory) or None,
+        "image": image,
+    }
 
 
 def configure(target: Target) -> dict[str, Any]:
@@ -435,9 +439,12 @@ async def measure(
         "generator": result["generator"],
         "stages": stages,
         "log_events": log_events(name, began) if name else None,
+        "limits": limits() if name else None,
         "container": watched.summary() if watched else None,
         "latencies_ms": result["latencies_ms"],
         "failed_ms": result["failed_ms"],
+        "failed_calls": result["failed_calls"],
+        "failed_at_s": result["failed_at_s"],
     }
 
 
@@ -501,7 +508,9 @@ async def matrix(
             "processes": processes,
             "max_run_s": MAX_RUN_S,
             "payload_tokens": {str(size): token_count(size) for size in sizes},
-            "container": limits() if any(not t.direct for t in targets) and restart else None,
+            # What Docker says the container is limited to, read after the first restart with the
+            # override, since before it the container has no limit.
+            "container": None,
         },
         "targets": {},
     }
@@ -525,6 +534,8 @@ async def matrix(
                 # first, and warms the process for the one with many.
                 if restart and not target.direct:
                     entry["gateway"] = configure(target)
+                    if document["settings"]["container"] is None:
+                        document["settings"]["container"] = limits()
                 if sequential:
                     print(f"== {target.key}, {size} bytes, 1 x {sequential}", file=sys.stderr)
                     alone = await measure(target, size, 1, sequential, 1, sample=False)
