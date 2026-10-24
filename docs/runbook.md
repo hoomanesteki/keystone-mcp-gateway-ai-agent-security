@@ -27,6 +27,8 @@ model again.
 | `make console-e2e` | The browser test of the approval loop (see Console). It starts the stack if it is not running; `make gate PHASE=6` and the nightly run it |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit log (read through the admin API) does not hold one new record for each call |
+| `bash scripts/smoke/phase_8.sh` | The sandbox (olivia's script prints 42, alice is refused with `default-deny`); lena's fourth call of a cent is `KS_BUDGET_EXCEEDED` and the budgets API shows $0.03 of $0.03; the LLM proxy against the fake model API (a whole answer, an Anthropic stream equal to the fake's own bytes, an OpenAI stream asked for its usage, each booked at 4 tokens in and 12 out and $0.000192; an unpriced model is a 400; lena's day is spent, so her request is a 402 and the fake sees nothing; a provider that repeats the key is answered with it taken out, and the key is in no response, log or span; `keystone_llm_tokens_total` grows by 12 and 36). Then Keystone is restarted with a burst of 5 calls for one user, 12 calls are made, 5 pass and 7 are `KS_RATE_LIMITED` with a `retry_after_s` of about 2 s, and a call after that long passes. It clears the day's spend of acme first so that it can run twice, and restores the default limits when it ends. About 2 minutes. |
+| `bash scripts/smoke/phase_7.sh` | The naive agent summarizes unread mail, and one email tells it to forward an invoice to attacker@evil.test. Straight at the mail server the attack lands. Through Keystone nothing is sent: the email scores above 0.85, the session is tainted, and the approval card names `rule-of-two` and `tainted-external-effect`. A summary of harmless mail asks for no approval. `make demo-attack` prints the two runs one after the other. |
 | `bash scripts/smoke/phase_6.sh` | Three agents run as olivia and lena decides through the admin API: a transfer of 900 is held, approved and completed (a second decision is 409 and olivia's own is 403); one of 700 is rejected with a note that the agent gets; one of 600 times out as `KS_APPROVAL_PENDING`, is approved late and is awaited. Then the audit log and `keystone_approvals_pending` are checked. About 20 seconds: the third request waits out the 10 s hold. |
 | `bash scripts/smoke/phase_5.sh` | Runs the demo, finds a Jaeger trace of more than 9 spans with no user or argument in it, reads `keystone_tool_calls_total` from `/metrics` and from Prometheus, finds the dashboard in Grafana, verifies the audit chain, edits a record as the Postgres superuser and checks that `keystone audit verify` exits 2 and names the seq, then puts the record back. About 15 seconds. |
 | `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 16 tools (14 of acme's and Keystone's 2); olivia's transfer of 900 is held for approval, lena rejects it through the admin API and olivia is told `KS_APPROVAL_REJECTED`, the audit shows `require_approval` / `approve-transfer-over-500` and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 30 seconds. |
@@ -50,7 +52,7 @@ Tests never use these ports. They start their own services on free ports.
 | Grafana | 3000 | login `admin` / `admin`, Prometheus and Jaeger provisioned |
 | Mail, files, bank, echo, web | 8101, 8102, 8103, 8104, 8105 | demo upstreams, services `mail-mcp`, `files-mcp`, `bank-mcp`, `echo-mcp`, `web-mcp` |
 | Files for globex | 8112 | the globex tenant's own drive, service `files-globex-mcp` |
-| Fake LLM | 8199 | later phase |
+| Fake LLM | 8199 | the fake model API that the LLM proxy forwards to in compose, service `fake-llm` (see LLM proxy) |
 | Console | 5173 | the Vite dev server (`pnpm dev` in `console/`), which `make console-e2e` also starts. The port is fixed because the Keycloak client `console` allows `http://localhost:5173/*` only |
 
 The credentials above are for local development only. Nothing in compose is meant to be exposed
@@ -299,6 +301,15 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_SANDBOX__TIMEOUT_S` | `30` | How long one run may take before its container is killed. Above 0, at most 300. |
 | `KEYSTONE_SANDBOX__MAX_CONCURRENT` | `4` | Containers running at once. A call over that waits for one to end. |
 | `KEYSTONE_RATE_LIMITS__<SCOPE>__CAPACITY` and `KEYSTONE_RATE_LIMITS__<SCOPE>__REFILL_PER_S` | unset (no limit) | A token bucket for one scope: how many calls at once (1 or more) and how many more each second (above 0). `<SCOPE>` is `PER_TENANT`, `PER_USER`, `PER_AGENT` or `PER_TOOL`. Also `rate_limits.per_user: {capacity: 60, refill_per_s: 1}` in the YAML, and an environment variable changes one field of what the file sets. See Rate limits. |
+| `KEYSTONE_LLM_PROXY__ENABLED` | `false` | Whether the routes `/llm/anthropic/v1/messages` and `/llm/openai/v1/chat/completions` exist. Needs `KEYSTONE_MASTER_KEYS` and a price file; either missing stops the start. See LLM proxy. |
+| `KEYSTONE_LLM_PROXY__TENANT` | the only tenant, when there is one | The tenant that owns the provider keys, and the only one whose agents may use the proxy. Needed when `tenants` lists more than one. |
+| `KEYSTONE_LLM_PROXY__PRICING_FILE` | `pricing.yaml` | The price list, read at start. Compose mounts `deploy/pricing.compose.yaml` (fake prices) at `/etc/keystone/pricing.yaml`. |
+| `KEYSTONE_LLM_PROXY__ALLOW_UNPRICED` | `false` | Let a model that is not in the price list through at no cost, with a warning in the log. When `false` it is refused with 400. |
+| `KEYSTONE_LLM_PROXY__DEFAULT_MAX_TOKENS` | `4096` | The output assumed by the budget check for a request that does not say how long its answer may be. |
+| `KEYSTONE_LLM_PROXY__MAX_BODY_BYTES` | `8388608` | The largest request body the proxy reads (1,024 to 67,108,864). A larger one is refused with 413. |
+| `KEYSTONE_LLM_PROXY__TIMEOUT_S` | `600` | How long the proxy waits on a provider for a byte, for a whole answer or a stream. |
+| `KEYSTONE_LLM_PROXY__ANTHROPIC__BASE_URL`, `KEYSTONE_LLM_PROXY__OPENAI__BASE_URL` | `https://api.anthropic.com`, `https://api.openai.com` | Where the provider's API is. The proxy adds `/v1/messages` or `/v1/chat/completions`. |
+| `KEYSTONE_LLM_PROXY__ANTHROPIC__API_KEY_ENV`, `KEYSTONE_LLM_PROXY__OPENAI__API_KEY_ENV` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | The name of the environment variable that holds the provider's key. At each start the key goes into the vault, and the variable is not read again. `null` for a provider that needs no key. A name that starts with `KEYSTONE_` is refused. |
 
 Four sections come from the YAML file only: `tenants`, `upstreams`, `agents` and `budgets` (see `keystone.example.yaml`).
 
@@ -1233,6 +1244,132 @@ fails after the dispatch, and the audit record shows the price it should have ha
 `GET /admin/api/v1/budgets` lists the tenant's budgets with `limit_usd`, `spent_usd` (what the check
 reads), `window_start` and `resets_at`, and the console's Budgets page draws them. The local stack
 prices `echostd__echo` at a cent, and gives lena three cents a day and acme $25 a day.
+
+## LLM proxy
+
+Model requests can go through Keystone, so that they get the identity, the budget and the tracing of
+a tool call and one place answers "what did this agent cost?" (KS-806, ADR-0016). It is off until
+`llm_proxy.enabled` is true.
+
+```yaml
+llm_proxy:
+  enabled: true
+  tenant: acme                        # whose provider keys these are; needed with more than one tenant
+  pricing_file: /etc/keystone/pricing.yaml
+  anthropic: {base_url: "https://api.anthropic.com", api_key_env: ANTHROPIC_API_KEY}
+  openai: {base_url: "https://api.openai.com", api_key_env: OPENAI_API_KEY}
+```
+
+**Prices come first.** `pricing.example.yaml` shows the shape of `pricing.yaml`, with numbers that
+say on every line that they are not real. Copy it, open each provider's pricing page for each model
+you let your agents use, and write the real prices in. Keystone does not know them and does not
+guess: it stops at start if the file is missing, and refuses a request for a model that is not in
+it. Prices are US dollars for each million tokens (`input_per_mtok`, `output_per_mtok`, and
+optionally `cache_read_per_mtok` and `cache_write_per_mtok`; a cache price left out is the input
+price), and a name that ends in `*` covers a family. The file is read at start: after a change,
+restart. Keep it current, because a price that is too low under-counts spend and nothing can tell.
+
+**The keys** are read from the variables the config names at each start and stored in the vault,
+encrypted, as the static credentials of the pseudo-upstreams `llm_anthropic` and `llm_openai`. A
+variable that is not set leaves the stored key alone, so a key put there by hand stays. The rows
+exist from the first start with the proxy on, and then `keystone cred` can replace a key:
+
+```
+keystone cred set --upstream llm_anthropic --header x-api-key --from-env ANTHROPIC_API_KEY
+printf 'Bearer %s' "$OPENAI_API_KEY" | keystone cred set --upstream llm_openai --header Authorization
+keystone cred list
+```
+
+Anthropic takes its key in `x-api-key` and OpenAI as `Authorization: Bearer <key>`, and the proxy
+sends whatever header the vault holds, so the value stored for OpenAI starts with `Bearer `.
+
+The two ids are reserved and their rows are disabled, so they are never synced, probed or listed
+as upstreams. A key is never returned, logged or put on a span. A request to a provider with
+`api_key_env` set and no key stored is refused with 503 `KS_PROVIDER_KEY_MISSING` before anything is
+sent. Disabling the proxy later does not remove the stored keys; replace them, and revoke them at
+the provider if they should be gone.
+
+**Pointing an agent at it.** The agent uses its Keystone token as the API key, and the SDK's base
+URL is Keystone's:
+
+```
+export ANTHROPIC_BASE_URL=http://localhost:8080/llm/anthropic   # the SDK adds /v1/messages
+export ANTHROPIC_API_KEY=$(scripts/get_token.sh olivia ops-agent)
+export OPENAI_BASE_URL=http://localhost:8080/llm/openai/v1      # the SDK adds /chat/completions
+export OPENAI_API_KEY=$(scripts/get_token.sh olivia ops-agent)
+```
+
+The token is checked as it is for `/mcp`: sign-in, the agent list, the tenant. It may be the bearer
+token or `x-api-key`. Only agents of `llm_proxy.tenant` may use the proxy (403 `KS_DENIED` for
+others). A token lasts as long as the identity provider says, and an SDK that is not given a
+fresh one will start to get 401 when it expires.
+
+**What a request goes through.**
+
+| Step | Refused with | Status |
+|---|---|---|
+| The token | `KS_UNAUTHORIZED`, `KS_FORBIDDEN`, `KS_UNAVAILABLE` (keys unreachable) | 401, 403, 503 |
+| The tenant | `KS_DENIED` | 403 |
+| The body: JSON object, `model`, `stream`, size, no `content-encoding` | `KS_INVALID_REQUEST`, `KS_REQUEST_TOO_LARGE` | 400, 413, 415 |
+| The model has a price | `KS_MODEL_NOT_PRICED` (unless `allow_unpriced`) | 400 |
+| `X-Keystone-Session`, when sent | `KS_SESSION_NOT_FOUND`, `KS_SESSION_MISMATCH` | 404, 403 |
+| The budgets, against the estimate | `KS_BUDGET_EXCEEDED`, or `KS_UNAVAILABLE` when they cannot be read | 402, 503 |
+| The provider's key | `KS_PROVIDER_KEY_MISSING`, `KS_UNAVAILABLE` | 503 |
+| The provider | its own status and body, or `KS_UPSTREAM_ERROR`, `KS_UPSTREAM_TIMEOUT`, `KS_UNAVAILABLE` (too many in flight) | as it answers, 502, 504, 503 |
+
+Keystone's refusals are JSON: `{"error": {"type": "keystone", "code": "KS_BUDGET_EXCEEDED", "message":
+"...", ...}}`, with the facts beside the code (`scope`, `window`, `limit_usd`, `spent_usd`,
+`estimate_usd` and `resets_at` for a budget). A refusal is 402 and not 429 on purpose: SDKs retry
+429 and 5xx. The estimate that the budget is checked against is the body at four bytes a token as
+input, plus `max_tokens` of output (4096 when the request does not say; `n` answers for OpenAI).
+It is deliberately the most the request could cost, so a request with a very large `max_tokens`
+can be refused when a smaller one would not be. Nothing is held: the check is not a reservation
+(ADR-0014).
+
+**What it books.** When an answer ends, and before its last byte is sent, one row goes into
+`spend_ledger` with `kind = 'llm'`, `ref` the request id (the `x-keystone-request-id` header of the
+answer), the model the caller asked for, the tokens and the cost, counted against the same budgets
+as tool calls. The cost is the provider's own token count times the price, and cached tokens are
+priced apart. The counters, the session (when linked) and the metric follow:
+
+```
+docker compose -f deploy/docker-compose.yml exec postgres psql -U keystone -c \
+  "SELECT ts, user_id, model, input_tokens, output_tokens, cost_usd FROM spend_ledger
+   WHERE kind = 'llm' ORDER BY ts DESC LIMIT 10"
+curl -s localhost:8080/metrics | grep keystone_llm_tokens_total
+```
+
+`keystone_llm_tokens_total{tenant,model,direction}` has `direction` `input`, `output`, `cache_read`
+or `cache_write`, and `model` is the name of the entry in the price list that applied (a family
+name for `some-family-*`), or `unpriced`. Each request is a `keystone.llm_call` span (it continues
+a `traceparent` the caller sends) with `gen_ai.system`, `gen_ai.request.model`,
+`gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `keystone.cost_usd` and
+`keystone.outcome`, and a log line `llm_request` with the same, the request id and a hash of the user.
+
+**Streams** reach the caller byte for byte as the provider sends them. An OpenAI stream is asked to
+report its usage (`stream_options.include_usage`), because OpenAI says nothing otherwise, and the
+caller's stream then ends with one more chunk, with an empty `choices` list. A stream that ends
+without the provider's final count, or that is cut, or that the caller leaves, is booked for the
+tokens that were counted and logged as `llm_usage_incomplete` with a `reason` (`partial_usage`,
+`no_usage`, `cut`, `client_gone`). A caller that hangs up on an answer that is not a stream is
+still charged: the proxy reads the rest of it. `llm_booking_failed` in the log means a request was
+answered and could not be written to the books; the line has the request id, and the cost is in
+the `llm_request` line next to it.
+
+**The local stack** forwards both providers to the fake model API (`examples/fake_llm`, the service
+`fake-llm` on port 8199, which wants the key `FAKE_LLM_API_KEY`) and prices it with fake prices
+(`deploy/pricing.compose.yaml`). A request for `fake-model` with a prompt of four words and a
+reply of twelve costs $0.000192. The model name picks a behavior, as the docstring of
+`examples/fake_llm/server.py` says: `fake-model-cached` adds cache tokens, `fake-no-usage` leaves
+the usage out of a stream, `fake-cut` breaks one, `fake-error-429`, `fake-error-500` and
+`fake-error-echo-key` fail, and `fake-slow` is slow. `bash scripts/smoke/phase_8.sh` uses it.
+
+**What it does not do.** It applies no access policy (any agent of the tenant may call any priced
+model, within its budgets), it is not rate limited, it writes no `audit_events` row, it does not
+log prompts or answers, there are no refunds, and a tenant cannot have a provider key of its own.
+The cost is the tokens: a provider's charge for anything else, such as a search tool billed for each
+use, is not counted.
+Only chat requests of the two APIs exist: the other endpoints of a provider are not proxied.
 
 ## Sessions
 
