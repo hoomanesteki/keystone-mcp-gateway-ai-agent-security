@@ -1,0 +1,23 @@
+# FAKE PRICES for the fake models of the local stack (examples/fake_llm). They are not any
+# provider's. The compose stack mounts this file as /etc/keystone/pricing.yaml so that the LLM proxy
+# has something to price the fake-llm service's models with; to proxy a real provider, point
+# llm_proxy at it and put the provider's real prices in a pricing.yaml of your own
+# (pricing.example.yaml shows the shape).
+#
+# Dollars for each million tokens. With these, a request of 4 words in and 12 words out costs
+# (4 * 3 + 12 * 15) / 1,000,000 = $0.000192.
+
+models:
+  fake-model:
+    input_per_mtok: 3.00
+    output_per_mtok: 15.00
+  fake-model-cached:
+    input_per_mtok: 3.00
+    output_per_mtok: 15.00
+    cache_read_per_mtok: 0.30
+    cache_write_per_mtok: 3.75
+  # The other fake models, the ones whose names pick a behavior of the fake API (fake-slow,
+  # fake-cut, fake-error-429 and the rest in examples/fake_llm/server.py), cost the same.
+  fake-*:
+    input_per_mtok: 3.00
+    output_per_mtok: 15.00

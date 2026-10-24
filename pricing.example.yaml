@@ -1,0 +1,31 @@
+# EXAMPLE PRICES. THEY ARE NOT REAL.
+#
+# This file shows the shape of pricing.yaml, which the LLM proxy reads (llm_proxy.pricing_file).
+# The numbers below are placeholders to show the units and nothing more. They are not any provider's
+# price, now or ever, and nobody has checked them against one.
+#
+# Fill in your own before you turn the proxy on: copy this file to pricing.yaml, then open the
+# provider's pricing page for each model you let your agents use and copy its prices here. Keep them
+# current. Keystone costs a request with these numbers and the provider's own token counts, and
+# refuses a model that is not listed.
+#
+# Prices are US dollars for each million tokens.
+#   input_per_mtok         tokens in the request
+#   output_per_mtok        tokens in the answer
+#   cache_read_per_mtok    optional: tokens the provider read from its prompt cache
+#   cache_write_per_mtok   optional: tokens it wrote to the cache
+# A cache price left out is the input price. A name that ends in * covers every model that starts
+# with it, and the longest name that matches wins.
+
+models:
+  example-model-large:
+    input_per_mtok: 1.00
+    output_per_mtok: 2.00
+    cache_read_per_mtok: 0.10
+    cache_write_per_mtok: 1.25
+  example-model-small:
+    input_per_mtok: 0.10
+    output_per_mtok: 0.20
+  example-family-*:
+    input_per_mtok: 0.50
+    output_per_mtok: 1.00
