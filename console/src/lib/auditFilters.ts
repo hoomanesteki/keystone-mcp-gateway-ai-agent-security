@@ -6,6 +6,7 @@ export interface Draft {
   user: string;
   agent: string;
   tool: string;
+  session: string;
   effect: EffectFilter;
   outcome: OutcomeFilter;
   since: string;
@@ -16,6 +17,7 @@ export const EMPTY_DRAFT: Draft = {
   user: "",
   agent: "",
   tool: "",
+  session: "",
   effect: "",
   outcome: "",
   since: "",
@@ -36,7 +38,7 @@ export const OUTCOMES: readonly { value: OutcomeFilter; label: string }[] = [
   { value: "error", label: "error" },
 ];
 
-const KEYS = ["user", "agent", "tool", "effect", "outcome", "since", "until"] as const;
+const KEYS = ["user", "agent", "tool", "session", "effect", "outcome", "since", "until"] as const;
 
 function oneOf<T extends string>(value: string | null, allowed: readonly { value: T }[]): T | "" {
   const found = allowed.find((option) => option.value === value);
@@ -49,6 +51,7 @@ export function draftFromParams(params: URLSearchParams): Draft {
     user: params.get("user") ?? "",
     agent: params.get("agent") ?? "",
     tool: params.get("tool") ?? "",
+    session: params.get("session") ?? "",
     effect: oneOf(params.get("effect"), EFFECTS),
     outcome: oneOf(params.get("outcome"), OUTCOMES),
     since: params.get("since") ?? "",

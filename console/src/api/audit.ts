@@ -13,6 +13,8 @@ export interface AuditFilters {
   user: string;
   agent: string;
   tool: string;
+  /** The id of an MCP session, which the Sessions page links to. */
+  session: string;
   effect: EffectFilter;
   outcome: OutcomeFilter;
   since: string;
@@ -23,6 +25,7 @@ export const NO_FILTERS: AuditFilters = {
   user: "",
   agent: "",
   tool: "",
+  session: "",
   effect: "",
   outcome: "",
   since: "",
@@ -41,6 +44,7 @@ export function useAuditPage(filters: AuditFilters, cursor: number | undefined) 
           user: filters.user.trim(),
           agent: filters.agent.trim(),
           tool: filters.tool.trim(),
+          session: filters.session.trim(),
           effect: filters.effect === "" ? undefined : filters.effect,
           outcome: filters.outcome === "" ? undefined : filters.outcome,
           since: filters.since,

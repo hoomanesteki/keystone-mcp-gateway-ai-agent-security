@@ -9,3 +9,5 @@ export type AuditPage = Schemas["AuditPage"];
 export type VerifyResult = Schemas["VerifyResult"];
 export type ToolSummary = Schemas["ToolSummary"];
 export type ToolDetail = Schemas["ToolDetail"];
+export type BudgetInfo = Schemas["BudgetInfo"];
+export type SessionInfo = Schemas["SessionInfo"];

@@ -3,12 +3,14 @@ import type { Session } from "./types";
 export const ADMIN = "admin";
 export const APPROVER = "approver";
 
-export type Page = "approvals" | "audit" | "tools";
+export type Page = "approvals" | "audit" | "tools" | "budgets" | "sessions";
 
 export const PAGES: readonly { page: Page; path: string; label: string }[] = [
   { page: "approvals", path: "/approvals", label: "Approvals" },
   { page: "audit", path: "/audit", label: "Audit" },
   { page: "tools", path: "/tools", label: "Tools" },
+  { page: "budgets", path: "/budgets", label: "Budgets" },
+  { page: "sessions", path: "/sessions", label: "Sessions" },
 ];
 
 /**

@@ -23,7 +23,7 @@ export function AuditFilterBar({ draft, onChange, onClear }: AuditFilterBarProps
       className="mb-5 rounded-lg border border-line bg-surface p-4 shadow-card"
     >
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-12">
-        <div className="lg:col-span-4">
+        <div className="lg:col-span-3">
           <TextField
             label="User"
             value={draft.user}
@@ -34,7 +34,7 @@ export function AuditFilterBar({ draft, onChange, onClear }: AuditFilterBarProps
             autoComplete="off"
           />
         </div>
-        <div className="lg:col-span-4">
+        <div className="lg:col-span-3">
           <TextField
             label="Agent"
             value={draft.agent}
@@ -45,7 +45,7 @@ export function AuditFilterBar({ draft, onChange, onClear }: AuditFilterBarProps
             autoComplete="off"
           />
         </div>
-        <div className="lg:col-span-4">
+        <div className="lg:col-span-3">
           <TextField
             label="Tool"
             value={draft.tool}
@@ -53,6 +53,17 @@ export function AuditFilterBar({ draft, onChange, onClear }: AuditFilterBarProps
               set("tool", event.target.value);
             }}
             placeholder="bank__transfer"
+            autoComplete="off"
+          />
+        </div>
+        <div className="lg:col-span-3">
+          <TextField
+            label="Session"
+            value={draft.session}
+            onChange={(event) => {
+              set("session", event.target.value);
+            }}
+            placeholder="from the Sessions page"
             autoComplete="off"
           />
         </div>

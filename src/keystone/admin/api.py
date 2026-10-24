@@ -315,6 +315,10 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
         since: Annotated[datetime | None, Query(description="From this time, inclusive.")] = None,
         until: Annotated[datetime | None, Query(description="Up to this time, exclusive.")] = None,
         call_id: str | None = None,
+        session_id: Annotated[
+            str | None,
+            Query(alias="session", description="The MCP session the calls were made in."),
+        ] = None,
         cursor: Annotated[
             int | None, Query(ge=1, description="Records older than this seq, from next_cursor.")
         ] = None,
@@ -329,6 +333,7 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
             (table.c.effect, effect),
             (table.c.outcome, outcome),
             (table.c.call_id, call_id),
+            (table.c.session_id, session_id),
         ):
             if wanted is not None:
                 conditions.append(column == wanted)

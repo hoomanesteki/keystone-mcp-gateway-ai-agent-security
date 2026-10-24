@@ -22,6 +22,15 @@ describe("the audit filters in the address", () => {
     expect(draftFromParams(params)).toEqual(draft);
   });
 
+  test("carry a session, which the sessions page links to", () => {
+    const params = paramsFromDraft({ ...EMPTY_DRAFT, session: "51925e076a99478f" });
+
+    expect(params.toString()).toBe("session=51925e076a99478f");
+    expect(draftFromParams(params).session).toBe("51925e076a99478f");
+    expect(hasFilters({ ...EMPTY_DRAFT, session: "x" })).toBe(true);
+    expect(filtersFromDraft({ ...EMPTY_DRAFT, session: "x" }).session).toBe("x");
+  });
+
   test("leave nothing in the address when nothing is set", () => {
     expect(paramsFromDraft(EMPTY_DRAFT).toString()).toBe("");
     expect(hasFilters(EMPTY_DRAFT)).toBe(false);
