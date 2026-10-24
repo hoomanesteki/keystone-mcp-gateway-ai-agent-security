@@ -234,6 +234,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/budgets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The spending limits of the tenant and what each has spent
+         * @description Every budget of the tenant in the order a call is checked against them (the tenant's,
+         *     then each user's, then each agent's; a day before a month), with the spend its window holds
+         *     now and when the window ends. The spend is the counter the pre-check reads.
+         */
+        get: operations["list_budgets_budgets_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/policies": {
         parameters: {
             query?: never;
@@ -527,6 +549,47 @@ export interface components {
             /** Hash */
             hash: string;
         };
+        /**
+         * BudgetInfo
+         * @description A spending limit and what has been spent against it in the current window (KS-805).
+         */
+        BudgetInfo: {
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "tenant" | "user" | "agent";
+            /**
+             * Scope Id
+             * @description The tenant itself, a user id or an agent id.
+             */
+            scope_id: string;
+            /**
+             * Window
+             * @enum {string}
+             */
+            window: "day" | "month";
+            /**
+             * Limit Usd
+             * @description The limit in US dollars, as a decimal string like the audit log's cost.
+             */
+            limit_usd: string;
+            /**
+             * Spent Usd
+             * @description What the current window holds, in dollars, counted in UTC. It is the counter the pre-check reads, so it is what a call is checked against.
+             */
+            spent_usd: string;
+            /**
+             * Window Start
+             * @description When the current window began (UTC).
+             */
+            window_start: string;
+            /**
+             * Resets At
+             * @description When it ends and the spend is forgotten (UTC).
+             */
+            resets_at: string;
+        };
         /** DecisionBody */
         DecisionBody: {
             /** Approve */
@@ -773,6 +836,8 @@ export interface operations {
                 /** @description Up to this time, exclusive. */
                 until?: string | null;
                 call_id?: string | null;
+                /** @description The MCP session the calls were made in. */
+                session?: string | null;
                 /** @description Records older than this seq, from next_cursor. */
                 cursor?: number | null;
                 limit?: number;
@@ -1457,6 +1522,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_budgets_budgets_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BudgetInfo"][];
+                };
+            };
+            /** @description No token, or one that is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The token lacks the admin role. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
         };

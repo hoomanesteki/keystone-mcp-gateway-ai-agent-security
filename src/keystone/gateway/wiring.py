@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from keystone.core.types import CallContext
@@ -11,21 +13,24 @@ from keystone.gateway.interceptors.approval import (
     ApprovalInterceptor,
     Revalidation,
 )
+from keystone.gateway.interceptors.budget import BudgetInterceptor
 from keystone.gateway.interceptors.credentials import CredentialInterceptor, HeaderSource
 from keystone.gateway.interceptors.flags import SessionFlagsInterceptor
+from keystone.gateway.interceptors.metering import MeteringInterceptor
 from keystone.gateway.interceptors.pinning import PinningInterceptor, ToolStateLookup
 from keystone.gateway.interceptors.policy import PolicyInterceptor
+from keystone.gateway.interceptors.ratelimit import RateLimitInterceptor
 from keystone.gateway.interceptors.scan import OutputScanInterceptor
 from keystone.gateway.pipeline import AuditSink, Dispatcher, Interceptor, Pipeline
 from keystone.gateway.sessions import SessionStore, refresh
 from keystone.gateway.stubs import ApprovalInterceptor as StubApprovalInterceptor
-from keystone.gateway.stubs import (
-    BudgetInterceptor,
-    MeteringInterceptor,
-    RateLimitInterceptor,
-)
+from keystone.gateway.stubs import BudgetInterceptor as StubBudgetInterceptor
+from keystone.gateway.stubs import MeteringInterceptor as StubMeteringInterceptor
 from keystone.gateway.stubs import OutputScanInterceptor as StubOutputScanInterceptor
 from keystone.gateway.stubs import PolicyInterceptor as StubPolicyInterceptor
+from keystone.gateway.stubs import RateLimitInterceptor as StubRateLimitInterceptor
+from keystone.metering.budgets import BudgetService
+from keystone.metering.ratelimit import RateLimiter
 from keystone.policy.engine import PolicyEngine
 from keystone.settings import Settings
 from keystone.telemetry.metrics import Metrics
@@ -77,6 +82,14 @@ class PipelineDeps:
     # records a benign scan, which only the unit tests of the pipeline want. `scanner.enabled`
     # false switches the scan off whatever is given here.
     scanner: OutputScanner | None = None
+    # Where the token buckets are kept (KS-804). Without one, or with no limit in the settings, the
+    # rate limit slot is the Phase 1 stub that lets everything through.
+    rate_limiter: RateLimiter | None = None
+    # The time that the buckets are asked at, in seconds. A test holds it still.
+    clock: Callable[[], float] = time.time
+    # Where spend is kept and budgets are checked (KS-805). Without one the budget and metering
+    # slots are the Phase 1 stubs, which check nothing and charge nothing.
+    budgets: BudgetService | None = None
 
 
 def output_slot(settings: Settings, deps: PipelineDeps) -> Interceptor:
@@ -103,9 +116,17 @@ def build_pipeline(
         raise ValueError(f"unknown interceptor slot: {', '.join(unknown)}")
     revalidation = Revalidation()
     stubs: dict[str, Interceptor] = {
-        "rate_limit": RateLimitInterceptor(),
+        "rate_limit": (
+            RateLimitInterceptor(
+                deps.rate_limiter, settings.rate_limits, metrics=deps.metrics, clock=deps.clock
+            )
+            if deps.rate_limiter is not None and settings.rate_limits.scopes()
+            else StubRateLimitInterceptor()
+        ),
         "pinning": PinningInterceptor(deps.tool_states),
-        "budget": BudgetInterceptor(),
+        "budget": (
+            BudgetInterceptor(deps.budgets) if deps.budgets is not None else StubBudgetInterceptor()
+        ),
         "policy": PolicyInterceptor(deps.policy) if deps.policy else StubPolicyInterceptor(),
         "approval": (
             ApprovalInterceptor(
@@ -119,7 +140,11 @@ def build_pipeline(
         "credential": CredentialInterceptor(deps.vault),
         "output_scan": output_slot(settings, deps),
         "session_flags": SessionFlagsInterceptor(deps.sessions),
-        "metering": MeteringInterceptor(),
+        "metering": (
+            MeteringInterceptor(deps.budgets, deps.sessions)
+            if deps.budgets is not None
+            else StubMeteringInterceptor()
+        ),
     }
     interceptors = [overrides.get(slot, stubs[slot]) for slot in INTERCEPTOR_ORDER]
     pipeline = Pipeline(

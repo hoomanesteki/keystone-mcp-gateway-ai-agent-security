@@ -1,6 +1,7 @@
 import os
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import UTC, datetime
 
 import anyio
 import structlog
@@ -42,19 +43,35 @@ from keystone.identity.credential_repo import vault_from_settings
 from keystone.identity.metadata import add_metadata_route
 from keystone.identity.middleware import Authenticator
 from keystone.identity.vault import Vault, VaultError
+from keystone.metering.budgets import (
+    BudgetService,
+    MemoryCounters,
+    PostgresBudgets,
+    RedisCounters,
+)
+from keystone.metering.ledger import PostgresLedger
+from keystone.metering.llm_proxy import LlmProxy, mount_llm_proxy, seed_provider_keys
+from keystone.metering.pricing import PriceList
+from keystone.metering.ratelimit import MemoryLimiter, RateLimiter, RedisLimiter
 from keystone.policy.engine import CedarPolicyEngine, ObservedEngine
 from keystone.policy.schema_info import args_fields
 from keystone.policy.store import PolicyStore, reload_on_sighup
 from keystone.policy.versions import PolicyVersionRepo
 from keystone.registry.config import (
     apply_config_upstreams,
+    container_networks,
     seed_credentials,
     stdio_environments,
-    tool_overrides,
 )
 from keystone.registry.repo import ToolRepo, UpstreamRepo
 from keystone.registry.service import RegistryService
 from keystone.registry.sync import RegistrySyncer
+from keystone.sandbox.builtin_upstream import (
+    builtin_clients,
+    sandbox_registered,
+    with_sandbox_defaults,
+)
+from keystone.sandbox.runner import SandboxRunner
 from keystone.settings import Settings
 from keystone.telemetry.metrics import CONTENT_TYPE_LATEST, Metrics
 from keystone.telemetry.tracing import Tracer, build_tracer
@@ -96,11 +113,13 @@ def create_app(
     wrap_dispatcher: Callable[[Dispatcher], Dispatcher] | None = None,
     environ: Mapping[str, str] | None = None,
     tracer: Tracer | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> FastAPI:
     """Build the app. The keyword arguments are seams for tests: a different audit sink, a
     real interceptor in one slot, a spy around the dispatcher, the environment that upstream
-    credentials are read from (the process environment by default), or a tracer that keeps its
-    spans in memory."""
+    credentials are read from (the process environment by default), a tracer that keeps its
+    spans in memory, or a clock (seconds since the epoch) that the rate limits and, from KS-805,
+    the budgets read the time from."""
     settings = settings or Settings()
     metrics = Metrics(
         tenants=[t.id for t in settings.tenants], upstreams=[u.id for u in settings.upstreams]
@@ -134,17 +153,31 @@ def create_app(
     # like an instruction (KS-706). The admin API shows what it finds.
     screener = Screener.from_settings(settings.scanner)
     directory = UpstreamDirectory()
+    # The sandbox runs code in containers it starts through the Docker socket (KS-801). It exists
+    # when the setting is on and the config lists the `sandbox` upstream, and then the pool serves
+    # that upstream with a client that runs there. Building the runner needs no daemon.
+    sandbox = (
+        SandboxRunner(
+            runtime=settings.sandbox.runtime, max_concurrent=settings.sandbox.max_concurrent
+        )
+        if sandbox_registered(settings)
+        else None
+    )
+    builtins = builtin_clients(settings, sandbox)
     pool = UpstreamPool(
-        directory_client_factory(directory, health_timeout_s=settings.health.timeout_s)
+        directory_client_factory(
+            directory, health_timeout_s=settings.health.timeout_s, builtins=builtins
+        )
     )
     syncer = RegistrySyncer(
         UpstreamRepo(sessions),
         ToolRepo(sessions),
         pool,
         directory,
-        overrides=tool_overrides(settings.upstreams),
+        overrides=with_sandbox_defaults(settings),
         timeout_s=settings.registry.sync_timeout_s,
         environments=stdio_environments(settings.upstreams),
+        networks=container_networks(settings.upstreams),
         service_headers=service_headers,
         screener=screener,
     )
@@ -199,6 +232,41 @@ def create_app(
     session_store: SessionStore = (
         RedisSessionStore(redis, SessionRepo(sessions)) if redis else InMemorySessionStore()
     )
+    # The token buckets share Redis with the sessions, and live in the process when there is none.
+    limiter: RateLimiter = RedisLimiter(redis) if redis else MemoryLimiter()
+
+    # Spend (KS-805): the ledger in Postgres is the record, and the counters that budgets are
+    # checked against are a cache of it in Redis, in the process when there is none. The windows
+    # are counted in UTC from the same clock as the rate limits.
+    def budget_clock() -> datetime:
+        return datetime.fromtimestamp(clock(), UTC) if clock else datetime.now(UTC)
+
+    budgets = BudgetService(
+        PostgresBudgets(sessions),
+        PostgresLedger(sessions),
+        RedisCounters(redis) if redis else MemoryCounters(),
+        clock=budget_clock,
+        metrics=metrics,
+    )
+    # The LLM proxy (KS-806) sends model requests on with the identity, the budgets and the tracing
+    # of a tool call. It exists only when the config turns it on, and then the vault must hold the
+    # provider keys and the price list must be readable: both are checked now, so that a config
+    # that cannot work stops startup and does not answer 503 to the first agent.
+    llm_proxy: LlmProxy | None = None
+    if settings.llm_proxy.enabled:
+        if vault is None:
+            raise VaultError("llm_proxy is enabled, so KEYSTONE_MASTER_KEYS must be set")
+        llm_proxy = LlmProxy(
+            settings,
+            authenticator=authenticator,
+            vault=vault,
+            budgets=budgets,
+            sessions=session_store,
+            prices=PriceList.load(settings.llm_proxy.pricing_file),
+            metrics=metrics,
+            tracer=tracer,
+            now=budget_clock,
+        )
     # The scanner reads every output (KS-704). Its model is not loaded here: the lifespan starts
     # that in the background, and until it is ready a scan is answered by the rules alone.
     classifier = load_classifier(settings.scanner) if settings.scanner.enabled else None
@@ -223,6 +291,9 @@ def create_app(
             approvals=approvals,
             sessions=session_store,
             scanner=scanner,
+            rate_limiter=limiter,
+            budgets=budgets,
+            **({"clock": clock} if clock is not None else {}),
         ),
         interceptors,
     )
@@ -232,13 +303,19 @@ def create_app(
         RedisListCache(redis) if redis else MemoryListCache(),
         ttl_s=settings.policy.list_cache_ttl_s,
     )
-    gateway = Gateway(settings, registry, session_store, pipeline, tool_filter, virtual)
+    gateway = Gateway(
+        settings, registry, session_store, pipeline, tool_filter, virtual, now=budget_clock
+    )
     registry.add_listener(gateway.notify_tools_changed)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             await upsert_tenants(sessions, settings.tenants)
+            # The budgets of the config are stored, the ones it no longer lists are dropped, and the
+            # counters of the current windows are set from the ledger. A budget for a tenant that is
+            # not listed stops startup.
+            await budgets.start(settings.budgets, [t.id for t in settings.tenants])
             await policies.record_current()
             # A config the registry cannot use (unknown tenant, a URL the SSRF guard refuses)
             # stops startup: serving with some upstreams silently missing is worse.
@@ -248,6 +325,7 @@ def create_app(
                 [t.id for t in settings.tenants],
                 allow_private=settings.allow_private_upstreams,
                 args=args_fields(policies.current.schema.text),
+                builtins=builtins.keys(),
             )
             # Credentials given in the environment go into the vault now, before the first sync
             # needs them.
@@ -255,6 +333,15 @@ def create_app(
                 await seed_credentials(
                     vault, settings.upstreams, os.environ if environ is None else environ
                 )
+                # The provider keys of the LLM proxy go in the same way, as the static credentials
+                # of two pseudo-upstreams.
+                if llm_proxy is not None:
+                    await seed_provider_keys(
+                        settings.llm_proxy,
+                        UpstreamRepo(sessions),
+                        vault,
+                        os.environ if environ is None else environ,
+                    )
             # One task enters and leaves the pool, the sync loop and the session manager, as
             # the SDK's cancel scopes require (engineering note 1).
             async with AsyncExitStack() as stack:
@@ -269,12 +356,14 @@ def create_app(
                     log.info("startup_sync", **report.model_dump())
                 await stack.enter_async_context(
                     background_tasks(
-                        registry, health, settings, policies, approvals, notifier, warmed
+                        registry, health, settings, policies, approvals, notifier, warmed, sandbox
                     )
                 )
                 await stack.enter_async_context(manager.run())
                 yield
         finally:
+            if llm_proxy is not None:
+                await llm_proxy.aclose()
             if redis is not None:
                 await redis.aclose()
             await engine.dispose()
@@ -305,6 +394,7 @@ def create_app(
     app.state.vault = vault
     app.state.policies = policies
     app.state.approvals = approvals
+    app.state.budgets = budgets
     # The admin API is an app of its own under a prefix: its own schema, errors and CORS rule.
     admin_api = create_admin_app(
         AdminDeps(
@@ -318,11 +408,14 @@ def create_app(
             if isinstance(session_store, SessionDirectory)
             else None,
             approvals=approvals,
+            budgets=budgets,
         )
     )
     app.mount(PREFIX, admin_api)
     manager = mount_mcp(app, gateway, authenticator)
     add_metadata_route(app, settings)
+    if llm_proxy is not None:
+        mount_llm_proxy(app, llm_proxy)
 
     @app.get("/metrics", include_in_schema=False)
     async def prometheus() -> Response:
@@ -369,11 +462,12 @@ async def background_tasks(
     approvals: ApprovalService | None = None,
     notifier: ApprovalNotifier | None = None,
     classifier: Classifier | None = None,
+    sandbox: SandboxRunner | None = None,
 ) -> AsyncIterator[None]:
     """Run the periodic sync (unless its interval is 0), the watch for changes made by other
     processes, the health probes (unless their interval is 0), the policy reload on SIGHUP, the
-    sweep of expired approvals, the delivery of their webhooks and the loading of the scanner's
-    model while the body of the `with` runs."""
+    sweep of expired approvals, the delivery of their webhooks, the loading of the scanner's model
+    and the reaper of the sandbox's containers while the body of the `with` runs."""
     async with anyio.create_task_group() as group:
         group.start_soon(registry.run_watch)
         group.start_soon(reload_on_sighup, policies)
@@ -383,6 +477,8 @@ async def background_tasks(
             group.start_soon(approvals.run_sweeper)
         if notifier is not None:
             group.start_soon(notifier.run)
+        if sandbox is not None:
+            group.start_soon(sandbox.run_reaper)
         if settings.registry.sync_interval_s > 0:
             group.start_soon(registry.run_periodic, settings.registry.sync_interval_s)
         if settings.health.interval_s > 0:

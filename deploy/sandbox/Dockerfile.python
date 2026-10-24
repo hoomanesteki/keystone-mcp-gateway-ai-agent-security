@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1
+# The image that sandbox__run_python and sandbox__run_shell run code in (KS-801, ADR-0012).
+# Build it from the repository root: docker build -t keystone-sandbox-python:dev -f deploy/sandbox/Dockerfile.python deploy/sandbox
+# Base image and packages are pinned. See docs/adr/0002-dependency-pins.md.
+#
+# The image is only half of the sandbox. The container it runs in gets no network, a read-only
+# root, no capabilities and hard limits from the runner (src/keystone/sandbox/runner.py), so
+# nothing in this file is a defense. It keeps the image small and gives the code a user that owns
+# nothing.
+
+FROM python:3.12.15-slim-trixie
+
+# numpy and pandas for the reports an agent writes. wget is here so that "the network is gone" can
+# be shown with the tool people reach for first; the container has no network, so it fetches
+# nothing. The package lists are removed in the same layer, and pip keeps no cache.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir numpy==2.5.4 pandas==3.1.0 \
+    && useradd --system --uid 10001 --user-group --home-dir /nonexistent --no-create-home sandbox
+
+# The runner mounts a tmpfs on /workspace and on /tmp. Docker gives a tmpfs the mode of the
+# directory it covers and the owner root, so /workspace is 1777 (like /tmp) for the user to write
+# there. The root is read-only, so nothing may try to write a bytecode file next to the code it
+# imports.
+RUN mkdir -p /workspace && chmod 1777 /workspace
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HOME=/tmp
+WORKDIR /workspace
+USER 10001:10001
+CMD ["python"]

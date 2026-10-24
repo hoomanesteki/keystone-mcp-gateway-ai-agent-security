@@ -2,10 +2,11 @@
 # Phase 3 smoke, against the compose stack (make up):
 #   1. Keycloak gives tokens to alice (acme) and bob (globex).
 #   2. A request without a token gets 401 and a pointer to the sign-in metadata.
-#   3. Olivia, an operator, lists acme's 16 tools and none of globex's, and the 2 that Keystone
-#      offers every caller (since Phase 6): 18. Acme has had the web server's `fetch` since Phase 7.
+#   3. Olivia, an operator, lists acme's 18 tools and none of globex's, and the 2 that Keystone
+#      offers every caller (since Phase 6): 20. Acme has had the web server's `fetch` since Phase 7
+#      and the sandbox's two tools since Phase 8.
 #      (Alice, in support, sees 14 of acme's since Phase 4: the two high-risk tools are hidden
-#      from her. scripts/smoke/phase_4.sh checks that.)
+#      from her, and the sandbox's are high risk too. scripts/smoke/phase_4.sh checks that.)
 #   4. Bob lists globex's 3 tools and Keystone's 2, none of acme's, and calling bank__get_balance by
 #      name gives KS_TOOL_NOT_FOUND.
 #   5. After calls that work, fail and are refused, the mail server says it received the API key
@@ -67,7 +68,7 @@ echo
 step "3. olivia lists acme's tools"
 acme_tools=$(probe_as olivia ops-agent list)
 echo "$acme_tools" | sed -n '1p'
-grep -qx 'tools: 18' <<<"$acme_tools" || fail "olivia should see 18 tools"
+grep -qx 'tools: 20' <<<"$acme_tools" || fail "olivia should see 20 tools"
 for tool in bank__get_balance mail__read_email files__read_file echostd__echo; do
   grep -qx "$tool" <<<"$acme_tools" || fail "olivia does not see $tool"
 done

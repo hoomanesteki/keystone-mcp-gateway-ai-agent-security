@@ -23,12 +23,12 @@ from keystone.core.canonical import canonical_json, sha256_hex
 from keystone.core.types import Risk, ToolRef, ToolStatus, ToolTag
 from keystone.db.models import Tool, Upstream
 from keystone.db.session import affected
-from keystone.registry.naming import is_reserved
+from keystone.registry.naming import LLM_UPSTREAM_IDS, is_reserved
 from keystone.registry.pinning import pending_fingerprint
 
 Sessionmaker = async_sessionmaker[AsyncSession]
 
-Transport = Literal["http", "stdio", "container_stdio"]
+Transport = Literal["http", "stdio", "container_stdio", "builtin"]
 CredentialMode = Literal["none", "static", "per_user"]
 UpstreamSource = Literal["config", "cli"]
 UpstreamStatus = Literal["unknown", "up", "degraded", "down", "disabled"]
@@ -57,7 +57,7 @@ class UpstreamRepo:
         An id that belongs to another tenant is an error: ids are unique across tenants, and the
         id of Keystone's own tools belongs to none."""
         if is_reserved(spec.id):
-            raise ValueError(f"upstream id {spec.id!r} is reserved for Keystone's own tools")
+            raise ValueError(f"upstream id {spec.id!r} is reserved for Keystone's own use")
         values: dict[str, Any] = spec.model_dump()
         insertion = insert(Upstream).values(values)
         statement = insertion.on_conflict_do_update(
@@ -69,6 +69,33 @@ class UpstreamRepo:
             row = (await session.scalars(statement)).one_or_none()
         if row is None:
             raise ValueError(f"upstream id {spec.id!r} already belongs to another tenant")
+        return row
+
+    async def ensure_provider(self, tenant_id: str, upstream_id: str, url: str) -> Upstream:
+        """The row that a provider key of the LLM proxy belongs to (KS-806). It is disabled from the
+        start, so nothing syncs it, probes it or lists its tools, and it exists because a credential
+        needs an upstream to belong to. Only the two ids the proxy uses are accepted here; they are
+        reserved against every other way in. An id that belongs to another tenant is an error."""
+        if upstream_id not in LLM_UPSTREAM_IDS:
+            raise ValueError(f"{upstream_id!r} is not a provider of the LLM proxy")
+        insertion = insert(Upstream).values(
+            id=upstream_id,
+            tenant_id=tenant_id,
+            transport="http",
+            url=url,
+            credential_mode="static",
+            source="config",
+            status="disabled",
+        )
+        statement = insertion.on_conflict_do_update(
+            index_elements=[Upstream.id],
+            set_={"url": insertion.excluded.url, "credential_mode": "static", "status": "disabled"},
+            where=Upstream.tenant_id == insertion.excluded.tenant_id,
+        ).returning(Upstream)
+        async with self._sessionmaker() as session, session.begin():
+            row = (await session.scalars(statement)).one_or_none()
+        if row is None:
+            raise ValueError(f"upstream id {upstream_id!r} already belongs to another tenant")
         return row
 
     async def list(

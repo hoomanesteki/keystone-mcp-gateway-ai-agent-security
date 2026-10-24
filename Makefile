@@ -13,7 +13,7 @@ COMPOSE := docker compose -f deploy/docker-compose.yml $(if $(wildcard .env),--e
 # The console has its own package, and console/.nvmrc names the Node version it runs on.
 CONSOLE := pnpm --dir console
 
-.PHONY: help prose commits setup lint fmt type policy test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo demo-attack github-setup console-types console-check console-e2e
+.PHONY: help prose commits setup lint fmt type policy test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo demo-attack github-setup console-types console-check console-e2e sandbox-image echo-image
 
 help:
 	@grep -E '^[a-z0-9-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | column -t -s $$'\t'
@@ -47,8 +47,10 @@ policy: ## the policy cases, and every policy matched by a case
 test-unit: ## unit tests and invariants that need no services
 	@$(call pytest,tests/unit tests/invariants -m "$(UNIT_MARKS)")
 
-test-int: ## integration tests (needs postgres and redis)
-	@$(call pytest,tests/integration tests/invariants -m "not e2e and not slow")
+# The tests marked `docker` run the sandbox and a containerized server. Here they must run: a skip
+# would hide a broken one.
+test-int: sandbox-image echo-image ## integration tests (needs postgres, redis and Docker)
+	@KEYSTONE_REQUIRE_DOCKER=1 $(call pytest,tests/integration tests/invariants -m "not e2e and not slow")
 
 test-e2e: ## end-to-end tests against the compose stack
 	@$(call pytest,tests/e2e -m e2e)
@@ -74,12 +76,12 @@ ci-local: up-core ## the same steps as CI, run locally
 	docker run --rm keystone:ci version
 	$(MAKE) commits prose
 
-gate: up ## everything a phase gate runs: make gate PHASE=N
+gate: up echo-image ## everything a phase gate runs: make gate PHASE=N
 	@test -n "$(PHASE)" || { echo "usage: make gate PHASE=N" >&2; exit 2; }
 	@if [ $(PHASE) -ge 7 ]; then uv sync --locked --extra scanner --extra eval; fi
 	$(MAKE) lint type
 	@if [ $(PHASE) -ge 4 ]; then $(MAKE) policy; fi
-	$(RUN) pytest --phase $(PHASE) tests/unit tests/integration tests/invariants tests/e2e
+	KEYSTONE_REQUIRE_DOCKER=1 $(RUN) pytest --phase $(PHASE) tests/unit tests/integration tests/invariants tests/e2e
 	@if [ $(PHASE) -ge 6 ]; then $(MAKE) console-check console-e2e; fi
 	@k=0; while [ $$k -le $(PHASE) ]; do \
 		f=scripts/smoke/phase_$$k.sh; \
@@ -102,6 +104,12 @@ console-e2e: ## console: the Playwright test, in headless chromium, against the 
 	$(CONSOLE) install --frozen-lockfile
 	$(CONSOLE) exec playwright install chromium
 	$(CONSOLE) e2e
+
+sandbox-image: ## build the image the sandbox runs code in (the compose stack builds it too)
+	docker build -q -t keystone-sandbox-python:dev -f deploy/sandbox/Dockerfile.python deploy/sandbox >/dev/null
+
+echo-image: ## build the echo server as a stdio image, for the containerized upstream tests
+	docker build -q -t keystone-echo-stdio:dev -f examples/upstreams/Dockerfile.echo . >/dev/null
 
 up: ## build and start the local stack and wait until every service is healthy
 	$(COMPOSE) up -d --build --wait

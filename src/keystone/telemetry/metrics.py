@@ -9,8 +9,8 @@ protected than logs, and a user label would also make the series count grow with
 
 The metrics of Phases 6 to 8 (approvals, the scanner, rate limits, budgets, LLM tokens) were
 declared before anything set them, so the dashboard could name them from the start. Approvals
-(KS-604) and the scanner (KS-704) are set now; rate limits, budgets and LLM tokens wait for
-Phase 8.
+(KS-604), the scanner (KS-704), rate limits (KS-804), budgets (KS-805) and LLM tokens (KS-806) are
+all set now.
 """
 
 from __future__ import annotations
@@ -60,6 +60,16 @@ POLICY_BUCKETS = (0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 
 SCORE_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 # What can fail in a scan: the classifier, the rules, and the action on a flagged output.
 SCAN_STAGES = ("rules", "classifier", "action")
+# The scopes of a rate limit (settings.RateLimitSettings).
+RATE_SCOPES = ("per_tenant", "per_user", "per_agent", "per_tool")
+# The scopes of a budget (settings.BudgetConfig).
+BUDGET_SCOPES = ("tenant", "user", "agent")
+# What the tokens of a model request are counted as. A cache token is priced apart from a fresh
+# one, so it is counted apart too.
+TOKEN_DIRECTIONS = ("input", "output", "cache_read", "cache_write")
+# The label of a model that the proxy let through with no price (llm_proxy.allow_unpriced). The
+# name the caller sent is not used: callers choose it, and the set of labels must stay bounded.
+UNPRICED = "unpriced"
 
 
 @dataclass(frozen=True)
@@ -176,20 +186,30 @@ class Metrics:
             "Scans that failed and were worked around, by stage",
             ["stage"],
         )
-        # Declared for Phase 8. Nothing sets these yet.
+        # Set by the rate limit slot (KS-804), for each call it refuses.
         self.rate_limited = self._counter(
-            "keystone_rate_limited", "Calls refused by a rate limit (Phase 8)", ["tenant", "scope"]
-        )
-        self.budget_spent_usd = self._gauge(
-            "keystone_budget_spent_usd",
-            "Spend in the current budget window (Phase 8)",
+            "keystone_rate_limited",
+            "Calls refused by a rate limit, by tenant and scope",
             ["tenant", "scope"],
         )
+        # Set by the budget service (KS-805): for each tenant and scope, the highest spend in the
+        # current window among the budgets of that scope.
+        self.budget_spent_usd = self._gauge(
+            "keystone_budget_spent_usd",
+            "Highest spend in the current window among the budgets of a scope, in US dollars",
+            ["tenant", "scope"],
+        )
+        # Set by the LLM proxy (KS-806) from the provider's own count. `model` is the name of the
+        # entry in the price list that priced the request, which may be a pattern such as
+        # some-family-*, so the set of values is the size of that file and not the number of
+        # models callers name.
         self.llm_tokens = self._counter(
             "keystone_llm_tokens",
-            "LLM tokens used, by model and direction (Phase 8)",
+            "Tokens used by model requests through the LLM proxy, by price list entry and "
+            "direction (input, output, cache_read, cache_write)",
             ["tenant", "model", "direction"],
         )
+        self._model = _Known(None, OTHER)
 
     # -- declaring
 
@@ -222,6 +242,26 @@ class Metrics:
         """The score of one output that was scanned. A scan that failed has no score and is not
         observed: it is counted by `scan_failed`."""
         self.scan_score.labels(tenant=self._tenant(tenant)).observe(score)
+
+    def rate_limit_refused(self, tenant: str, scope: str) -> None:
+        """A call that a rate limit refused. `scope` is one of RATE_SCOPES."""
+        self.rate_limited.labels(
+            tenant=self._tenant(tenant), scope=scope if scope in RATE_SCOPES else OTHER
+        ).inc()
+
+    def budget_spent(self, tenant: str, scope: str, usd: float) -> None:
+        """The highest spend, in the window it is in now, among a tenant's budgets of one scope."""
+        self.budget_spent_usd.labels(
+            tenant=self._tenant(tenant), scope=scope if scope in BUDGET_SCOPES else OTHER
+        ).set(usd)
+
+    def llm_tokens_used(self, tenant: str, model: str, counts: Mapping[str, int]) -> None:
+        """The tokens of one model request, by direction (TOKEN_DIRECTIONS). A direction with no
+        tokens leaves its series alone, so a model that was never used has none."""
+        labels = {"tenant": self._tenant(tenant), "model": self._model(model)}
+        for direction, count in counts.items():
+            if count > 0 and direction in TOKEN_DIRECTIONS:
+                self.llm_tokens.labels(direction=direction, **labels).inc(count)
 
     def session_tainted(self, tenant: str) -> None:
         """An injection tainted a session that was not tainted when the call began."""

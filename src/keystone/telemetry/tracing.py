@@ -11,6 +11,11 @@ carry a header or an argument: a failure is a status with fixed text.
 
 `keystone.user_hash` is the first 12 hex characters of sha256 of the user id. It lets two traces of
 one user be matched. It is not secret: whoever holds a list of user ids can hash them.
+
+A request to the LLM proxy (KS-806) has a span of its own, `keystone.llm_call`. It holds the
+provider, the model that was asked for, the token counts, the cost, the status and the same tenant,
+agent and user hash. It holds no prompt, no answer and no key: the proxy never puts a header or a
+body on a span.
 """
 
 from __future__ import annotations
@@ -67,6 +72,15 @@ class SpanHandle(Protocol):
         ...
 
 
+class OpenSpan(SpanHandle, Protocol):
+    """A span that the caller ends itself, for work that outlives the function that began it: the
+    answer to a request that is streamed back after its handler has returned."""
+
+    def end(self) -> None:
+        """End the span. A second call does nothing."""
+        ...
+
+
 class Tracer(Protocol):
     def span(
         self,
@@ -75,6 +89,18 @@ class Tracer(Protocol):
         *,
         kind: Kind = "internal",
     ) -> AbstractContextManager[SpanHandle]: ...
+
+    def open_span(
+        self,
+        name: str,
+        attrs: Mapping[str, SpanValue] | None = None,
+        *,
+        kind: Kind = "internal",
+        incoming: Mapping[str, str] | None = None,
+    ) -> OpenSpan:
+        """Begin a span that is not made current and ends when `end()` is called. It is a child of
+        the trace in `incoming` (the headers of the request) when they carry one."""
+        ...
 
     def tool_call(self, ctx: CallContext) -> AbstractContextManager[SpanHandle]:
         """The root span of a call: a child of the incoming `traceparent` when there is one."""
@@ -93,6 +119,11 @@ class _NoSpan:
         return None
 
 
+class _NoOpenSpan(_NoSpan):
+    def end(self) -> None:
+        return None
+
+
 class NoopTracer:
     """No spans at all: what runs when no OTLP endpoint is set."""
 
@@ -104,6 +135,16 @@ class NoopTracer:
         kind: Kind = "internal",
     ) -> AbstractContextManager[SpanHandle]:
         return contextlib.nullcontext(_NoSpan())
+
+    def open_span(
+        self,
+        name: str,
+        attrs: Mapping[str, SpanValue] | None = None,
+        *,
+        kind: Kind = "internal",
+        incoming: Mapping[str, str] | None = None,
+    ) -> OpenSpan:
+        return _NoOpenSpan()
 
     def tool_call(self, ctx: CallContext) -> AbstractContextManager[SpanHandle]:
         return contextlib.nullcontext(_NoSpan())
@@ -126,6 +167,17 @@ class _OTelSpan:
 
     def fail(self, description: str) -> None:
         self._span.set_status(Status(StatusCode.ERROR, description))
+
+
+class _OTelOpenSpan(_OTelSpan):
+    def __init__(self, span: Span) -> None:
+        super().__init__(span)
+        self._ended = False
+
+    def end(self) -> None:
+        if not self._ended:
+            self._ended = True
+            self._span.end()
 
 
 def user_hash(user_id: str) -> str:
@@ -162,6 +214,30 @@ class OTelTracer:
         kind: Kind = "internal",
     ) -> AbstractContextManager[SpanHandle]:
         return self._start(name, attrs, _KINDS[kind], None)
+
+    def open_span(
+        self,
+        name: str,
+        attrs: Mapping[str, SpanValue] | None = None,
+        *,
+        kind: Kind = "internal",
+        incoming: Mapping[str, str] | None = None,
+    ) -> OpenSpan:
+        carrier = {k: incoming[k] for k in TRACE_HEADERS if incoming and incoming.get(k)}
+        parent = _propagator.extract(carrier) if carrier else None
+        # The span is started and not made current: it ends in another task than the one that began
+        # it, where detaching a context would fail. Exceptions are not recorded, as in `_start`.
+        span = self._tracer.start_span(
+            name,
+            context=parent,
+            kind=_KINDS[kind],
+            record_exception=False,
+            set_status_on_exception=False,
+        )
+        handle = _OTelOpenSpan(span)
+        for key, value in (attrs or {}).items():
+            handle.set(key, value)
+        return handle
 
     def tool_call(self, ctx: CallContext) -> AbstractContextManager[SpanHandle]:
         incoming = INCOMING_TRACE.get()

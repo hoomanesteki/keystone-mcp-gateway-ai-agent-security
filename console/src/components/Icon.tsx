@@ -16,6 +16,13 @@ const PATHS = {
       <path d="m4 7.5 8 4.5 8-4.5M12 12v9" />
     </>
   ),
+  budgets: <path d="M5 19v-7M12 19V5M19 19V9M3 21h18" />,
+  sessions: (
+    <>
+      <circle cx="9" cy="8" r="3.5" />
+      <path d="M3 20a6 6 0 0 1 12 0M16 4.8a3.5 3.5 0 0 1 0 6.4M18 14.8A6 6 0 0 1 21 20" />
+    </>
+  ),
   check: <path d="m5 12.5 4.5 4.5L19 7.5" />,
   x: <path d="m6 6 12 12M18 6 6 18" />,
   chevronRight: <path d="m9 6 6 6-6 6" />,

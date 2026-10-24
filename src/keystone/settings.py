@@ -1,5 +1,6 @@
 import os
 import re
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -227,6 +228,183 @@ class ScannerSettings(BaseModel):
         return hosts
 
 
+IMAGE_REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,254}$")
+RUNTIME_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+
+
+class SandboxSettings(BaseModel):
+    """Where the code an agent writes runs (KS-801, ADR-0012). The limits of a container are not
+    settings: they are in `keystone.sandbox.runner` and a deployment cannot loosen them."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # false leaves the `sandbox` upstream unregistered, and nothing then talks to Docker. A
+    # deployment with no Docker socket (a Fargate task) sets it to false. KEYSTONE_SANDBOX_ENABLED
+    # is the short name for it.
+    enabled: bool = True
+    # The image the code runs in: deploy/sandbox/Dockerfile.python, built by `make sandbox-image`.
+    image: str = "keystone-sandbox-python:dev"
+    # `runc`, or `runsc` where gVisor is installed. The name is one the Docker daemon knows.
+    runtime: str = "runc"
+    # How long one run may take before its container is killed. A tool's own timeout is this plus
+    # ten seconds, so that a run that ran out of time is a result and not a failed call.
+    timeout_s: float = Field(default=30.0, gt=0, le=300)
+    # Containers running at once. A call over this waits for one to end.
+    max_concurrent: int = Field(default=4, ge=1, le=64)
+
+    @field_validator("image")
+    @classmethod
+    def _an_image_name(cls, value: str) -> str:
+        if not IMAGE_REFERENCE.fullmatch(value):
+            raise ValueError(
+                "image must be a Docker image name, such as keystone-sandbox-python:dev"
+            )
+        return value
+
+    @field_validator("runtime")
+    @classmethod
+    def _a_runtime_name(cls, value: str) -> str:
+        if not RUNTIME_NAME.fullmatch(value):
+            raise ValueError("runtime must be the name of a Docker runtime, such as runc or runsc")
+        return value
+
+
+class RateLimit(BaseModel):
+    """One token bucket (KS-804): `capacity` calls at once, and `refill_per_s` more each second.
+    A capacity under 1 would refuse every call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    capacity: float = Field(ge=1, le=1_000_000)
+    refill_per_s: float = Field(gt=0, le=1_000_000)
+
+
+class RateLimitSettings(BaseModel):
+    """How fast calls may come, by who makes them. Every scope is optional, a scope that is not set
+    has no limit, and a call is checked against all that are set. A virtual tool and a call that
+    waits for approval count like any other, since they are calls."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # All the calls of a tenant, whoever makes them.
+    per_tenant: RateLimit | None = None
+    # The calls of one user (the token's `sub`), through any agent.
+    per_user: RateLimit | None = None
+    # The calls of one agent (the OAuth client), of every user.
+    per_agent: RateLimit | None = None
+    # The calls to one tool, from every user of the tenant: it protects the upstream behind it.
+    per_tool: RateLimit | None = None
+
+    def scopes(self) -> list[tuple[str, RateLimit]]:
+        """The scopes that are set, in the order a call is checked."""
+        found = (
+            ("per_tenant", self.per_tenant),
+            ("per_user", self.per_user),
+            ("per_agent", self.per_agent),
+            ("per_tool", self.per_tool),
+        )
+        return [(name, limit) for name, limit in found if limit is not None]
+
+
+class BudgetConfig(BaseModel):
+    """A spending limit (KS-805, ADR-0014): `limit_usd` for one tenant, user or agent over a day or
+    a month, both counted in UTC. A call that would take the spend over it is refused before it
+    runs. The file is the only source of budgets and is applied at startup: one that is not in it
+    any more is removed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant: str = Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")
+    scope: Literal["tenant", "user", "agent"]
+    # The user id (the token's `sub`) or the agent id (its `azp`). The tenant's own id, which a
+    # budget for the tenant does not need to repeat.
+    scope_id: str | None = Field(default=None, min_length=1, max_length=256)
+    window: Literal["day", "month"]
+    # Dollars. Read as the number it looks like (0.03 is three cents, not a nearby float).
+    limit_usd: Decimal = Field(gt=0, max_digits=18, decimal_places=9)
+
+    @model_validator(mode="after")
+    def _the_id_of_the_scope(self) -> "BudgetConfig":
+        if self.scope == "tenant":
+            if self.scope_id not in (None, self.tenant):
+                raise ValueError("a tenant budget has the tenant for its scope_id; leave it out")
+            self.scope_id = self.tenant
+        elif self.scope_id is None:
+            raise ValueError(f"a {self.scope} budget needs a scope_id")
+        return self
+
+
+class LlmProviderSettings(BaseModel):
+    """One model provider the proxy forwards to (KS-806)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Where the provider's API is. The proxy adds the path (/v1/messages, /v1/chat/completions).
+    base_url: str
+    # The environment variable that holds the provider's API key. Keystone reads it at startup and
+    # stores the key in the vault, encrypted, as the static credential of `llm_anthropic` or
+    # `llm_openai`. The key itself is never in this file.
+    api_key_env: str | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _an_http_url(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError("a provider's base_url must be an http or https URL")
+        if parts.query or parts.fragment or parts.username or parts.password:
+            raise ValueError("a provider's base_url has no credentials, query or fragment")
+        return value.rstrip("/")
+
+    @field_validator("api_key_env")
+    @classmethod
+    def _a_variable_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+            raise ValueError(f"{value!r} is not a valid environment variable name")
+        if value.upper().startswith("KEYSTONE_"):
+            # Pointing the key at the master key would store Keystone's own secret as a credential.
+            raise ValueError(f"{value} is Keystone's own setting and cannot be a provider key")
+        return value
+
+
+class LlmProxySettings(BaseModel):
+    """The passthrough for model calls (KS-806, ADR-0016): the same identity, budget and tracing as
+    a tool call. Off by default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    # The tenant whose vault holds the provider keys, and so the tenant the proxy serves: an
+    # upstream id is unique across tenants, and `llm_anthropic` can belong to one. With one tenant
+    # in the config it is that one.
+    tenant: str | None = None
+    # The price list (pricing.example.yaml shows the shape). A relative path is read from the
+    # working directory.
+    pricing_file: Path = Path("pricing.yaml")
+    # A model with no price is refused with a 400, unless this is on: then it is allowed, costs
+    # nothing and a warning is logged.
+    allow_unpriced: bool = False
+    # The longest answer assumed when a request does not say (OpenAI's max_tokens is optional), for
+    # the estimate a budget is checked against.
+    default_max_tokens: int = Field(default=4096, ge=1, le=1_000_000)
+    # The largest request body the proxy reads.
+    max_body_bytes: int = Field(default=8 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024)
+    # How long the proxy waits on a provider for a byte, for a stream or a whole answer.
+    timeout_s: float = Field(default=600.0, gt=0, le=3600)
+    anthropic: LlmProviderSettings = Field(
+        default_factory=lambda: LlmProviderSettings(
+            base_url="https://api.anthropic.com", api_key_env="ANTHROPIC_API_KEY"
+        )
+    )
+    openai: LlmProviderSettings = Field(
+        default_factory=lambda: LlmProviderSettings(
+            base_url="https://api.openai.com", api_key_env="OPENAI_API_KEY"
+        )
+    )
+
+
 class HealthSettings(BaseModel):
     """How the gateway watches its upstreams (KS-209)."""
 
@@ -296,6 +474,13 @@ class Settings(BaseSettings):
     # model off without the nested spelling (KEYSTONE_SCANNER__CLASSIFIER). It wins when both are
     # set, because it is the one a person types to change a running stack.
     scanner_classifier: Classifier | None = None
+    sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
+    rate_limits: RateLimitSettings = Field(default_factory=RateLimitSettings)
+    budgets: list[BudgetConfig] = Field(default_factory=list)
+    llm_proxy: LlmProxySettings = Field(default_factory=LlmProxySettings)
+    # A short name for `sandbox.enabled`, so that KEYSTONE_SANDBOX_ENABLED=false turns the sandbox
+    # off without the nested spelling (KEYSTONE_SANDBOX__ENABLED). It wins when both are set.
+    sandbox_enabled: bool | None = None
     policy: PolicySettings = Field(default_factory=PolicySettings)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
     auth: AuthSettings = Field(default_factory=AuthSettings)
@@ -334,6 +519,41 @@ class Settings(BaseSettings):
     def _the_short_name_of_the_classifier(self) -> "Settings":
         if self.scanner_classifier is not None:
             self.scanner = self.scanner.model_copy(update={"classifier": self.scanner_classifier})
+        return self
+
+    @model_validator(mode="after")
+    def _the_tenant_of_the_llm_proxy(self) -> "Settings":
+        proxy = self.llm_proxy
+        if not proxy.enabled:
+            return self
+        if proxy.tenant is None:
+            if len(self.tenants) != 1:
+                raise ValueError(
+                    "llm_proxy.tenant must name the tenant whose vault holds the provider keys, "
+                    "since the config does not list exactly one tenant"
+                )
+            self.llm_proxy = proxy.model_copy(update={"tenant": self.tenants[0].id})
+        elif self.tenants and proxy.tenant not in {t.id for t in self.tenants}:
+            raise ValueError(f"llm_proxy.tenant {proxy.tenant!r} is not in `tenants`")
+        return self
+
+    @model_validator(mode="after")
+    def _a_budget_is_listed_once(self) -> "Settings":
+        seen: set[tuple[str, str, str | None, str]] = set()
+        for b in self.budgets:
+            key = (b.tenant, b.scope, b.scope_id, b.window)
+            if key in seen:
+                raise ValueError(
+                    f"the {b.window} budget of {b.scope} {b.scope_id!r} in tenant {b.tenant!r} "
+                    "is listed twice"
+                )
+            seen.add(key)
+        return self
+
+    @model_validator(mode="after")
+    def _the_short_name_of_the_sandbox_switch(self) -> "Settings":
+        if self.sandbox_enabled is not None:
+            self.sandbox = self.sandbox.model_copy(update={"enabled": self.sandbox_enabled})
         return self
 
     @model_validator(mode="after")

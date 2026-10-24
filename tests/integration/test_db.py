@@ -44,6 +44,8 @@ def test_migrations_up_down(clean_env: None) -> None:
             "policy_versions",
             "audit_events",
             "approvals",
+            "spend_ledger",
+            "budgets",
         }
 
         command.downgrade(config, "base")

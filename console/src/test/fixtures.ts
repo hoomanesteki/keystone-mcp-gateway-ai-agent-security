@@ -1,5 +1,12 @@
-import type { ApprovalItem, AuditRecord, ToolDetail, ToolSummary } from "../api/types";
-import { fakeApi, json } from "./fakes";
+import type {
+  ApprovalItem,
+  AuditRecord,
+  BudgetInfo,
+  SessionInfo,
+  ToolDetail,
+  ToolSummary,
+} from "../api/types";
+import { fakeApi, json, type Route } from "./fakes";
 
 /** A request as the API sends it: olivia's agent asks to move 900. */
 export function approval(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
@@ -122,7 +129,15 @@ export const INTACT = {
  * server's do (newest first, `cursor` is the seq to go below, one record more than `limit` says
  * whether another page follows). */
 export function auditApi(records: AuditRecord[], options: AuditOptions = {}) {
-  return fakeApi({
+  return fakeApi(auditRoutes(records, options));
+}
+
+/** The same routes, for a test that fakes more of the API than the audit log. */
+export function auditRoutes(
+  records: AuditRecord[],
+  options: AuditOptions = {},
+): Record<string, Route> {
+  return {
     "GET /audit": (call) => {
       const q = call.query;
       const limit = Number(q.get("limit") ?? 50);
@@ -133,6 +148,7 @@ export function auditApi(records: AuditRecord[], options: AuditOptions = {}) {
         .filter((r) => (q.get("user") ? r.user_id === q.get("user") : true))
         .filter((r) => (q.get("agent") ? r.agent_id === q.get("agent") : true))
         .filter((r) => (q.get("tool") ? r.tool_name === q.get("tool") : true))
+        .filter((r) => (q.get("session") ? r.session_id === q.get("session") : true))
         .filter((r) => (q.get("effect") ? r.effect === q.get("effect") : true))
         .filter((r) => (q.get("outcome") ? r.outcome === q.get("outcome") : true))
         .filter((r) => (since ? Date.parse(r.ts) >= Date.parse(since) : true))
@@ -146,7 +162,7 @@ export function auditApi(records: AuditRecord[], options: AuditOptions = {}) {
       };
     },
     "GET /audit/verify": () => options.verify ?? INTACT,
-  });
+  };
 }
 
 /** A tool as the registry lists it. */
@@ -240,4 +256,47 @@ export function toolsApi(initial: ToolSummary[], options: ToolsOptions = {}) {
     }),
     list,
   };
+}
+
+/** A budget as the API lists it: lena's three cents a day, none of it spent. */
+export function budget(overrides: Partial<BudgetInfo> = {}): BudgetInfo {
+  return {
+    scope: "user",
+    scope_id: "lena",
+    window: "day",
+    limit_usd: "0.03",
+    spent_usd: "0",
+    window_start: "2026-10-24T00:00:00.000000Z",
+    resets_at: "2026-10-25T00:00:00.000000Z",
+    ...overrides,
+  };
+}
+
+/** The budgets route of the API over a list of budgets. */
+export function budgetsApi(budgets: BudgetInfo[]) {
+  return fakeApi({ "GET /budgets": () => budgets });
+}
+
+/** A live session as the API lists it: olivia's agent, clean, with no calls yet. */
+export function liveSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
+  return {
+    session_id: "51925e076a99478facca228369db513d",
+    user_id: "olivia",
+    agent_id: "ops-agent",
+    created_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+    flags: [],
+    tainted: false,
+    call_count: 0,
+    spent_usd: 0,
+    ...overrides,
+  };
+}
+
+/** The sessions route of the API over a list of sessions. */
+export function sessionRoutes(sessions: SessionInfo[]): Record<string, Route> {
+  return { "GET /sessions": () => sessions };
+}
+
+export function sessionsApi(sessions: SessionInfo[]) {
+  return fakeApi(sessionRoutes(sessions));
 }

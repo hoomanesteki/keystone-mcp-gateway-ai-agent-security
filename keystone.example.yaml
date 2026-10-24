@@ -29,12 +29,25 @@ upstreams:
       read_email: {risk: low, tags: [reads_untrusted, reads_sensitive]}
       send_email: {risk: high, tags: [external_effect], extract: {recipient_domain: "$.to | domain"}}
   - {id: files, tenant: acme, transport: http, url: "http://localhost:8102/mcp"}
+  # The sandbox (ADR-0012): run_python and run_shell in a container with no network. It needs the
+  # Docker socket and `make sandbox-image`, and `sandbox.enabled: false` leaves it out. Both tools
+  # are high risk, so only operators may call them.
+  - {id: sandbox, tenant: acme, transport: builtin}
+  # A stdio server that you do not trust, run in a container with no network. The image must be
+  # built already.
+  # - id: crm
+  #   tenant: acme
+  #   transport: container_stdio
+  #   image: crm-mcp:1.4
+  #   command: [crm-server, --stdio]
+  #   network: none   # or bridge
   - id: bank
     tenant: acme
     transport: http
     url: "http://localhost:8103/mcp"
     tools:
-      get_balance: {risk: medium, tags: [reads_sensitive]}
+      # A price makes a call count against the budgets at the end of this file.
+      get_balance: {risk: medium, tags: [reads_sensitive], cost_per_call_usd: 0.002}
       # The amount in cents: `int` would cut 500.99 down to 500 and let it past a limit of 500.
       transfer: {risk: high, tags: [external_effect], extract: {amount: "$.amount | cents"}}
   - {id: echo, tenant: acme, transport: http, url: "http://localhost:8104/mcp"}
@@ -145,3 +158,52 @@ scanner:
   # A new tool is held for review when the rules score its description, or the description of a
   # field of its input schema, at or above this. The model is not used for descriptions.
   description_threshold: 0.5
+
+# Where the code an agent writes runs (ADR-0012). Each run is a container with no network, a
+# read-only root, 512 MB of memory and one CPU; those limits are not settings. It needs the Docker
+# socket and the image from `make sandbox-image`. `enabled: false` (also KEYSTONE_SANDBOX_ENABLED=false)
+# is for a host with no Docker. `runtime: runsc` runs the containers under gVisor, where it is
+# installed. All of these can be set with KEYSTONE_SANDBOX__<NAME>.
+sandbox:
+  enabled: true
+  image: keystone-sandbox-python:dev
+  runtime: runc
+  timeout_s: 30        # one run; its container is killed after this
+  max_concurrent: 4    # containers at once
+
+# How fast calls may come (KS-804). Each scope is a token bucket: `capacity` calls at once, and
+# `refill_per_s` more every second. A call is checked against every scope that is set, and refused
+# with KS_RATE_LIMITED and a retry_after_s by the first with no token. A scope left out has no limit.
+# per_user is one user (the token's `sub`), per_agent one OAuth client, per_tool one tool for
+# everybody, per_tenant everything a tenant does. Virtual tools and calls that wait for approval
+# count too. Also KEYSTONE_RATE_LIMITS__PER_USER__CAPACITY and the like.
+rate_limits:
+  per_tenant: {capacity: 600, refill_per_s: 10}
+  per_user: {capacity: 60, refill_per_s: 1}
+  per_agent: {capacity: 120, refill_per_s: 2}
+  per_tool: {capacity: 30, refill_per_s: 0.5}
+
+# Spending limits (KS-805, ADR-0014). A call that would take the spend over one is refused before it
+# runs, with KS_BUDGET_EXCEEDED, and the upstream sees nothing. A tool's price is its
+# `cost_per_call_usd` under `upstreams[].tools`. `scope_id` is a user id (the token's `sub`) or an
+# agent id (`azp`); a budget for the tenant leaves it out. Days and months are counted in UTC. The
+# file is the only source: a budget that is not in it any more is removed at the next start.
+budgets:
+  - {tenant: acme, scope: tenant, window: day, limit_usd: 25}
+  - {tenant: acme, scope: user, scope_id: olivia, window: day, limit_usd: 5}
+  - {tenant: acme, scope: agent, scope_id: ops-agent, window: month, limit_usd: 200}
+
+# The LLM proxy (KS-806, ADR-0016): an agent sends its model requests to Keystone with its Keystone
+# token as the API key, and Keystone checks the token, stops a request that would take a budget over
+# its limit, adds the provider's key from the vault and books what the request cost. Off by default.
+# The prices are yours to fill in: copy pricing.example.yaml to pricing.yaml and write in the real
+# ones from each provider's pricing page. A model that is not in the file is refused. The keys are
+# read from the variables named here when Keystone starts and stored in the vault; they never go in
+# this file. Also KEYSTONE_LLM_PROXY__<NAME>.
+llm_proxy:
+  enabled: false
+  tenant: acme                  # whose keys; needed when there is more than one tenant
+  pricing_file: pricing.yaml
+  allow_unpriced: false         # true lets an unpriced model through at no cost, with a warning
+  anthropic: {base_url: "https://api.anthropic.com", api_key_env: ANTHROPIC_API_KEY}
+  openai: {base_url: "https://api.openai.com", api_key_env: OPENAI_API_KEY}

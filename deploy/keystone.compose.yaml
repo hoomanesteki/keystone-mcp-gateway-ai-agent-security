@@ -16,6 +16,15 @@ policy:
   root: /etc/keystone/policies
   include_demo: true
 
+# How fast calls may come (KS-804): a token bucket for each scope, `capacity` calls at once and
+# `refill_per_s` more every second. These are far above what the smoke scripts and the browser test
+# do, so that they never meet one; a deployment sets what it wants. The limit of one user is set in
+# docker-compose.yml, where scripts/smoke/phase_8.sh can tighten it for its burst. A virtual tool
+# and a call that waits for approval count like any other call.
+rate_limits:
+  per_tenant: {capacity: 1200, refill_per_s: 200}
+  per_agent: {capacity: 600, refill_per_s: 100}
+
 # A call the policy sends to approval is held this long (the default is 60 s), then the agent is
 # told KS_APPROVAL_PENDING with an id and waits with keystone__await_approval (ADR-0010). The demo
 # and the smoke scripts do not want to wait a minute to see a timeout.
@@ -92,3 +101,37 @@ upstreams:
     tenant: acme
     transport: stdio
     command: [python, -m, examples.upstreams.echo_server, --transport, stdio]
+    # The one tool of the local stack that has a price, a cent a call, so that a budget has
+    # something to count (KS-805). The tests that use the demo upstreams read the tools of the other
+    # upstreams from this file, which is why the price is here and not on the HTTP echo.
+    tools:
+      echo: {cost_per_call_usd: 0.01}
+  # The sandbox (KS-802): code an agent writes runs in a container that Keystone starts, with no
+  # network (ADR-0012). Both tools are high risk with the tag code_exec, so by the default access
+  # policy only operators may call them, and a user in support does not see them. The Docker socket
+  # that this needs is mounted by docker-compose.yml. KEYSTONE_SANDBOX_ENABLED=false leaves it out.
+  - {id: sandbox, tenant: acme, transport: builtin}
+
+# Spending limits (KS-805): a call that would take the spend over one is refused before it runs,
+# with KS_BUDGET_EXCEEDED. Days and months are counted in UTC. Lena has three cents a day, which is
+# three calls of echostd__echo, for scripts/smoke/phase_8.sh. The tenant has $25 a day, far above
+# what the stack spends, so that the console has a second bar to show.
+budgets:
+  - {tenant: acme, scope: user, scope_id: lena, window: day, limit_usd: 0.03}
+  - {tenant: acme, scope: tenant, window: day, limit_usd: 25}
+
+# The LLM proxy (KS-806): an agent sends its model requests to Keystone instead of to the provider,
+# with its Keystone token as the API key. Keystone checks the token, stops a request that would
+# take a budget over its limit, adds the provider's key from the vault and books what the request
+# cost. Here both providers are the fake one (examples/fake_llm, the fake-llm service), so the stack
+# needs no key and no network, and the prices are fake (pricing.compose.yaml).
+#
+# For a real provider: put its URL in base_url, its key in the variable that api_key_env names,
+# and the provider's real prices in a pricing.yaml of your own (pricing.example.yaml shows the shape
+# and says whose job the prices are). The key never appears in this file.
+llm_proxy:
+  enabled: true
+  tenant: acme
+  pricing_file: /etc/keystone/pricing.yaml
+  anthropic: {base_url: "http://fake-llm:8199", api_key_env: FAKE_LLM_API_KEY}
+  openai: {base_url: "http://fake-llm:8199", api_key_env: FAKE_LLM_API_KEY}

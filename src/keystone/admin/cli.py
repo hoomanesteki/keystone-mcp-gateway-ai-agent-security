@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -34,8 +35,8 @@ from keystone.policy.store import PolicyLoadError
 from keystone.policy.testrunner import CaseError
 from keystone.policy.testrunner import render as render_report
 from keystone.policy.testrunner import run as run_policy_cases
-from keystone.registry.config import stdio_environments, tool_overrides
-from keystone.registry.naming import check_upstream_id
+from keystone.registry.config import container_networks, stdio_environments
+from keystone.registry.naming import check_upstream_id, is_reserved
 from keystone.registry.pinning import (
     pending_fingerprint,
     schema_text,
@@ -49,6 +50,7 @@ from keystone.registry.repo import (
 )
 from keystone.registry.ssrf import UnsafeUpstreamUrl, check_upstream_url
 from keystone.registry.sync import RegistrySyncer, SyncReport
+from keystone.sandbox.builtin_upstream import builtin_clients, with_sandbox_defaults
 from keystone.settings import Settings
 
 app = typer.Typer(help="Keystone admin CLI.", no_args_is_help=True, add_completion=False)
@@ -177,9 +179,13 @@ def version() -> None:
     typer.echo(f"keystone {__version__}")
 
 
+IMAGE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,254}")
+
+
 class TransportChoice(StrEnum):
     HTTP = "http"
     STDIO = "stdio"
+    CONTAINER_STDIO = "container_stdio"
 
 
 def _when(row: Upstream) -> str:
@@ -188,6 +194,10 @@ def _when(row: Upstream) -> str:
 
 
 def _target(row: Upstream) -> str:
+    if row.transport == "builtin":
+        return "built in"
+    if row.transport == "container_stdio":
+        return " ".join([f"image {row.image}", *(row.command or [])])
     return row.url or " ".join(row.command or []) or "-"
 
 
@@ -229,7 +239,9 @@ def upstream_list(
     """List upstreams with their status."""
 
     async def action(settings: Settings, sessions: Sessionmaker) -> list[Upstream]:
-        return list(await UpstreamRepo(sessions).list(tenant, include_disabled=all_))
+        found = await UpstreamRepo(sessions).list(tenant, include_disabled=all_)
+        # The provider keys of the LLM proxy are rows too, and are not MCP servers.
+        return [row for row in found if not is_reserved(row.id)]
 
     rows = run_with_database(action)
     if as_json:
@@ -245,9 +257,17 @@ def upstream_add(
     upstream_id: Annotated[str, typer.Argument(metavar="ID", help="Lowercase id, e.g. crm.")],
     command: Annotated[
         list[str] | None,
-        typer.Argument(metavar="[COMMAND]...", help="For stdio: the program and its arguments."),
+        typer.Argument(
+            metavar="[COMMAND]...",
+            help="For stdio: the program and its arguments. For container_stdio: what to run in "
+            "the container instead of the image's own command (optional).",
+        ),
     ] = None,
     url: Annotated[str | None, typer.Option(help="The MCP endpoint, for http.")] = None,
+    image: Annotated[
+        str | None,
+        typer.Option(help="For container_stdio: the image, which must be built already."),
+    ] = None,
     tenant: Annotated[str | None, typer.Option(help="Tenant id. Default: the only tenant.")] = None,
     transport: Annotated[TransportChoice, typer.Option(help="How to reach it.")] = (
         TransportChoice.HTTP
@@ -268,6 +288,9 @@ def upstream_add(
                 await asyncio.to_thread(check_upstream_url, url, settings.allow_private_upstreams)
             except UnsafeUpstreamUrl as exc:
                 raise CliError(f"url refused: {exc}") from exc
+        elif transport is TransportChoice.CONTAINER_STDIO:
+            if not image or not IMAGE_NAME.fullmatch(image):
+                raise CliError("a container_stdio upstream needs --image, a Docker image name")
         elif not command:
             raise CliError("a stdio upstream needs a command after the id")
         repo = UpstreamRepo(sessions)
@@ -277,9 +300,10 @@ def upstream_add(
         spec = UpstreamSpec(
             id=upstream_id,
             tenant_id=tenant_id,
-            transport="http" if transport is TransportChoice.HTTP else "stdio",
+            transport=transport.value,  # type: ignore[arg-type]
             url=url if transport is TransportChoice.HTTP else None,
-            command=list(command) if transport is TransportChoice.STDIO and command else None,
+            command=list(command) if command and transport is not TransportChoice.HTTP else None,
+            image=image if transport is TransportChoice.CONTAINER_STDIO else None,
             source="cli",
         )
         try:
@@ -337,15 +361,18 @@ async def run_sync(
         vault = vault_from_settings(settings, sessions)
     except VaultError as exc:
         raise CliError(str(exc)) from exc
-    async with UpstreamPool(directory_client_factory(directory)) as pool:
+    # The sandbox's client lists its tools and runs nothing here: this process starts no containers.
+    builtins = builtin_clients(settings, None)
+    async with UpstreamPool(directory_client_factory(directory, builtins=builtins)) as pool:
         syncer = RegistrySyncer(
             UpstreamRepo(sessions),
             ToolRepo(sessions),
             pool,
             directory,
-            overrides=tool_overrides(settings.upstreams),
+            overrides=with_sandbox_defaults(settings),
             timeout_s=settings.registry.sync_timeout_s,
             environments=stdio_environments(settings.upstreams),
+            networks=container_networks(settings.upstreams),
             service_headers=vault.service_headers if vault else None,
         )
         if upstream_id is not None:

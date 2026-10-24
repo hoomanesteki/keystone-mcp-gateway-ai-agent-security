@@ -8,7 +8,7 @@ served, because session state is keyed by Mcp-Session-Id and the newer era has n
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 
@@ -78,8 +78,12 @@ class Gateway:
         pipeline: Pipeline,
         tool_filter: ToolFilter | None = None,
         virtual: VirtualTools | None = None,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.settings = settings
+        # The moment a call is received. It decides the window a call is charged to (KS-805), so it
+        # is the same clock the rate limits and the budgets read, and a test holds all three.
+        self._now = now
         self.registry = registry
         self.sessions = sessions
         self.pipeline = pipeline
@@ -165,7 +169,7 @@ class Gateway:
                 tool = None  # as above: another tenant's tool does not exist for this caller
         call = CallContext(
             call_id=new_id(),
-            received_at=datetime.now(UTC),
+            received_at=self._now(),
             principal=principal,
             session=session or unbound_session(principal),
             tool=tool or unknown_tool(params.name, principal),

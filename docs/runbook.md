@@ -17,6 +17,7 @@ model again.
 | `make up` | Start the full stack and wait for health |
 | `make up-core` | Start Postgres and Redis only (what `make check` needs) |
 | `make demo` | `make up`, reset the upstreams, run the scripted agent through Keystone as olivia and print its transcript |
+| `make sandbox-image` | Build the image the sandbox runs code in (the compose service `sandbox-image` builds it too). `make test-int` and `make gate` build it first, because the tests marked `docker` need it |
 | `make down` | Stop the stack and keep its data |
 | `make reset` | Stop the stack and delete its volumes |
 | `scripts/get_token.sh alice support-agent` | Print an access token for a Keycloak user (see Identity) |
@@ -26,11 +27,13 @@ model again.
 | `make console-e2e` | The browser test of the approval loop (see Console). It starts the stack if it is not running; `make gate PHASE=6` and the nightly run it |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit log (read through the admin API) does not hold one new record for each call |
+| `bash scripts/smoke/phase_8.sh` | The sandbox (olivia's script prints 42, alice is refused with `default-deny`); lena's fourth call of a cent is `KS_BUDGET_EXCEEDED` and the budgets API shows $0.03 of $0.03; the LLM proxy against the fake model API (a whole answer, an Anthropic stream equal to the fake's own bytes, an OpenAI stream asked for its usage, each booked at 4 tokens in and 12 out and $0.000192; an unpriced model is a 400; lena's day is spent, so her request is a 402 and the fake sees nothing; a provider that repeats the key is answered with it taken out, and the key is in no response, log or span; `keystone_llm_tokens_total` grows by 12 and 36). Then Keystone is restarted with a burst of 5 calls for one user, 12 calls are made, 5 pass and 7 are `KS_RATE_LIMITED` with a `retry_after_s` of about 2 s, and a call after that long passes. It clears the day's spend of acme first so that it can run twice, and restores the default limits when it ends. About 2 minutes. |
+| `bash scripts/smoke/phase_7.sh` | The naive agent summarizes unread mail, and one email tells it to forward an invoice to attacker@evil.test. Straight at the mail server the attack lands. Through Keystone nothing is sent: the email scores above 0.85, the session is tainted, and the approval card names `rule-of-two` and `tainted-external-effect`. A summary of harmless mail asks for no approval. `make demo-attack` prints the two runs one after the other. |
 | `bash scripts/smoke/phase_6.sh` | Three agents run as olivia and lena decides through the admin API: a transfer of 900 is held, approved and completed (a second decision is 409 and olivia's own is 403); one of 700 is rejected with a note that the agent gets; one of 600 times out as `KS_APPROVAL_PENDING`, is approved late and is awaited. Then the audit log and `keystone_approvals_pending` are checked. About 20 seconds: the third request waits out the 10 s hold. |
 | `bash scripts/smoke/phase_5.sh` | Runs the demo, finds a Jaeger trace of more than 9 spans with no user or argument in it, reads `keystone_tool_calls_total` from `/metrics` and from Prometheus, finds the dashboard in Grafana, verifies the audit chain, edits a record as the Postgres superuser and checks that `keystone audit verify` exits 2 and names the seq, then puts the record back. About 15 seconds. |
-| `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 15 tools (13 of acme's and Keystone's 2); olivia's transfer of 900 is held for approval, lena rejects it through the admin API and olivia is told `KS_APPROVAL_REJECTED`, the audit shows `require_approval` / `approve-transfer-over-500` and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 30 seconds. |
-| `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), olivia's 17 tools, bob's 3 globex tools and Keystone's 2, and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
-| `bash scripts/smoke/phase_2.sh` | Lists the 17 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
+| `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 16 tools (14 of acme's and Keystone's 2); olivia's transfer of 900 is held for approval, lena rejects it through the admin API and olivia is told `KS_APPROVAL_REJECTED`, the audit shows `require_approval` / `approve-transfer-over-500` and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 30 seconds. |
+| `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), olivia's 20 tools, bob's 3 globex tools and Keystone's 2, and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
+| `bash scripts/smoke/phase_2.sh` | Lists the 20 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
 
 ## Host ports
 
@@ -49,7 +52,7 @@ Tests never use these ports. They start their own services on free ports.
 | Grafana | 3000 | login `admin` / `admin`, Prometheus and Jaeger provisioned |
 | Mail, files, bank, echo, web | 8101, 8102, 8103, 8104, 8105 | demo upstreams, services `mail-mcp`, `files-mcp`, `bank-mcp`, `echo-mcp`, `web-mcp` |
 | Files for globex | 8112 | the globex tenant's own drive, service `files-globex-mcp` |
-| Fake LLM | 8199 | later phase |
+| Fake LLM | 8199 | the fake model API that the LLM proxy forwards to in compose, service `fake-llm` (see LLM proxy) |
 | Console | 5173 | the Vite dev server (`pnpm dev` in `console/`), which `make console-e2e` also starts. The port is fixed because the Keycloak client `console` allows `http://localhost:5173/*` only |
 
 The credentials above are for local development only. Nothing in compose is meant to be exposed
@@ -292,8 +295,23 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_SCANNER__ALLOWED_DOMAINS` | `[]` | JSON list of hosts a markdown image may point to without a mark against it. A name covers its subdomains. |
 | `KEYSTONE_SCANNER__MAX_SCAN_CHARS` | `200000` | The most text one scan reads. A longer text is read at both ends, half of this at each. |
 | `KEYSTONE_SCANNER__DESCRIPTION_THRESHOLD` | `0.5` | A new tool is held when the rules score its description, or the description of a field of its input schema, at or above this. Above 0, at most 1. See Upstreams. |
+| `KEYSTONE_SANDBOX_ENABLED` | `true` | Whether the `sandbox` upstream is registered. `false` for a host with no Docker socket: no tool is listed and nothing talks to Docker. The same setting as `KEYSTONE_SANDBOX__ENABLED`; this shorter name wins when both are set. See Sandbox. |
+| `KEYSTONE_SANDBOX__IMAGE` | `keystone-sandbox-python:dev` | The image the code runs in (`make sandbox-image`). |
+| `KEYSTONE_SANDBOX__RUNTIME` | `runc` | The Docker runtime of the containers: `runc`, or `runsc` where gVisor is installed. |
+| `KEYSTONE_SANDBOX__TIMEOUT_S` | `30` | How long one run may take before its container is killed. Above 0, at most 300. |
+| `KEYSTONE_SANDBOX__MAX_CONCURRENT` | `4` | Containers running at once. A call over that waits for one to end. |
+| `KEYSTONE_RATE_LIMITS__<SCOPE>__CAPACITY` and `KEYSTONE_RATE_LIMITS__<SCOPE>__REFILL_PER_S` | unset (no limit) | A token bucket for one scope: how many calls at once (1 or more) and how many more each second (above 0). `<SCOPE>` is `PER_TENANT`, `PER_USER`, `PER_AGENT` or `PER_TOOL`. Also `rate_limits.per_user: {capacity: 60, refill_per_s: 1}` in the YAML, and an environment variable changes one field of what the file sets. See Rate limits. |
+| `KEYSTONE_LLM_PROXY__ENABLED` | `false` | Whether the routes `/llm/anthropic/v1/messages` and `/llm/openai/v1/chat/completions` exist. Needs `KEYSTONE_MASTER_KEYS` and a price file; either missing stops the start. See LLM proxy. |
+| `KEYSTONE_LLM_PROXY__TENANT` | the only tenant, when there is one | The tenant that owns the provider keys, and the only one whose agents may use the proxy. Needed when `tenants` lists more than one. |
+| `KEYSTONE_LLM_PROXY__PRICING_FILE` | `pricing.yaml` | The price list, read at start. Compose mounts `deploy/pricing.compose.yaml` (fake prices) at `/etc/keystone/pricing.yaml`. |
+| `KEYSTONE_LLM_PROXY__ALLOW_UNPRICED` | `false` | Let a model that is not in the price list through at no cost, with a warning in the log. When `false` it is refused with 400. |
+| `KEYSTONE_LLM_PROXY__DEFAULT_MAX_TOKENS` | `4096` | The output assumed by the budget check for a request that does not say how long its answer may be. |
+| `KEYSTONE_LLM_PROXY__MAX_BODY_BYTES` | `8388608` | The largest request body the proxy reads (1,024 to 67,108,864). A larger one is refused with 413. |
+| `KEYSTONE_LLM_PROXY__TIMEOUT_S` | `600` | How long the proxy waits on a provider for a byte, for a whole answer or a stream. |
+| `KEYSTONE_LLM_PROXY__ANTHROPIC__BASE_URL`, `KEYSTONE_LLM_PROXY__OPENAI__BASE_URL` | `https://api.anthropic.com`, `https://api.openai.com` | Where the provider's API is. The proxy adds `/v1/messages` or `/v1/chat/completions`. |
+| `KEYSTONE_LLM_PROXY__ANTHROPIC__API_KEY_ENV`, `KEYSTONE_LLM_PROXY__OPENAI__API_KEY_ENV` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | The name of the environment variable that holds the provider's key. At each start the key goes into the vault, and the variable is not read again. `null` for a provider that needs no key. A name that starts with `KEYSTONE_` is refused. |
 
-Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
+Four sections come from the YAML file only: `tenants`, `upstreams`, `agents` and `budgets` (see `keystone.example.yaml`).
 
 ## Credentials
 
@@ -383,7 +401,7 @@ and every secret registered with the log scrubber are replaced with `[redacted]`
 the result and in its structured content. The log line `upstream_result_redacted` names the
 upstream and the tool, so an operator can see which server does it. Only a value that comes back as
 it was sent is caught: an upstream that reverses, splits or encodes the key first is not, and a
-server you do not trust belongs behind the sandbox of Phase 8.
+server you do not trust belongs in a container (see Containerized stdio upstreams).
 
 Header names are letters, digits and dashes. `Host`, `Content-Type`, `Mcp-Session-Id` and the
 other headers the HTTP layer owns are refused. Values are printable ASCII on one line, up to 4096
@@ -404,7 +422,7 @@ tenant that is not under `tenants` in the config gets 403 `unknown_tenant`.
 | | acme | globex |
 |---|---|---|
 | Users | alice, olivia, lena, root | bob |
-| Upstreams | mail, files, bank, echo, echostd (15 tools) | files_globex (3 tools) |
+| Upstreams | mail, files, bank, echo, web, echostd, sandbox (18 tools) | files_globex (3 tools) |
 
 An upstream id is unique across tenants, so globex's drive is `files_globex` (its tools are
 `files_globex__read_file` and so on) and not a second `files`.
@@ -498,8 +516,8 @@ nothing is sent or moved until one approves it. `scripts/smoke/phase_4.sh` runs 
 ### The tool list
 
 `tools/list` shows a caller only the tools whose `list_tool` the policy allows. In the local stack
-support sees 13 of acme's 15 tools and operators see all 15, because `mail__send_email` and
-`bank__transfer` are high risk and only operators may use them. Every caller is also offered the
+support sees 14 of acme's 18 tools and operators see all 18, because `mail__send_email`,
+`bank__transfer` and the two tools of the sandbox are high risk and only operators may use them. Every caller is also offered the
 two tools that Keystone serves itself (see Approvals), which the policy does not decide. The list
 is only a convenience. Every call is decided again when it is
 made, so a tool that is not listed is still refused if it is called by name. A listing that cannot
@@ -800,10 +818,12 @@ ends the connection, not the request. The scripted agent waits up to 330 seconds
 - **Spare an approval that a later slot refuses.** The approval is used before the credential slot
   and the dispatcher run. A call refused there, for a per-user credential that is missing or an
   upstream that is marked down, has spent its approval, and a person decides again.
-- **Limit.** Nothing caps the requests one user or session leaves pending, merges identical ones (an
-  approver who approves two lets the call run twice) or counts the callers waiting at once; every
-  waiter holds a Redis connection and polls the table. The rate limits and budgets of Phase 8 are
-  where that belongs. The queue API shows the oldest 200 requests.
+- **Limit.** A call that asks for approval is a call, so a rate limit (KS-804) caps how fast a user,
+  an agent or a tenant can make requests, and the request that would pass it is refused before it is
+  a row. Nothing caps how many requests one user or session leaves pending at a pace under the limit,
+  merges identical ones (an approver who approves two lets the call run twice) or counts the callers
+  waiting at once; every waiter holds a Redis connection and polls the table. The queue API shows
+  the oldest 200 requests.
 - **Put the approvals table in the audit chain.** The table is not part of the tamper-evident
   chain, and the role Keystone connects as can change it. The audit record of a call that ran on
   an approval names it, which ties the two together without protecting the table.
@@ -863,8 +883,36 @@ and not for secrets. `env` can only be set in the YAML; an upstream added with t
 
 A stdio upstream runs as the Keystone user, with no sandbox. Whoever can write a `command` into the
 `upstreams` table or run `keystone upstream add` can run a program inside the Keystone container,
-so treat both as operator rights and keep the database closed. Phase 8 adds containerized stdio
-upstreams for servers you do not trust.
+so treat both as operator rights and keep the database closed. For a server you do not trust, use
+a containerized one.
+
+### Containerized stdio upstreams
+
+`transport: container_stdio` runs a stdio server in a container (KS-803, ADR-0012):
+
+```yaml
+  - id: crm
+    tenant: acme
+    transport: container_stdio
+    image: crm-mcp:1.4        # built on the host already; Keystone never pulls
+    command: [crm-server, --stdio]   # optional; the image's own command if left out
+    env: {CRM_REGION: eu}     # plain settings, as for stdio; passed by name, never on a command line
+    network: none             # none (the default) or bridge
+```
+
+Keystone starts it with `docker run --rm -i --pull never --network none --read-only --cap-drop ALL
+--security-opt no-new-privileges --memory 256m --memory-swap 256m --pids-limit 64 --user 10001`,
+labelled `keystone.container_stdio=1`, when the first call or sync needs it, and again after it
+dies, with the backoff of a stdio upstream. Closing the connection ends the container (`--rm`
+removes it). `bridge` lets the server reach the network: that is a decision about a third party,
+so it is written in the config and nowhere else. A name in `env` that starts with `DOCKER_` is
+refused, since the `docker` command reads those too. The `docker` binary is in the Keystone image.
+With the CLI: `keystone upstream add crm --transport container_stdio --image crm-mcp:1.4 -- crm-server
+--stdio` (always with no network).
+
+`examples/upstreams/Dockerfile.echo` builds the demo echo and probe servers as such an image
+(`make echo-image`, tag `keystone-echo-stdio:dev`); the tests of this transport use it. An image
+that is not built is an upstream whose sync failed, with `last_error` set, and not a crash.
 
 ### Tool lists and syncing
 
@@ -995,6 +1043,333 @@ that keeps the standalone GET stream open receives it; others see the change at 
 
 Without `--tenant`, `add` uses the config's only tenant, and fails when the config names none or
 several.
+
+## Sandbox
+
+Code an agent writes runs in a container that Keystone starts for that call and removes after it
+(ADR-0012, KS-801). The runner is `src/keystone/sandbox/runner.py`, and the tools that use it are
+the upstream `sandbox` (KS-802).
+
+What a container has: no network (a loopback and no route), a read-only root, a tmpfs of 64 MB on
+`/tmp` (nothing in it can be run) and on `/workspace`, 512 MB of memory with no swap, one CPU, 128
+processes, no capabilities, `no-new-privileges`, and user 10001. These are fixed in the code and
+are not settings. Output is cut at 64 KB for stdout and for stderr, and a run still going after
+`sandbox.timeout_s` is killed and says so.
+
+Three things are needed, and compose supplies them:
+
+| What | Where it comes from |
+|---|---|
+| The Docker socket | compose mounts `/var/run/docker.sock` into the Keystone container. **Local and single-host use only**: whoever can use the socket can start any container on the host as root. Keystone runs as user 10001, so compose adds the socket's group: `DOCKER_SOCKET_GID`, default `0` for Docker Desktop. On Linux set it to `stat -c %g /var/run/docker.sock`. |
+| The image | `make sandbox-image`, or the one-shot compose service `sandbox-image` that `make up` runs. It is `deploy/sandbox/Dockerfile.python`: Python 3.12, numpy, pandas and `wget`. |
+| `KEYSTONE_SANDBOX_ENABLED` | `true` unless set. Set it to `false` where there is no socket (a Fargate task). |
+
+Look at what the sandbox has started with `docker ps -a --filter label=keystone.sandbox=1`; the
+label `keystone.call_id` names the call. A container older than 10 minutes is removed by the
+reaper, which looks once a minute. `docker ps` should show none that are minutes old; if it does,
+the reaper is not running or cannot reach the daemon (`sandbox_reaper_failed` in the log).
+
+### The tools
+
+The upstream `sandbox` has transport `builtin`. Add `- {id: sandbox, tenant: acme, transport:
+builtin}` under `upstreams` to give a tenant its two tools (the compose config does). An upstream
+id is unique across tenants, so one tenant has the sandbox unless you give another a copy under a
+second id.
+
+| Tool | Arguments | Runs |
+|---|---|---|
+| `sandbox__run_python` | `code`, and optionally `stdin` | `python -c code` with Python 3.12, numpy and pandas |
+| `sandbox__run_shell` | `command` | `sh -c command` in the same image, with `wget` |
+
+Both are high risk with the tag `code_exec`, so by the default access policy operators may call
+them and nobody else may: a user in support is denied (`default-deny`) and does not see them in
+`tools/list`. A tenant that wants other rules writes them in Cedar, or sets `risk` and `tags` for
+the tools in the config. Setting a price there (`tools: {run_python: {cost_per_call_usd: 0.002}}`)
+leaves the risk and the tag as they are.
+
+The answer is one text block of JSON: `{"exit_code": 0, "stdout": "4\n", "stderr": "",
+"timed_out": false, "truncated": false}`. A program that exits with anything but 0, or runs out of
+time, is an error result (`isError`), and the block still says why. A run that is cut at 64 KB says
+`truncated`. A NUL character in `code` or `command` is refused by the schema, before a container
+is made. If Docker cannot run the container, the agent gets `KS_UPSTREAM_ERROR` and "the sandbox is
+not available", and the log says why (`sandbox_unavailable`). The upstream is probed like the
+others, and one the probes find down is refused at once; the probe checks the daemon, the runtime
+and the image.
+
+What a script prints goes through the scanner like the output of any tool. A script that prints an
+instruction is redacted and wrapped in the warning (the action for high risk tools) and taints the
+session, as a web page that holds one would. A session that ran code is not marked as having read
+anything: `code_exec` is not one of the flags (`reads_untrusted`, `reads_sensitive`).
+
+The descriptions of the two tools are pinned like any tool's. If a release of Keystone words one
+differently, the tool is held until a person approves the change (`keystone tool approve-change`),
+and `keystone tool show` has the diff.
+
+`KEYSTONE_SANDBOX_ENABLED=false` leaves the `sandbox` upstream unregistered. Keystone sets a
+`sandbox` row it stored before to `disabled` at the next start, so its tools leave the list, and
+nothing talks to Docker.
+
+To run under gVisor, install `runsc` on the Docker host, register it as a runtime, and set
+`KEYSTONE_SANDBOX__RUNTIME=runsc`. Keystone checks that the daemon knows the runtime before it
+says the sandbox is up.
+
+The tests marked `docker` run the runner against the daemon. Without a daemon or the image they
+are skipped and say why; with `KEYSTONE_REQUIRE_DOCKER=1` (which `make test-int`, `make gate` and
+the integration job of CI set) that is a failure.
+
+## Rate limits
+
+A looping agent should hit a wall before it floods an upstream (KS-804). Each limit is a token
+bucket: it holds `capacity` tokens, gets `refill_per_s` back every second, and a call takes one. A
+bucket that is empty refuses the call with `KS_RATE_LIMITED` and says how long until it has a
+token.
+
+```yaml
+rate_limits:
+  per_tenant: {capacity: 600, refill_per_s: 10}   # everything a tenant does
+  per_user:   {capacity: 60,  refill_per_s: 1}    # one user, the token's `sub`, through any agent
+  per_agent:  {capacity: 120, refill_per_s: 2}    # one OAuth client, for all of its users
+  per_tool:   {capacity: 30,  refill_per_s: 0.5}  # one tool, for everybody: it protects the upstream
+```
+
+Every scope is optional, and a scope left out has no limit. A call is checked against all the
+scopes that are set, in the order above, and the first bucket with no token refuses it. Nothing is
+taken from any bucket when one refuses, so a call refused for the tool has not used a token of the
+user's. A scope belongs to a tenant: the same user id in two tenants has two buckets.
+
+What counts: every call, including the two tools Keystone serves itself, and a call that goes on to
+wait for approval. The limit is the first slot, so a flood of calls that the policy would deny, or
+that would each make an approval request, is a flood of refusals and not of rows. An agent that
+polls `keystone__await_approval` in a loop is limited like one that polls a mail server. The call
+that the await tool runs once a person has approved is not counted again: it was counted when it
+first arrived, and the await was counted as the call it is. (This is what closes the finding of the
+Phase 6 gate, that nothing limited how many approval requests one agent could make.)
+
+The answer to a call that is refused is the usual one (ADR-0007):
+
+```
+[keystone:KS_RATE_LIMITED] call 01J... rate limited: too many calls: your user's limit is used up, try again in 2.0 seconds
+```
+
+`retry_after_s` and `scope` are in the metadata of the text block, and also as `keystone/retry_after_s`
+and `keystone/scope` in the metadata of the result, where a client library looks. The wait is rounded
+up to the millisecond, so a client that sleeps that long is not refused again for a fraction of one.
+The audit record has the decision `deny`, the source `rate_limit`, the reason `rate-limit:<scope>`,
+the code `KS_RATE_LIMITED` and `dispatched` false, and `keystone_rate_limited_total{tenant,scope}`
+counts it.
+
+The buckets are in Redis under `ks:rl:<scope>:<tenant>:<id>` (a hash of `tokens` and `ts`), checked
+by one Lua script that takes the time as an argument and does all the scopes of a call in one step,
+so two Keystone processes share them and a check cannot be raced. A bucket expires when it would be
+full again, so an idle user costs nothing. A Redis that is flushed gives every bucket back full. With
+no Redis (`KEYSTONE_REDIS_URL` empty) the buckets are in the process. Because the time comes from
+Keystone and not from Redis, two processes whose clocks differ disagree a little: a bucket does not
+refill for time that went backwards. A Redis that cannot be reached denies the call, as it does for
+the session state, and never lets it through without a limit.
+
+The compose stack sets limits far above what the smoke scripts and the browser test do. The limit
+of one user is read from `KEYSTONE_RATE_LIMIT_USER_CAPACITY` and `KEYSTONE_RATE_LIMIT_USER_REFILL`
+in the environment of `docker compose` (300 and 50), which `scripts/smoke/phase_8.sh` lowers for its
+burst and puts back.
+
+Two limits to know about. A call to a tool that does not exist is refused before it enters the
+pipeline and is not counted, so it is not limited either (it is audited). And the proxy for model
+calls (KS-806) is not rate limited: a budget caps it.
+
+## Budgets
+
+A runaway agent should be stopped by a number, before the money is spent (KS-805, ADR-0014). A
+budget is a limit in dollars for one tenant, one user or one agent over a day or a month:
+
+```yaml
+upstreams:
+  - id: crm
+    # ...
+    tools:
+      lookup: {cost_per_call_usd: 0.002}      # the price of one call
+budgets:
+  - {tenant: acme, scope: tenant, window: day,   limit_usd: 25}
+  - {tenant: acme, scope: user,   scope_id: olivia, window: day, limit_usd: 5}
+  - {tenant: acme, scope: agent,  scope_id: ops-agent, window: month, limit_usd: 200}
+```
+
+`scope_id` is a user's id (the token's `sub`) or an agent's (`azp`); a budget for the tenant leaves it
+out. A day runs from 00:00 UTC to the next, a month from the first at 00:00 UTC. The file is the only
+source: Keystone stores the budgets at each start, changes a limit that changed and removes a budget
+that left the file (and logs it). A budget for a tenant that is not under `tenants` stops the start.
+
+**The pre-check** is the budget slot, the third in the pipeline (`gateway/interceptors/budget.py`,
+which calls `BudgetService.check` in `metering/budgets.py`). It adds the price of the tool to what
+each budget that applies to the caller has spent in its window, and refuses the call if any sum is
+over a limit. `projected = spent + cost_per_call_usd`, so a limit of $0.03 allows three calls of a
+cent and refuses the fourth. It runs before the dispatch, so the upstream sees no request, and again
+after a wait for approval. The budgets are checked tenant, user, agent, and a day before a month, and
+the first to fail is reported. A tool with no price is never held, and neither are Keystone's own.
+
+```
+[keystone:KS_BUDGET_EXCEEDED] call 01J... over budget: the user's budget of $0.03 a day would be passed by this call ($0.03 spent); it resets at 2026-10-24T00:00:00Z
+```
+
+`scope`, `window`, `limit_usd`, `spent_usd` and `resets_at` are in the metadata of the text block,
+and as `keystone/...` in the metadata of the result. The audit record says deny from the source
+`budget`, with the reason `budget:<scope>:<window>`, and the call is not dispatched.
+
+**The metering slot** is the last, and it runs after the upstream answers (`gateway/interceptors/
+metering.py`). A call that was dispatched and came back with a result, an error result included, is
+charged the price of its tool: `ctx.cost_usd` (the audit record's `cost_usd`), a row in `spend_ledger`,
+the counters of the budgets that apply, and the session's `spent_usd` (`keystone__whoami` shows it).
+A call that never reached the upstream is not charged. The row is written once for a call id.
+
+**Where the numbers live.** `spend_ledger` (Postgres) is the record: `ts` (the moment the call began,
+which decides its window), the tenant, user and agent, `kind` (`tool` or `llm`), `ref` (the call id or
+the id of a model request), and for a model `model`, `input_tokens` and `output_tokens`, then
+`cost_usd`. The application's role may add rows and read them and nothing else. The counters are
+Redis strings, `ks:spend:{tenant}:{scope}:{id}:{window}:{start}` (a colon in an id is written `%3A`),
+that expire a day after their window. They are a cache of the ledger: they are set from it at each
+start, and one that is missing when a check needs it is read from the ledger then. A Redis that
+is restarted or flushed, with Keystone running or not, does not give anyone their spend back.
+
+```
+docker compose -f deploy/docker-compose.yml exec postgres psql -U keystone -c \
+  "SELECT ts, user_id, kind, ref, cost_usd FROM spend_ledger ORDER BY ts DESC LIMIT 10"
+docker compose -f deploy/docker-compose.yml exec redis redis-cli --scan --pattern 'ks:spend:*'
+```
+
+**What it does not do.** The check is not a reservation: calls checked together see the same spend,
+and a cap is overshot by at most the price of the calls in flight at once. A charge goes to the
+window its call began in. There is no refund and no way to change a budget without the file. A
+priced call that cannot be recorded (Postgres is away) has its output withheld, since the slot
+fails after the dispatch, and the audit record shows the price it should have had.
+
+`GET /admin/api/v1/budgets` lists the tenant's budgets with `limit_usd`, `spent_usd` (what the check
+reads), `window_start` and `resets_at`, and the console's Budgets page draws them. The local stack
+prices `echostd__echo` at a cent, and gives lena three cents a day and acme $25 a day.
+
+## LLM proxy
+
+Model requests can go through Keystone, so that they get the identity, the budget and the tracing of
+a tool call and one place answers "what did this agent cost?" (KS-806, ADR-0016). It is off until
+`llm_proxy.enabled` is true.
+
+```yaml
+llm_proxy:
+  enabled: true
+  tenant: acme                        # whose provider keys these are; needed with more than one tenant
+  pricing_file: /etc/keystone/pricing.yaml
+  anthropic: {base_url: "https://api.anthropic.com", api_key_env: ANTHROPIC_API_KEY}
+  openai: {base_url: "https://api.openai.com", api_key_env: OPENAI_API_KEY}
+```
+
+**Prices come first.** `pricing.example.yaml` shows the shape of `pricing.yaml`, with numbers that
+say on every line that they are not real. Copy it, open each provider's pricing page for each model
+you let your agents use, and write the real prices in. Keystone does not know them and does not
+guess: it stops at start if the file is missing, and refuses a request for a model that is not in
+it. Prices are US dollars for each million tokens (`input_per_mtok`, `output_per_mtok`, and
+optionally `cache_read_per_mtok` and `cache_write_per_mtok`; a cache price left out is the input
+price), and a name that ends in `*` covers a family. The file is read at start: after a change,
+restart. Keep it current, because a price that is too low under-counts spend and nothing can tell.
+
+**The keys** are read from the variables the config names at each start and stored in the vault,
+encrypted, as the static credentials of the pseudo-upstreams `llm_anthropic` and `llm_openai`. A
+variable that is not set leaves the stored key alone, so a key put there by hand stays. The rows
+exist from the first start with the proxy on, and then `keystone cred` can replace a key:
+
+```
+keystone cred set --upstream llm_anthropic --header x-api-key --from-env ANTHROPIC_API_KEY
+printf 'Bearer %s' "$OPENAI_API_KEY" | keystone cred set --upstream llm_openai --header Authorization
+keystone cred list
+```
+
+Anthropic takes its key in `x-api-key` and OpenAI as `Authorization: Bearer <key>`, and the proxy
+sends whatever header the vault holds, so the value stored for OpenAI starts with `Bearer `.
+
+The two ids are reserved and their rows are disabled, so they are never synced, probed or listed
+as upstreams. A key is never returned, logged or put on a span. A request to a provider with
+`api_key_env` set and no key stored is refused with 503 `KS_PROVIDER_KEY_MISSING` before anything is
+sent. Disabling the proxy later does not remove the stored keys; replace them, and revoke them at
+the provider if they should be gone.
+
+**Pointing an agent at it.** The agent uses its Keystone token as the API key, and the SDK's base
+URL is Keystone's:
+
+```
+export ANTHROPIC_BASE_URL=http://localhost:8080/llm/anthropic   # the SDK adds /v1/messages
+export ANTHROPIC_API_KEY=$(scripts/get_token.sh olivia ops-agent)
+export OPENAI_BASE_URL=http://localhost:8080/llm/openai/v1      # the SDK adds /chat/completions
+export OPENAI_API_KEY=$(scripts/get_token.sh olivia ops-agent)
+```
+
+The token is checked as it is for `/mcp`: sign-in, the agent list, the tenant. It may be the bearer
+token or `x-api-key`. Only agents of `llm_proxy.tenant` may use the proxy (403 `KS_DENIED` for
+others). A token lasts as long as the identity provider says, and an SDK that is not given a
+fresh one will start to get 401 when it expires.
+
+**What a request goes through.**
+
+| Step | Refused with | Status |
+|---|---|---|
+| The token | `KS_UNAUTHORIZED`, `KS_FORBIDDEN`, `KS_UNAVAILABLE` (keys unreachable) | 401, 403, 503 |
+| The tenant | `KS_DENIED` | 403 |
+| The body: JSON object, `model`, `stream`, size, no `content-encoding` | `KS_INVALID_REQUEST`, `KS_REQUEST_TOO_LARGE` | 400, 413, 415 |
+| The model has a price | `KS_MODEL_NOT_PRICED` (unless `allow_unpriced`) | 400 |
+| `X-Keystone-Session`, when sent | `KS_SESSION_NOT_FOUND`, `KS_SESSION_MISMATCH` | 404, 403 |
+| The budgets, against the estimate | `KS_BUDGET_EXCEEDED`, or `KS_UNAVAILABLE` when they cannot be read | 402, 503 |
+| The provider's key | `KS_PROVIDER_KEY_MISSING`, `KS_UNAVAILABLE` | 503 |
+| The provider | its own status and body, or `KS_UPSTREAM_ERROR`, `KS_UPSTREAM_TIMEOUT`, `KS_UNAVAILABLE` (too many in flight) | as it answers, 502, 504, 503 |
+
+Keystone's refusals are JSON: `{"error": {"type": "keystone", "code": "KS_BUDGET_EXCEEDED", "message":
+"...", ...}}`, with the facts beside the code (`scope`, `window`, `limit_usd`, `spent_usd`,
+`estimate_usd` and `resets_at` for a budget). A refusal is 402 and not 429 on purpose: SDKs retry
+429 and 5xx. The estimate that the budget is checked against is the body at four bytes a token as
+input, plus `max_tokens` of output (4096 when the request does not say; `n` answers for OpenAI).
+It is deliberately the most the request could cost, so a request with a very large `max_tokens`
+can be refused when a smaller one would not be. Nothing is held: the check is not a reservation
+(ADR-0014).
+
+**What it books.** When an answer ends, and before its last byte is sent, one row goes into
+`spend_ledger` with `kind = 'llm'`, `ref` the request id (the `x-keystone-request-id` header of the
+answer), the model the caller asked for, the tokens and the cost, counted against the same budgets
+as tool calls. The cost is the provider's own token count times the price, and cached tokens are
+priced apart. The counters, the session (when linked) and the metric follow:
+
+```
+docker compose -f deploy/docker-compose.yml exec postgres psql -U keystone -c \
+  "SELECT ts, user_id, model, input_tokens, output_tokens, cost_usd FROM spend_ledger
+   WHERE kind = 'llm' ORDER BY ts DESC LIMIT 10"
+curl -s localhost:8080/metrics | grep keystone_llm_tokens_total
+```
+
+`keystone_llm_tokens_total{tenant,model,direction}` has `direction` `input`, `output`, `cache_read`
+or `cache_write`, and `model` is the name of the entry in the price list that applied (a family
+name for `some-family-*`), or `unpriced`. Each request is a `keystone.llm_call` span (it continues
+a `traceparent` the caller sends) with `gen_ai.system`, `gen_ai.request.model`,
+`gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `keystone.cost_usd` and
+`keystone.outcome`, and a log line `llm_request` with the same, the request id and a hash of the user.
+
+**Streams** reach the caller byte for byte as the provider sends them. An OpenAI stream is asked to
+report its usage (`stream_options.include_usage`), because OpenAI says nothing otherwise, and the
+caller's stream then ends with one more chunk, with an empty `choices` list. A stream that ends
+without the provider's final count, or that is cut, or that the caller leaves, is booked for the
+tokens that were counted and logged as `llm_usage_incomplete` with a `reason` (`partial_usage`,
+`no_usage`, `cut`, `client_gone`). A caller that hangs up on an answer that is not a stream is
+still charged: the proxy reads the rest of it. `llm_booking_failed` in the log means a request was
+answered and could not be written to the books; the line has the request id, and the cost is in
+the `llm_request` line next to it.
+
+**The local stack** forwards both providers to the fake model API (`examples/fake_llm`, the service
+`fake-llm` on port 8199, which wants the key `FAKE_LLM_API_KEY`) and prices it with fake prices
+(`deploy/pricing.compose.yaml`). A request for `fake-model` with a prompt of four words and a
+reply of twelve costs $0.000192. The model name picks a behavior, as the docstring of
+`examples/fake_llm/server.py` says: `fake-model-cached` adds cache tokens, `fake-no-usage` leaves
+the usage out of a stream, `fake-cut` breaks one, `fake-error-429`, `fake-error-500` and
+`fake-error-echo-key` fail, and `fake-slow` is slow. `bash scripts/smoke/phase_8.sh` uses it.
+
+**What it does not do.** It applies no access policy (any agent of the tenant may call any priced
+model, within its budgets), it is not rate limited, it writes no `audit_events` row, it does not
+log prompts or answers, there are no refunds, and a tenant cannot have a provider key of its own.
+The cost is the tokens: a provider's charge for anything else, such as a search tool billed for each
+use, is not counted.
+Only chat requests of the two APIs exist: the other endpoints of a provider are not proxied.
 
 ## Sessions
 
@@ -1351,9 +1726,10 @@ whatever name the caller made up.
 `keystone_approvals_pending{tenant}` counts the approval requests waiting for a decision. The
 approval service sets it when it starts and after each request, decision and sweep.
 
-The metrics of Phase 8 are declared and nothing sets them yet, so the last row of the dashboard
-shows "no data" for those panels until then: `keystone_rate_limited_total`,
-`keystone_budget_spent_usd` and `keystone_llm_tokens_total`.
+`keystone_rate_limited_total{tenant,scope}` counts the calls a rate limit refused (KS-804), and
+`keystone_budget_spent_usd{tenant,scope}` is the highest spend in the current window among the
+budgets of one scope (KS-805). `keystone_llm_tokens_total` is set by the proxy for model calls
+(KS-806), and its panel shows "no data" until the proxy has served a request.
 
 The dashboard has five rows: Traffic (calls per second by effect, outcome and tool, rejections by
 code), Latency (p50 and p95 of the total, p95 by stage, policy evaluation), Upstreams (errors,
@@ -1373,7 +1749,7 @@ found (404), so the answer does not say it exists. The OpenAPI schema is at
 
 | Route | What it does |
 |---|---|
-| `GET /audit` | Search the audit log, newest first. Filters: `user`, `agent`, `tool`, `effect`, `outcome`, `since`, `until`, `call_id`. Pages by `cursor` (a `seq`) and `limit` (1 to 200, 50 by default); `next_cursor` is null on the last page. A page never repeats a record, even while calls are being made |
+| `GET /audit` | Search the audit log, newest first. Filters: `user`, `agent`, `tool`, `effect`, `outcome`, `since`, `until`, `call_id`, `session` (an MCP session id; there is no index on it, so the search reads the tenant's records newest first until it has a page). Pages by `cursor` (a `seq`) and `limit` (1 to 200, 50 by default); `next_cursor` is null on the last page. A page never repeats a record, even while calls are being made |
 | `GET /audit/{seq}` | One record |
 | `GET /audit/verify?last=10000` | Check the hash chain of the newest records (up to 100,000; `keystone audit verify` checks the whole log). The chain runs through every tenant, so the result is about the whole log |
 | `GET /tools`, `GET /tools/{name}` | The tenant's tools, each with its risk, tags, status and `cost_per_call_usd` (a decimal string); a tool's detail with its pending definition, its fingerprint and a diff |
@@ -1406,8 +1782,8 @@ takes a bearer token.
 ## Console
 
 The console is a React app in `console/` (Vite, TypeScript in strict mode, Tailwind, React Router and
-TanStack Query). It is for people: approvers decide requests, and admins read the audit log and
-review changed tools. Agents never use it. It runs on Vite's dev server at
+TanStack Query). It is for people: approvers decide requests, and admins read the audit log,
+review changed tools and watch spend and live sessions. Agents never use it. It runs on Vite's dev server at
 `http://localhost:5173`; there is no production image of it yet. Why React and not a server-rendered
 page is in ADR-0013.
 
@@ -1421,7 +1797,7 @@ pnpm dev                 # http://localhost:5173
 
 Open `http://localhost:5173` (the realm allows that address and not `127.0.0.1`) and the console
 sends you to Keycloak. Sign in as `lena` (approver) to see the Approvals page only, or as `root`
-(admin) to see Approvals, Audit and Tools. A user with neither role gets a page that says to ask
+(admin) to see Approvals, Audit, Tools, Budgets and Sessions. A user with neither role gets a page that says to ask
 for one. The menu only hides what the API would refuse (the
 approvals routes take an approver or an admin, every other route an admin); the API makes the real
 decision.
@@ -1429,7 +1805,7 @@ decision.
 | Role | Pages |
 |---|---|
 | `approver` | Approvals |
-| `admin` | Approvals, Audit, Tools |
+| `admin` | Approvals, Audit, Tools, Budgets, Sessions |
 
 ### Sign-in
 
@@ -1492,8 +1868,9 @@ because the API would refuse them (403). The link in the webhook and Slack messa
 
 ### The audit page
 
-`/audit` is for admins. It filters by user, agent, tool, decision (allowed, denied, needs approval),
-result (ok, rejected, error) and a time range (local time, sent to the API as absolute times).
+`/audit` is for admins. It filters by user, agent, tool, session (the id of an MCP session, which the
+Sessions page links to), decision (allowed, denied, needs approval), result (ok, rejected, error) and
+a time range (local time, sent to the API as absolute times).
 Text fields send their filter when the person pauses for 0.3 seconds, and the filters are kept in
 the address (`/audit?tool=bank__transfer&effect=deny`), so a filtered view can be sent to someone.
 Records come 25 to a page, newest first. The API pages toward older records by cursor, so the page
@@ -1522,10 +1899,33 @@ fingerprint of the definition that was read, so one that changed again after the
 is refused (409) and not approved unseen. "Disable" and "Enable" switch an active tool and one an
 operator disabled; the API refuses the rest and the console shows what it said.
 
+### The budgets page
+
+`/budgets` is for admins. It draws one bar for each budget of the tenant (`GET /budgets`), in groups:
+the tenant's, then each user's, then each agent's, and in each the day before the month. A bar says
+what is spent against the limit in dollars (`$0.03 of $0.03`, with the cents kept as far as there are
+any: a model request costs `$0.000192`), the share as a percent, and when the window resets, as a
+time from now and in UTC (`Oct 25, 00:00 UTC`), because days and months are counted in UTC. The
+standing is a word in a badge before it is a color: "within limit", "near limit" (from 80%), "at
+limit" and "over limit" (the check is not a reservation, so calls in flight together can pass a
+limit by what they cost). A bar is a `progressbar` with its own text value. When any budget is at its
+limit, a notice above the list says so. With no budgets the page says where they are set (the config
+file); a failed read shows the error with "Try again". The page asks again every 15 seconds.
+
+### The sessions page
+
+`/sessions` is for admins. It lists the tenant's live sessions from Redis (`GET /sessions`, newest
+first) with the user and the agent, when it started, its flags, a red "tainted" badge or a green
+"clean" one (the word is in the badge), its count of calls and its spend, which includes the cost of
+model requests that name the session. A session lives 24 hours from its last use. The user's name is
+a link to `/audit?session=<id>`, which opens the audit page filtered to that session's calls; the
+whole row is the link's target. The page asks for the newest 100 sessions and says so when it has that many, because
+there may be more. It asks again every 10 seconds. With no session it says so.
+
 ### The browser test
 
-`make console-e2e` runs `console/e2e/approval.spec.ts` in headless chromium (Playwright, chromium
-only). It runs at every phase gate from phase 6 (`make gate PHASE=6`) and in the nightly workflow.
+`make console-e2e` runs `console/e2e/approval.spec.ts` and `console/e2e/budgets.spec.ts` in headless
+chromium (Playwright, chromium only). It runs at every phase gate from phase 6 (`make gate PHASE=6`) and in the nightly workflow.
 It needs the compose stack and starts it (`docker compose up --build --wait`) when Keystone,
 Keycloak and the bank are not answering; a warm run takes about 14 seconds, and one that has to
 start the stack takes about 75.
@@ -1547,6 +1947,11 @@ start the stack takes about 75.
    (`console/test-results/approval-agent.txt`): the transfer succeeded, after
    `answered KS_APPROVAL_PENDING; waited for approval <the card's id>`, with the status
    `completed`. Then it reads `/_state` of the bank: one transfer, 900 from CHK-001 to SAV-002.
+
+`budgets.spec.ts` signs in as root, checks that the menu holds all five pages, and opens Budgets (lena's
+bar and the tenant's, their values and their reset times) and Sessions (at least the session of the
+agent that the run started), each with axe-core in the light and the dark theme. A click on a session
+lands on the audit page with the session in its filter.
 
 The run asks the browser for reduced motion, which the console honors, so that colors are at rest
 when axe reads them. A stopped stack, a missing `uv` or a bank that does not reset stops the run
@@ -1637,4 +2042,6 @@ a 1 second limit each and returns 503 if either is down.
 | The `console` job of CI says `schema.d.ts` is out of date with the admin API | A route or a model changed and `console/src/api/schema.d.ts` did not. Run `make console-types` and commit the result. `make console-check` does not look for this. |
 | Port already in use | Another process holds the port. Set a different one in `.env`. |
 | `make check` cannot reach Postgres | Run `make up-core`, then `docker compose -f deploy/docker-compose.yml ps`. |
+| `docker` tests are skipped: "no Docker daemon" or "the sandbox image ... is not built" | The tests need the daemon and the image from `make sandbox-image`. Set `KEYSTONE_REQUIRE_DOCKER=1` to make that a failure instead of a skip. |
+| The sandbox says the Docker daemon cannot be reached | Keystone has no socket, or may not use it. In compose check `docker compose exec keystone ls -l /var/run/docker.sock` and `DOCKER_SOCKET_GID`; on Linux the group of the socket is not 0. |
 | `ModuleNotFoundError: keystone` right after `uv sync` (macOS) | A background process flagged `.venv` as hidden, and Python skips hidden `.pth` files. Check with `ls -lO .venv/lib/python3.12/site-packages/keystone.pth`. Set `UV_PROJECT_ENVIRONMENT` to a path outside the repo, for example `$HOME/.cache/keystone-venv`, then run `uv sync`. |

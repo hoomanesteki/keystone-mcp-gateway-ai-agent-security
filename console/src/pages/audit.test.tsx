@@ -256,3 +256,33 @@ test("does not ask an approver for the chain or the log", async () => {
   expect(screen.queryByRole("status", { name: "Audit chain" })).not.toBeInTheDocument();
   expect(api.to("GET", "/audit/verify")).toHaveLength(0);
 });
+
+test("filters by session", async () => {
+  const mine = record({ seq: 31, session_id: "sess-mine", tool_name: "echo__echo" });
+  const api = auditApi([mine, TRANSFER, BALANCE]);
+  renderApp({ path: "/audit", session: PEOPLE.root, api });
+  expect(await screen.findByRole("button", { name: /bank__get_balance/ })).toBeVisible();
+  expect(lastQuery(api)?.get("session")).toBeNull();
+
+  await userEvent.type(screen.getByLabelText("Session"), "sess-mine");
+
+  await waitFor(() => {
+    expect(lastQuery(api)?.get("session")).toBe("sess-mine");
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("button", { name: /bank__get_balance/ })).not.toBeInTheDocument();
+  });
+  expect(screen.getByRole("button", { name: /echo__echo/ })).toBeVisible();
+});
+
+test("starts filtered by the session in the address", async () => {
+  const mine = record({ seq: 31, session_id: "sess-mine", tool_name: "echo__echo" });
+  const api = auditApi([mine, TRANSFER]);
+  renderApp({ path: "/audit?session=sess-mine", session: PEOPLE.root, api });
+
+  expect(await screen.findByRole("button", { name: /echo__echo/ })).toBeVisible();
+
+  expect(screen.getByLabelText("Session")).toHaveValue("sess-mine");
+  expect(api.to("GET", "/audit")[0]?.query.get("session")).toBe("sess-mine");
+  expect(screen.queryByRole("button", { name: /bank__transfer/ })).not.toBeInTheDocument();
+});

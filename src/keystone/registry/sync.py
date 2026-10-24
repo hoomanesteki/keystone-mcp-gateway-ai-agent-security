@@ -60,12 +60,18 @@ class SyncReport(BaseModel):
         return not self.errors
 
 
-def target_of(row: Upstream, env: Mapping[str, str] | None = None) -> UpstreamTarget:
+def target_of(
+    row: Upstream, env: Mapping[str, str] | None = None, network: str | None = None
+) -> UpstreamTarget:
+    """Where an upstream is. `env` and `network` are not in the table: they come from the config
+    file (an upstream added with the CLI has neither, and a container gets no network)."""
     return UpstreamTarget(
         transport=row.transport,
         url=row.url,
         command=tuple(row.command) if row.command else None,
         env=tuple(sorted((env or {}).items())),
+        image=row.image,
+        network=network or "none",
     )
 
 
@@ -129,6 +135,8 @@ class RegistrySyncer:
     timeout_s: float = DEFAULT_TIMEOUT_S
     # upstream id -> the environment its stdio child gets (from the config file only)
     environments: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    # upstream id -> the network of its container, `none` or `bridge` (from the config file only)
+    networks: Mapping[str, str] = field(default_factory=dict)
     # Where to get the upstream's own credential. Without it the tool list is read unauthenticated.
     service_headers: ServiceHeaders | None = None
     # What reads a new tool's description and the descriptions in its schema (KS-706). Without one
@@ -139,7 +147,10 @@ class RegistrySyncer:
         """Tell the directory where the upstreams are, and drop pooled clients whose address
         changed since the last time."""
         changed = self.directory.update(
-            {row.id: target_of(row, self.environments.get(row.id)) for row in rows}
+            {
+                row.id: target_of(row, self.environments.get(row.id), self.networks.get(row.id))
+                for row in rows
+            }
         )
         for upstream_id in changed:
             await self.pool.forget(upstream_id)

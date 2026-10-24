@@ -787,7 +787,7 @@
       "id": 20,
       "type": "timeseries",
       "title": "Rate limited per second",
-      "description": "Phase 8. No data until rate limits arrive.",
+      "description": "Calls a rate limit refused, by tenant and by the scope of the limit: per_tenant, per_user, per_agent or per_tool.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -833,7 +833,7 @@
       "id": 21,
       "type": "timeseries",
       "title": "Spend in USD",
-      "description": "Phase 8. No data until budgets arrive.",
+      "description": "The highest spend in the current budget window among the budgets of each scope (tenant, user or agent), in US dollars. A budget refuses a call that would pass it.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -870,7 +870,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (tenant, scope) (keystone_budget_spent_usd)",
+          "expr": "max by (tenant, scope) (keystone_budget_spent_usd)",
           "legendFormat": "{{tenant}} {{scope}}"
         }
       ]
@@ -879,7 +879,7 @@
       "id": 22,
       "type": "timeseries",
       "title": "LLM tokens per second",
-      "description": "Phase 8. No data until the LLM proxy arrives.",
+      "description": "Tokens of model requests that went through the LLM proxy, by tenant, by the price list entry that applied and by direction (input, output, cache_read, cache_write). No data until the proxy is on and a request has gone through it.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

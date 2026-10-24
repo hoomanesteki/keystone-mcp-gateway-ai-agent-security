@@ -33,10 +33,13 @@ is newer than the plan: see "Console: where a pin differs" below.
 | jaegertracing/jaeger | 2.22.0 | `deploy/docker-compose.yml` (the v2 image; all-in-one is the retired v1 line) |
 | prom/prometheus | v3.15.1 | `deploy/docker-compose.yml` |
 | grafana/grafana | 13.2.4 | `deploy/docker-compose.yml` |
-| python | 3.12.15-slim-trixie | `Dockerfile` and `deploy/Dockerfile.upstreams`, build and runtime stages |
+| python | 3.12.15-slim-trixie | `Dockerfile`, `deploy/Dockerfile.upstreams` and `deploy/sandbox/Dockerfile.python`, build and runtime stages |
 | ghcr.io/astral-sh/uv | 0.12.3 | `Dockerfile` and `deploy/Dockerfile.upstreams` (copy the uv binary) |
+| docker | 29.6.2-cli | `Dockerfile` (copies the `docker` binary, which starts the containerized stdio upstreams of KS-803; the version of the daemon on the machine I develop on) |
 | keystone | dev | built locally from `Dockerfile`, never pulled; compose names the built image |
 | keystone-upstreams | dev | built locally from `deploy/Dockerfile.upstreams`, never pulled; the tag is the compose service name for the build |
+| keystone-echo-stdio | dev | built locally from `examples/upstreams/Dockerfile.echo` (`make echo-image`), never pulled. The echo and probe servers of the demo upstreams, for the tests of the containerized stdio transport (KS-803) |
+| keystone-sandbox-python | dev | built locally from `deploy/sandbox/Dockerfile.python` (`make sandbox-image`, or the compose service `sandbox-image`), never pulled. The sandbox runs code in containers made from it (KS-801, ADR-0012) |
 
 ## CI actions and tools
 
@@ -58,6 +61,7 @@ is newer than the plan: see "Console: where a pin differs" below.
 | asyncpg | 0.32.0 | Postgres driver, also used directly by the readiness probe |
 | cedarpy | 4.12.2 | Cedar policy engine in process (KS-401, ADR-0006); wraps Cedar 4.12.0, no runtime dependencies, wheels for macOS and Linux on x86_64 and arm64 |
 | cryptography | 50.0.2 | Fernet encryption for the credential vault (KS-305), and the RSA and EC keys of the fake IdP |
+| docker | 7.2.0 | the Docker SDK: the sandbox runner creates, starts, reads and removes containers through it (KS-801, ADR-0012). Its dependencies `requests` and `urllib3` were already locked |
 | fastapi | 0.159.1 | HTTP app and dependency injection |
 | jsonschema | 4.26.0 | Draft 2020-12 validation of tool arguments in the pipeline |
 | mcp | 2.3.0 | MCP server and client SDK (ADR-0003); a new major version, see `docs/spikes/mcp-proxy.md` |
@@ -94,6 +98,33 @@ Phase 7. Without it the evaluation builds its synthetic texts only and says so.
 | Package | Version | Used for |
 |---|---|---|
 | pyarrow | 26.0.0 | reads the parquet files of `deepset/prompt-injections` and `Salesforce/wikitext` at a pinned revision. Imported inside one function of `eval/detector/datasets.py`, so nothing else needs it. The datasets server of Hugging Face answers 429 after a few dozen requests, which 60 articles cannot stay under; the files do not |
+
+## Sandbox image packages
+
+The image the sandbox runs code in (`deploy/sandbox/Dockerfile.python`, KS-801) is the Python base
+image above plus these. `pip install` pins the two direct packages; the rest were resolved on
+2026-10-23 and are the versions the image had when I measured it. `wget` comes from Debian trixie,
+the release of the base image, and is not pinned further.
+
+| Package | Version | Used for |
+|---|---|---|
+| numpy | 2.5.4 | arrays, for the reports an agent writes |
+| pandas | 3.1.0 | tables, likewise |
+| python-dateutil | 3.0.0 | a dependency of pandas |
+| six | 1.17.0 | a dependency of python-dateutil |
+| tzdata | 2026.5 | a dependency of pandas |
+| wget | Debian trixie | so that "there is no network" can be shown with the tool people reach for first |
+
+## Packages of the echo server image
+
+`examples/upstreams/Dockerfile.echo` (KS-803) installs the two packages the demo servers import, at
+the versions of `uv.lock`, so that the image stays small. Their dependencies are resolved when the
+image is built.
+
+| Package | Version | Used for |
+|---|---|---|
+| mcp | 2.3.0 | the MCP server SDK (ADR-0003) |
+| uvicorn | 0.54.0 | imported by the helper the demo servers share, though a stdio server never starts it |
 
 ## Models
 
