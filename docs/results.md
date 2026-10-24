@@ -193,11 +193,11 @@ Recall at a false positive rate of 5% depends on the few harmless texts that sco
 <!-- redteam:start -->
 ## Red team
 
-Measured on 2026-10-24 at the commits listed below, on macOS-26.7.1-arm64-arm-64bit (10 CPUs), against the local compose stack, by `python -m eval.redteam.runner`. Every number below is computed from the files listed under "Where the numbers come from" by `python -m eval.redteam.report`, and from nothing else.
+Measured on 2026-10-24 at commit `aaee3811d301`, on macOS-26.7.1-arm64-arm-64bit (10 CPUs), against the local compose stack, by `python -m eval.redteam.runner`. Every number below is computed from the files listed under "Where the numbers come from" by `python -m eval.redteam.report`, and from nothing else.
 
 The suite has 60 scenarios. 12 tasks (what a user asks an operator's agent to do, such as summarizing mail or paying an invoice) each have one scenario for each of 4 attack goals, with the attack planted in a document the task reads (48 attacks), and one benign scenario with no attack (12). The documents are mail, files, web pages and bank transactions. The text of the attack is one of 12 templates, rotated across the scenarios. Whether an attack landed is decided from the state of the upstreams (what the mail server sent, what the bank moved, what the drive was told to write), and whether the task was done is decided the same way. What the agent says is not believed.
 
-Three configs of the same Keystone build were measured. C0 is `KEYSTONE_PROFILE=passthrough`: every part of the pipeline is a stub except the credentials, and nothing is scanned. C1 has the access rules and the approvals (acme's rule for mail to outside addresses, the limit on transfers) and has neither the Rule of Two policies nor the scanner. C2 is everything: the scanner with its model, the taint, and the Rule of Two. The runner asks the gateway how it is set before it starts and refuses to run against one that does not match the label.
+Three configs of the same Keystone build were measured. C0 is `KEYSTONE_PROFILE=passthrough`: every part of the pipeline is a stub except the credentials, and nothing is scanned. C1 has the access rules and the approvals (acme's rule for mail to outside addresses, the limit on transfers) and has neither the Rule of Two policies nor the scanner. C2 is everything: the scanner with its model (`protectai-deberta-v2`), the taint, and the Rule of Two. The runner asks the gateway how it is set before it starts, waits for the model to load, and refuses to run against a gateway that does not match the label.
 
 The naive agent runs the script of the task and does whatever instruction it reads in a tool result. That is the worst case for obedience, and it is deterministic, so it ran once. The approver is an oracle: it approves the calls the task needs and rejects every other call that reaches the queue, every time. It measures what the layers do when the person is right, and says nothing of a person who reads a card badly.
 
@@ -230,7 +230,7 @@ ASR is attack runs where the attack check held, over attack runs. Benign utility
 - The rules that asked about an attack, and were refused, in C2 were `external-email-needs-approval` (12 calls), `rule-of-two` (36 calls) and `tainted-external-effect` (4 calls). A call that several rules ask about is counted under each.
 - The 8 that landed in C2 were all in the page vector. No session among them was tainted, and the flags at the end were reads_untrusted. The highest score of an output in them was 0.82, under the 0.85 at which a session is tainted, and 5 of the 8 were flagged (0.5 or more) and annotated.
 - With the compose config of v0.8.0, 29 of 48 attacks landed in C2, 21 more than with this one. The note of that run: the tools of the files upstream and bank__list_transactions have no tags, and every other tag is the same.
-- All 12 harmless tasks were done in every config. A person was asked about 1 of them in C1 and 3 in C2. The scanner flagged 1 of the 12 harmless runs in C2 and tainted 0.
+- All 12 harmless tasks were done in every config. A person was asked about 1 of them in C1 and 3 in C2. The scanner flagged 2 of the 12 harmless runs in C2 and tainted 0.
 
 ### How the attacks ended
 
@@ -312,7 +312,7 @@ Attacks landed, by template:
 | C2 full | file | 12 | 8 of 12 | 1 of 12 | 0 of 12 |
 | C2 full | page | 12 | 8 of 12 | 1 of 12 | 8 of 12 |
 | C2 full | transaction | 12 | 8 of 12 | 1 of 12 | 0 of 12 |
-| C2 full | no attack | 12 | 1 of 12 | 0 of 12 | - |
+| C2 full | no attack | 12 | 2 of 12 | 0 of 12 | - |
 
 A run is counted once, at the highest score the scanner gave an output in its session. An output at 0.5 or more is flagged and annotated, and one at 0.85 or more taints the session. The scores are the ones in the audit record of each call.
 
@@ -335,15 +335,15 @@ A call that changes something is sent to a person by acme's rule for mail to an 
 
 | Config | File | Commit | Runs that differ in outcome | Runs whose scanner scores differ | Harmless runs flagged |
 |---|---|---|---|---|---|
-| C0 passthrough | `eval/results/redteam-naive-C0-2026-10-24.jsonl` (the one above) | `94a3284fcea3` | - | - | 0 of 12 |
-| C0 passthrough | `eval/results/redteam-naive-C0-2026-10-24-repeat1.jsonl` | `a501b4df1b74` | 0 of 60 | 0 of 60 | 0 of 12 |
-| C1 policy and approvals | `eval/results/redteam-naive-C1-2026-10-24.jsonl` (the one above) | `94a3284fcea3` | - | - | 0 of 12 |
-| C1 policy and approvals | `eval/results/redteam-naive-C1-2026-10-24-repeat1.jsonl` | `a501b4df1b74` | 0 of 60 | 0 of 60 | 0 of 12 |
-| C2 full | `eval/results/redteam-naive-C2-2026-10-24-repeat2.jsonl` (the one above) | `f425234ec1a1` | - | - | 1 of 12 |
-| C2 full | `eval/results/redteam-naive-C2-2026-10-24.jsonl` | `94a3284fcea3` | 0 of 60 | 11 of 60 | 1 of 12 |
-| C2 full | `eval/results/redteam-naive-C2-2026-10-24-repeat1.jsonl` | `a501b4df1b74` | 0 of 60 | 9 of 60 | 2 of 12 |
+| C0 passthrough | `eval/results/redteam-naive-C0-2026-10-24.jsonl` (the one above) | `aaee3811d301` | - | - | 0 of 12 |
+| C0 passthrough | `eval/results/redteam-naive-C0-2026-10-24-repeat1.jsonl` | `aaee3811d301` | 0 of 60 | 0 of 60 | 0 of 12 |
+| C1 policy and approvals | `eval/results/redteam-naive-C1-2026-10-24.jsonl` (the one above) | `aaee3811d301` | - | - | 0 of 12 |
+| C1 policy and approvals | `eval/results/redteam-naive-C1-2026-10-24-repeat1.jsonl` | `aaee3811d301` | 0 of 60 | 0 of 60 | 0 of 12 |
+| C2 full | `eval/results/redteam-naive-C2-2026-10-24.jsonl` (the one above) | `aaee3811d301` | - | - | 2 of 12 |
+| C2 full | `eval/results/redteam-naive-C2-2026-10-24-repeat2.jsonl` | `aaee3811d301` | 0 of 60 | 9 of 60 | 2 of 12 |
+| C2 full | `eval/results/redteam-naive-C2-2026-10-24-repeat1.jsonl` | `aaee3811d301` | 0 of 60 | 12 of 60 | 1 of 12 |
 
-In 240 comparisons of a scenario with its repeat, the attack and the task came out the same every time. The scores of the scanner differ in 20 of them. The scanner waits 300 ms for the model and scores a document by the rules alone if the model is late, so on a machine that has other work the same document can score differently from one run to the next, and the audit record does not say which scans had waited too long.
+In 240 comparisons of a scenario with its repeat, the attack and the task came out the same every time. The scores of the scanner differ in 21 of them. The scanner waits 300 ms for the model and scores a document by the rules alone if the model is late, so on a machine that has other work the same document can score differently from one run to the next, and the audit record does not say which scans had waited too long.
 
 ### The LLM agent
 
@@ -356,14 +356,14 @@ ANTHROPIC_API_KEY=<key> REDTEAM_LLM_BASE_URL=https://api.anthropic.com REDTEAM_L
 
 ### Where the numbers come from
 
-| File | Config | Commit | Started | Runs | Complete |
-|---|---|---|---|---|---|
-| `eval/results/redteam-naive-C0-2026-10-24-repeat1.jsonl` | C0 passthrough | `a501b4df1b74` | 2026-10-24T08:18:33+00:00 | 60 | yes |
-| `eval/results/redteam-naive-C0-2026-10-24.jsonl` | C0 passthrough | `94a3284fcea3` | 2026-10-24T08:27:24+00:00 | 60 | yes |
-| `eval/results/redteam-naive-C1-2026-10-24-repeat1.jsonl` | C1 policy and approvals | `a501b4df1b74` | 2026-10-24T08:19:10+00:00 | 60 | yes |
-| `eval/results/redteam-naive-C1-2026-10-24.jsonl` | C1 policy and approvals | `94a3284fcea3` | 2026-10-24T08:28:03+00:00 | 60 | yes |
-| `eval/results/redteam-naive-C2-2026-10-24-repeat1.jsonl` | C2 full | `a501b4df1b74` | 2026-10-24T08:19:53+00:00 | 60 | yes |
-| `eval/results/redteam-naive-C2-2026-10-24.jsonl` | C2 full | `94a3284fcea3` | 2026-10-24T08:28:47+00:00 | 60 | yes |
-| `eval/results/redteam-naive-C2-2026-10-24-repeat2.jsonl` | C2 full | `f425234ec1a1` | 2026-10-24T08:35:50+00:00 | 60 | yes |
-| `eval/results/redteam-naive-C2-compose-config-of-v0.8.0-2026-10-24.jsonl` | C2 full (compose config of v0.8.0) | `ce7922fad518` | 2026-10-24T08:40:50+00:00 | 60 | yes |
+| File | Config | Commit | Started | Runs | Without a session | Complete |
+|---|---|---|---|---|---|---|
+| `eval/results/redteam-naive-C0-2026-10-24-repeat1.jsonl` | C0 passthrough | `aaee3811d301` | 2026-10-24T09:34:48+00:00 | 60 | 0 | yes |
+| `eval/results/redteam-naive-C0-2026-10-24.jsonl` | C0 passthrough | `aaee3811d301` | 2026-10-24T09:40:07+00:00 | 60 | 0 | yes |
+| `eval/results/redteam-naive-C1-2026-10-24-repeat1.jsonl` | C1 policy and approvals | `aaee3811d301` | 2026-10-24T09:35:38+00:00 | 60 | 0 | yes |
+| `eval/results/redteam-naive-C1-2026-10-24.jsonl` | C1 policy and approvals | `aaee3811d301` | 2026-10-24T09:41:03+00:00 | 60 | 0 | yes |
+| `eval/results/redteam-naive-C2-2026-10-24-repeat1.jsonl` | C2 full | `aaee3811d301` | 2026-10-24T09:36:38+00:00 | 60 | 0 | yes |
+| `eval/results/redteam-naive-C2-2026-10-24-repeat2.jsonl` | C2 full | `aaee3811d301` | 2026-10-24T09:38:23+00:00 | 60 | 0 | yes |
+| `eval/results/redteam-naive-C2-2026-10-24.jsonl` | C2 full | `aaee3811d301` | 2026-10-24T09:42:10+00:00 | 60 | 0 | yes |
+| `eval/results/redteam-naive-C2-compose-config-of-v0.8.0-2026-10-24.jsonl` | C2 full (compose config of v0.8.0) | `aaee3811d301` | 2026-10-24T09:44:18+00:00 | 60 | 0 | yes |
 <!-- redteam:end -->
