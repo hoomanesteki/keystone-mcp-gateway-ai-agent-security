@@ -1,6 +1,7 @@
 import os
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import UTC, datetime
 
 import anyio
 import structlog
@@ -42,6 +43,13 @@ from keystone.identity.credential_repo import vault_from_settings
 from keystone.identity.metadata import add_metadata_route
 from keystone.identity.middleware import Authenticator
 from keystone.identity.vault import Vault, VaultError
+from keystone.metering.budgets import (
+    BudgetService,
+    MemoryCounters,
+    PostgresBudgets,
+    RedisCounters,
+)
+from keystone.metering.ledger import PostgresLedger
 from keystone.metering.ratelimit import MemoryLimiter, RateLimiter, RedisLimiter
 from keystone.policy.engine import CedarPolicyEngine, ObservedEngine
 from keystone.policy.schema_info import args_fields
@@ -224,6 +232,20 @@ def create_app(
     )
     # The token buckets share Redis with the sessions, and live in the process when there is none.
     limiter: RateLimiter = RedisLimiter(redis) if redis else MemoryLimiter()
+
+    # Spend (KS-805): the ledger in Postgres is the record, and the counters that budgets are
+    # checked against are a cache of it in Redis, in the process when there is none. The windows
+    # are counted in UTC from the same clock as the rate limits.
+    def budget_clock() -> datetime:
+        return datetime.fromtimestamp(clock(), UTC) if clock else datetime.now(UTC)
+
+    budgets = BudgetService(
+        PostgresBudgets(sessions),
+        PostgresLedger(sessions),
+        RedisCounters(redis) if redis else MemoryCounters(),
+        clock=budget_clock,
+        metrics=metrics,
+    )
     # The scanner reads every output (KS-704). Its model is not loaded here: the lifespan starts
     # that in the background, and until it is ready a scan is answered by the rules alone.
     classifier = load_classifier(settings.scanner) if settings.scanner.enabled else None
@@ -249,6 +271,7 @@ def create_app(
             sessions=session_store,
             scanner=scanner,
             rate_limiter=limiter,
+            budgets=budgets,
             **({"clock": clock} if clock is not None else {}),
         ),
         interceptors,
@@ -259,13 +282,19 @@ def create_app(
         RedisListCache(redis) if redis else MemoryListCache(),
         ttl_s=settings.policy.list_cache_ttl_s,
     )
-    gateway = Gateway(settings, registry, session_store, pipeline, tool_filter, virtual)
+    gateway = Gateway(
+        settings, registry, session_store, pipeline, tool_filter, virtual, now=budget_clock
+    )
     registry.add_listener(gateway.notify_tools_changed)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             await upsert_tenants(sessions, settings.tenants)
+            # The budgets of the config are stored, the ones it no longer lists are dropped, and the
+            # counters of the current windows are set from the ledger. A budget for a tenant that is
+            # not listed stops startup.
+            await budgets.start(settings.budgets, [t.id for t in settings.tenants])
             await policies.record_current()
             # A config the registry cannot use (unknown tenant, a URL the SSRF guard refuses)
             # stops startup: serving with some upstreams silently missing is worse.
@@ -333,6 +362,7 @@ def create_app(
     app.state.vault = vault
     app.state.policies = policies
     app.state.approvals = approvals
+    app.state.budgets = budgets
     # The admin API is an app of its own under a prefix: its own schema, errors and CORS rule.
     admin_api = create_admin_app(
         AdminDeps(
@@ -346,6 +376,7 @@ def create_app(
             if isinstance(session_store, SessionDirectory)
             else None,
             approvals=approvals,
+            budgets=budgets,
         )
     )
     app.mount(PREFIX, admin_api)

@@ -1,5 +1,6 @@
-"""KS-804 in the compose files: limits that the smoke scripts and the browser test never meet."""
+"""KS-804 and KS-805 in the compose files: limits the smokes and the browser test never meet."""
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -42,3 +43,18 @@ def test_the_smoke_can_tighten_the_limit_of_one_user_through_the_environment() -
     assert environment["KEYSTONE_RATE_LIMITS__PER_USER__REFILL_PER_S"].startswith(
         "${KEYSTONE_RATE_LIMIT_USER_REFILL:-"
     )
+
+
+def test_the_compose_budgets_are_the_ones_the_smoke_needs() -> None:
+    settings = Settings(**CONFIG, env="test")
+
+    by_scope = {(b.scope, b.scope_id): b for b in settings.budgets}
+    lena = by_scope[("user", "lena")]
+    assert (lena.tenant, lena.window, lena.limit_usd) == ("acme", "day", Decimal("0.03"))
+    assert by_scope[("tenant", "acme")].limit_usd >= 10
+    echo = next(u for u in settings.upstreams if u.id == "echostd")
+    assert echo.tools["echo"].cost_per_call_usd == 0.01
+    # The tools the tests of the demo upstreams read from this file stay free.
+    for upstream in settings.upstreams:
+        if upstream.id in ("mail", "files", "bank", "echo", "files_globex"):
+            assert all(not t.cost_per_call_usd for t in upstream.tools.values()), upstream.id

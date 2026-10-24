@@ -130,6 +130,23 @@ class SessionInfo(BaseModel):
     spent_usd: float
 
 
+class BudgetInfo(BaseModel):
+    """A spending limit and what has been spent against it in the current window (KS-805)."""
+
+    scope: Literal["tenant", "user", "agent"]
+    scope_id: str = Field(description="The tenant itself, a user id or an agent id.")
+    window: Literal["day", "month"]
+    limit_usd: str = Field(
+        description="The limit in US dollars, as a decimal string like the audit log's cost."
+    )
+    spent_usd: str = Field(
+        description="What the current window holds, in dollars, counted in UTC. It is the counter "
+        "the pre-check reads, so it is what a call is checked against."
+    )
+    window_start: str = Field(description="When the current window began (UTC).")
+    resets_at: str = Field(description="When it ends and the spend is forgotten (UTC).")
+
+
 class PolicyEntry(BaseModel):
     id: str
     effect: Literal["permit", "forbid"]

@@ -14,6 +14,7 @@ whole log, and it says nothing of what any record holds.
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Annotated
 from urllib.parse import urlsplit, urlunsplit
 
@@ -32,6 +33,7 @@ from keystone.admin.schemas import (
     ApproveChange,
     AuditPage,
     AuditRecord,
+    BudgetInfo,
     DecisionBody,
     Effect,
     ErrorBody,
@@ -61,6 +63,7 @@ from keystone.core.types import Principal, SessionState
 from keystone.db.models import AuditEvent, Tool, Upstream
 from keystone.defense.description_check import Screener
 from keystone.gateway.sessions import SessionDirectory
+from keystone.metering.budgets import BudgetService
 from keystone.policy.store import PolicyStore
 from keystone.registry.pinning import pending_fingerprint, schema_text, unified_diff
 from keystone.registry.repo import ToolRepo, UpstreamRepo
@@ -86,6 +89,8 @@ class AdminDeps:
     session_directory: SessionDirectory | None = None
     # The approval service. Without one (no master keys) the approvals routes answer 503.
     approvals: ApprovalService | None = None
+    # The budgets and what is spent against them (KS-805). Without one the list is empty.
+    budgets: BudgetService | None = None
     # What reads the descriptions of a tool for the screening a reviewer is shown (KS-706). The
     # default is the first check alone, which is what the gateway does with the scanner off.
     screener: Screener = field(default_factory=Screener)
@@ -197,6 +202,11 @@ def _target(row: Upstream) -> str:
 
 def _moment(value: datetime | None) -> str | None:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ") if value else None
+
+
+def _dollars(amount: Decimal) -> str:
+    """Plain digits without trailing zeros, like a tool's cost (0 is 0, 1E-7 is 0.0000001)."""
+    return format(amount.normalize(), "f")
 
 
 def _utc(moment: datetime) -> datetime:
@@ -508,6 +518,30 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
                 spent_usd=s.spent_usd,
             )
             for s in found
+        ]
+
+    @app.get(
+        "/budgets",
+        tags=["budgets"],
+        summary="The spending limits of the tenant and what each has spent",
+    )
+    async def list_budgets(principal: admin) -> list[BudgetInfo]:
+        """Every budget of the tenant in the order a call is checked against them (the tenant's,
+        then each user's, then each agent's; a day before a month), with the spend its window holds
+        now and when the window ends. The spend is the counter the pre-check reads."""
+        if deps.budgets is None:
+            return []
+        return [
+            BudgetInfo(
+                scope=s.budget.scope,
+                scope_id=s.budget.scope_id,
+                window=s.budget.window,
+                limit_usd=_dollars(s.budget.limit_usd),
+                spent_usd=_dollars(s.spent),
+                window_start=_moment(s.window_start) or "",
+                resets_at=_moment(s.resets_at) or "",
+            )
+            for s in await deps.budgets.status(principal.tenant_id)
         ]
 
     @app.get("/policies", tags=["policies"], summary="The policies in force for the tenant")

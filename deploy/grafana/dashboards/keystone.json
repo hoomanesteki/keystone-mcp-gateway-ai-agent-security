@@ -833,7 +833,7 @@
       "id": 21,
       "type": "timeseries",
       "title": "Spend in USD",
-      "description": "Phase 8. No data until budgets arrive.",
+      "description": "The highest spend in the current budget window among the budgets of each scope (tenant, user or agent), in US dollars. A budget refuses a call that would pass it.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -870,7 +870,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (tenant, scope) (keystone_budget_spent_usd)",
+          "expr": "max by (tenant, scope) (keystone_budget_spent_usd)",
           "legendFormat": "{{tenant}} {{scope}}"
         }
       ]

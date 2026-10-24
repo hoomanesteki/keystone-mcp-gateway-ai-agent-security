@@ -48,6 +48,9 @@ UPSTREAM_STATUSES = ("unknown", "up", "degraded", "down", "disabled")
 TOOL_STATUSES = ("active", "quarantined", "disabled")
 RISKS = ("low", "medium", "high", "critical")
 APPROVAL_STATUSES = ("pending", "approved", "rejected", "expired", "consumed")
+LEDGER_KINDS = ("tool", "llm")
+BUDGET_SCOPES = ("tenant", "user", "agent")
+BUDGET_WINDOWS = ("day", "month")
 
 
 def _in(column: str, values: tuple[str, ...]) -> str:
@@ -289,6 +292,66 @@ class Approval(Base):
     )
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class SpendLedger(Base):
+    """What was spent, one row for each tool call that has a price and each model request (KS-805,
+    ADR-0014). The record of money: the counters in Redis that budgets are checked against are a
+    cache of it, rebuilt from it. The application's database role may add rows and read them and
+    nothing else, as for the audit log. `(kind, ref)` is unique, so a call recorded twice is counted
+    once. `ts` is the moment the call began, which decides the window it is charged to."""
+
+    __tablename__ = "spend_ledger"
+    __table_args__ = (
+        UniqueConstraint("kind", "ref", name="uq_spend_ledger_ref"),
+        CheckConstraint(_in("kind", LEDGER_KINDS), name="ck_spend_ledger_kind"),
+        Index("ix_spend_ledger_tenant_ts", "tenant_id", "ts"),
+        Index("ix_spend_ledger_user_ts", "tenant_id", "user_id", "ts"),
+        Index("ix_spend_ledger_agent_ts", "tenant_id", "agent_id", "ts"),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # No foreign key to tenants, as in the audit log: the record of money outlives what it names.
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    # The call id of a tool call, or the id Keystone gave a model request.
+    ref: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str | None] = mapped_column(Text)
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    # No precision: a price must come back as the number that went in.
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class BudgetRow(Base):
+    """A spending limit (KS-805): `limit_usd` for `scope_id` of kind `scope`, over a `window`. The
+    config file is the only source of these, applied at startup."""
+
+    __tablename__ = "budgets"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "scope", "scope_id", "window", name="uq_budgets_scope"),
+        CheckConstraint(_in("scope", BUDGET_SCOPES), name="ck_budgets_scope"),
+        # `window` is a reserved word in SQL, so the column is quoted wherever it is named in text.
+        CheckConstraint(_in('"window"', BUDGET_WINDOWS), name="ck_budgets_window"),
+        CheckConstraint("limit_usd > 0", name="ck_budgets_limit"),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(Text, ForeignKey("tenants.id"), nullable=False)
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    # The tenant's own id for the scope `tenant`; a user id or an agent id for the others.
+    scope_id: Mapped[str] = mapped_column(Text, nullable=False)
+    window: Mapped[str] = mapped_column(Text, nullable=False)
+    limit_usd: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

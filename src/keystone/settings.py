@@ -1,5 +1,6 @@
 import os
 import re
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -305,6 +306,34 @@ class RateLimitSettings(BaseModel):
         return [(name, limit) for name, limit in found if limit is not None]
 
 
+class BudgetConfig(BaseModel):
+    """A spending limit (KS-805, ADR-0014): `limit_usd` for one tenant, user or agent over a day or
+    a month, both counted in UTC. A call that would take the spend over it is refused before it
+    runs. The file is the only source of budgets and is applied at startup: one that is not in it
+    any more is removed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant: str = Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")
+    scope: Literal["tenant", "user", "agent"]
+    # The user id (the token's `sub`) or the agent id (its `azp`). The tenant's own id, which a
+    # budget for the tenant does not need to repeat.
+    scope_id: str | None = Field(default=None, min_length=1, max_length=256)
+    window: Literal["day", "month"]
+    # Dollars. Read as the number it looks like (0.03 is three cents, not a nearby float).
+    limit_usd: Decimal = Field(gt=0, max_digits=18, decimal_places=9)
+
+    @model_validator(mode="after")
+    def _the_id_of_the_scope(self) -> "BudgetConfig":
+        if self.scope == "tenant":
+            if self.scope_id not in (None, self.tenant):
+                raise ValueError("a tenant budget has the tenant for its scope_id; leave it out")
+            self.scope_id = self.tenant
+        elif self.scope_id is None:
+            raise ValueError(f"a {self.scope} budget needs a scope_id")
+        return self
+
+
 class HealthSettings(BaseModel):
     """How the gateway watches its upstreams (KS-209)."""
 
@@ -376,6 +405,7 @@ class Settings(BaseSettings):
     scanner_classifier: Classifier | None = None
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     rate_limits: RateLimitSettings = Field(default_factory=RateLimitSettings)
+    budgets: list[BudgetConfig] = Field(default_factory=list)
     # A short name for `sandbox.enabled`, so that KEYSTONE_SANDBOX_ENABLED=false turns the sandbox
     # off without the nested spelling (KEYSTONE_SANDBOX__ENABLED). It wins when both are set.
     sandbox_enabled: bool | None = None
@@ -417,6 +447,19 @@ class Settings(BaseSettings):
     def _the_short_name_of_the_classifier(self) -> "Settings":
         if self.scanner_classifier is not None:
             self.scanner = self.scanner.model_copy(update={"classifier": self.scanner_classifier})
+        return self
+
+    @model_validator(mode="after")
+    def _a_budget_is_listed_once(self) -> "Settings":
+        seen: set[tuple[str, str, str | None, str]] = set()
+        for b in self.budgets:
+            key = (b.tenant, b.scope, b.scope_id, b.window)
+            if key in seen:
+                raise ValueError(
+                    f"the {b.window} budget of {b.scope} {b.scope_id!r} in tenant {b.tenant!r} "
+                    "is listed twice"
+                )
+            seen.add(key)
         return self
 
     @model_validator(mode="after")
