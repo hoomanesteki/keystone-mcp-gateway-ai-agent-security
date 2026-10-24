@@ -23,6 +23,7 @@ import structlog
 from keystone.defense import classifier as classifier_module
 from keystone.defense.classifier import (
     SPECS,
+    ClassifierBusy,
     ClassifierUnavailable,
     FakeClassifier,
     HFClassifier,
@@ -409,12 +410,20 @@ async def test_a_missing_dependency_says_which_extra_to_install() -> None:
 async def test_scans_run_in_threads_and_no_more_at_once_than_the_limit() -> None:
     engine = Engine(seconds=0.15)
     classifier = threaded(engine, concurrency=2)
+    busy: list[int] = []
+
+    async def scan() -> None:
+        try:
+            await classifier.score("text")
+        except ClassifierBusy:
+            busy.append(1)
 
     async with anyio.create_task_group() as group:
         for _ in range(6):
-            group.start_soon(classifier.score, "text")
+            group.start_soon(scan)
 
-    assert engine.most_inside == 2 and engine.finished == 6
+    # The two that found a place ran; the other four were told the model is busy (KS-992).
+    assert engine.most_inside == 2 and engine.finished == 2 and len(busy) == 4
     assert threading.main_thread().name not in engine.threads
 
 
@@ -426,11 +435,11 @@ async def test_a_scan_that_gave_up_stops_and_frees_its_place_when_its_thread_doe
 
     with anyio.move_on_after(0.1) as gave_up:
         await classifier.score("text")
-    # The thread is still inside the model, so the one place is still taken. A second scan has to
-    # wait for it, and gives up as well.
-    with anyio.move_on_after(0.05) as waited:
+    # The thread is still inside the model, so the one place is still taken. A second scan does
+    # not wait for it (KS-992): it is told the model is busy.
+    with pytest.raises(ClassifierBusy):
         await classifier.score("again")
-    assert gave_up.cancelled_caught and waited.cancelled_caught
+    assert gave_up.cancelled_caught
     assert engine.inside == 1 and engine.most_inside == 1
 
     # The abandoned scan notices at its next step and leaves, and the place comes back.

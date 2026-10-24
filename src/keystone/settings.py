@@ -219,6 +219,13 @@ class ScannerSettings(BaseModel):
     # The longest a scan waits for the model. A model that has not answered by then is left out
     # of that scan, which is then scored by the rules alone (`model` says "timeout").
     classifier_timeout_ms: int = Field(default=300, ge=1, le=10_000)
+    # How many scans run in the model at once, and how many CPU threads each uses. Unset, they come
+    # from the CPUs the process may use (a container's limit counts), keeping one for the event
+    # loop: with the model free to take every core, 200 sessions of calls starved the loop, the
+    # health probes of the upstreams timed out and the calls failed (KS-992). A scan that finds all
+    # places taken is not queued: the model is left out of it and `model` says "busy".
+    classifier_concurrency: int | None = Field(default=None, ge=1, le=64)
+    classifier_threads: int | None = Field(default=None, ge=1, le=64)
     # How the score of the rules and the score of the model make one (ADR-0011). `rules_first`: a
     # text that the rules flag (their score is at `thresholds.suspicious` or more) keeps the rules'
     # score and is not given to the model; for any other text the model adds to the rules' score

@@ -151,6 +151,11 @@ scanner:
   enabled: true
   classifier: protectai-deberta-v2
   classifier_timeout_ms: 300
+  # Scans in the model at once, and CPU threads for each. Unset, they follow the CPUs the process
+  # may use and keep one for the event loop. A scan that finds no place is not queued: the rules
+  # decide it and `model` says "busy".
+  # classifier_concurrency: 1
+  # classifier_threads: 3
   # How the score of the rules and the score of the model make one (ADR-0011). rules_first: a text
   # that the rules flag (their score is `thresholds.suspicious` or more) keeps their score and the
   # model is not asked; for any other text the model adds to the rules' score at `model_weight` of

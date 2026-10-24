@@ -1636,6 +1636,13 @@ reads about 1,500 characters on a laptop with windows of 128 tokens (3,500 with 
 a longer output is judged by the rules alone. Raise the timeout to let the model read more, at that
 much more time on each such call, and measure it (`scripts/bench_scanner.py --classifier`,
 `docs/spikes/scanner.md`). On the test split 12 percent of the scans fell back to the rules at 300 ms.
+The model also has a limit on how many scans run in it at once. A scan that finds every place taken
+does not queue: the model is left out of it, the rules decide, and the result says `model: "busy"`
+(KS-992). The limit comes from the CPUs the process may use, a container's limit counted, keeping
+one for the event loop: 1 scan at a time with the other CPUs as threads below 5 CPUs, 2 scans from
+5. `scanner.classifier_concurrency` and `scanner.classifier_threads` set them. Without a limit, 200
+sessions of calls gave the model every core of a 4 CPU container, the event loop starved, the
+health probes of the upstreams timed out and calls failed with `upstream echo is down`.
 The image sets `HF_HUB_OFFLINE=1`: the model is in it, and the container never goes to the network
 for it.
 
