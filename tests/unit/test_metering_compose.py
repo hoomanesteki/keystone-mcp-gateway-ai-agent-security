@@ -1,4 +1,5 @@
-"""KS-804 and KS-805 in the compose files: limits the smokes and the browser test never meet."""
+"""KS-804 to KS-806 in the compose files: the limits that the smokes and the browser test never
+meet, and the fake model API that the LLM proxy is pointed at."""
 
 from decimal import Decimal
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from keystone.metering.pricing import PriceList
 from keystone.settings import Settings
 
 pytestmark = pytest.mark.phase(8)
@@ -58,3 +60,32 @@ def test_the_compose_budgets_are_the_ones_the_smoke_needs() -> None:
     for upstream in settings.upstreams:
         if upstream.id in ("mail", "files", "bank", "echo", "files_globex"):
             assert all(not t.cost_per_call_usd for t in upstream.tools.values()), upstream.id
+
+
+def test_the_compose_llm_proxy_is_pointed_at_the_fake_service_and_its_key() -> None:
+    proxy = Settings(**CONFIG, env="test").llm_proxy
+    services = COMPOSE["services"]
+    fake, keystone = services["fake-llm"], services["keystone"]
+
+    assert proxy.enabled and proxy.tenant == "acme"
+    # The address in the config is the service name and the port the server listens on.
+    assert fake["command"][-2:] == ["--port", "8199"]
+    assert proxy.anthropic.base_url == proxy.openai.base_url == "http://fake-llm:8199"
+    assert fake["ports"] == ["${FAKE_LLM_PORT:-8199}:8199"]
+    # The key the fake wants and the key Keystone sends are one variable with one default.
+    variable = proxy.anthropic.api_key_env
+    assert variable == proxy.openai.api_key_env == "FAKE_LLM_API_KEY"
+    assert fake["environment"]["FAKE_LLM_API_KEY"] == keystone["environment"][variable]
+    assert keystone["depends_on"]["fake-llm"] == {"condition": "service_healthy"}
+
+
+def test_the_price_list_the_config_names_is_the_fake_one_that_is_mounted() -> None:
+    proxy = Settings(**CONFIG, env="test").llm_proxy
+    mounts = dict(
+        reversed(volume.split(":")[:2]) for volume in COMPOSE["services"]["keystone"]["volumes"]
+    )
+
+    assert mounts[str(proxy.pricing_file)] == "./pricing.compose.yaml"
+    prices = PriceList.load(ROOT / "deploy" / "pricing.compose.yaml")
+    assert prices.match("fake-model") is not None
+    assert not proxy.allow_unpriced

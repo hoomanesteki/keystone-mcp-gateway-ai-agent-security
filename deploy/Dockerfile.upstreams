@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
-# One image for the four demo upstreams (mail, files, bank, echo). Compose picks the server
-# with `command`. Base images are pinned. See docs/adr/0002-dependency-pins.md.
+# One image for the demo upstreams (mail, files, bank, echo, web) and the fake model API
+# (examples/fake_llm). Compose picks the server with `command`. Base images are pinned. See
+# docs/adr/0002-dependency-pins.md.
 # Build from the repository root: docker build -f deploy/Dockerfile.upstreams .
 
 FROM python:3.12.15-slim-trixie AS build

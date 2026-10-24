@@ -32,8 +32,14 @@ def test_the_socket_is_the_only_thing_of_the_host_that_keystone_gets_to_write() 
     keystone = COMPOSE["services"]["keystone"]
 
     mounts = {volume.split(":")[0] for volume in keystone["volumes"]}
-    # The config and the policies are read-only; no directory of the host is mounted to write to.
-    assert mounts == {"./keystone.compose.yaml", "../policies", "/var/run/docker.sock"}
+    # The config, the policies and the price list are read-only; no directory of the host is
+    # mounted to write to.
+    assert mounts == {
+        "./keystone.compose.yaml",
+        "../policies",
+        "./pricing.compose.yaml",
+        "/var/run/docker.sock",
+    }
     for volume in keystone["volumes"]:
         if volume != SOCKET:
             assert volume.endswith(":ro"), volume
