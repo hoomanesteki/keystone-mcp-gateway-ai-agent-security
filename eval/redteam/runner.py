@@ -45,7 +45,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 import anyio
 import httpx
@@ -55,6 +55,7 @@ from sqlalchemy.pool import NullPool
 
 from eval.redteam.approver import OracleApprover
 from eval.redteam.checks import holds
+from eval.redteam.configs import CONFIGS, EXPECTED, RULE_OF_TWO, Config
 from eval.redteam.schema import Scenario
 from eval.redteam.suite import REPO, load_scenarios
 from eval.redteam.witness import Witness, local_urls
@@ -63,22 +64,10 @@ from examples.agents.llm_agent import LlmRun, run_llm_agent
 from examples.agents.naive_agent import Injected, result_text, run_naive
 from examples.agents.scripted_agent import Step
 
-Config = Literal["C0", "C1", "C2"]
-CONFIGS: tuple[Config, ...] = ("C0", "C1", "C2")
 RUN_TIMEOUT_S = 240.0
 API = "/admin/api/v1"
 RESULTS = REPO / "eval" / "results"
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://keystone:keystone@localhost:55432/keystone"
-
-# The policies of the Rule of Two (policies/default). C2 has them and C1 does not.
-RULE_OF_TWO = {"rule-of-two", "tainted-external-effect", "deny-critical-when-tainted"}
-# What the gateway must say of itself for each label: the profile, whether it scans, and whether the
-# policies of the Rule of Two are in force (None: not looked at).
-EXPECTED: dict[Config, tuple[str, str, bool | None]] = {
-    "C0": ("passthrough", "off", None),
-    "C1": ("full", "off", False),
-    "C2": ("full", "on", True),
-}
 
 
 class ConfigMismatch(RuntimeError):

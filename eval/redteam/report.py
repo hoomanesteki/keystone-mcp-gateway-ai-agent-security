@@ -29,6 +29,7 @@ from typing import Any
 
 from eval.detector.metrics import wilson
 from eval.redteam.catalog import GOALS
+from eval.redteam.configs import CONFIG_NAMES, CONFIGS, RULE_OF_TWO
 from eval.redteam.suite import REPO
 
 RESULTS = REPO / "eval" / "results"
@@ -39,12 +40,6 @@ NOT = "not measured"
 NOT_RUN = "not run: needs an API key"
 # The models that stand in for a real one. A run with one tests the loop, so it is not a row.
 STAND_INS = ("fake-",)
-CONFIGS = ("C0", "C1", "C2")
-CONFIG_NAMES = {
-    "C0": "C0 passthrough",
-    "C1": "C1 policy and approvals",
-    "C2": "C2 full",
-}
 AGENT_NAMES = {"naive": "Naive", "llm": "LLM"}
 LLM_COMMAND = (
     "ANTHROPIC_API_KEY=<key> REDTEAM_LLM_BASE_URL=https://api.anthropic.com "
@@ -275,6 +270,15 @@ def scan_peak(run: Run) -> float | None:
     return max((float(scan["score"]) for scan in scans), default=0.0)
 
 
+def rules_that_refused(runs: Sequence[Run]) -> dict[str, int]:
+    """For each rule, how many calls it asked about that the approver rejected."""
+    return {
+        rule: counts["rejected"]
+        for rule, counts in rules_that_asked(runs).items()
+        if counts["rejected"]
+    }
+
+
 def landed_sessions(runs: Sequence[Run]) -> list[dict[str, Any]]:
     """The attacks that landed, grouped by vector and by what the session looked like at the end of
     the run: tainted or not, and its flags. `peaks` is the highest score of an output in each
@@ -341,10 +345,10 @@ def count(cell: Mapping[str, Any]) -> str:
 
 
 def rate(cell: Mapping[str, Any] | None) -> str:
-    """`35 of 48: 72.9% (95% CI 58.8% to 83.5%)` from a cell made by `rate_of`."""
+    """`72.9% (58.8% to 83.5%), 35 of 48` from a cell made by `rate_of`."""
     if not cell or cell.get("rate") is None:
         return NOT
-    return f"{count(cell)}: {pct(cell['rate'])} (95% CI {pct(cell['low'])} to {pct(cell['high'])})"
+    return f"{rate_short(cell)}, {count(cell)}"
 
 
 def money(value: float | None) -> str:
@@ -424,7 +428,7 @@ def targets(files: Sequence[ResultFile], stats: Mapping[Path, dict[str, Any]]) -
     c2 = naive.get("C2")
     if c2:
         cell = c2["asr"]
-        measured = f"{rate_short(cell)}, {count(cell)}"
+        measured = rate(cell)
         rows.append(
             ["M1", "Attack success rate, naive agent, C2", "0%", measured, met(cell["k"] == 0)]
         )
@@ -587,6 +591,42 @@ def rules_table(files: Sequence[ResultFile]) -> list[str]:
     return [table(header, rows)]
 
 
+def friction(runs: Sequence[Run]) -> dict[str, Any]:
+    """What the layers asked of a person on the harmless runs: how many of them needed a decision,
+    how many requests there were, and how many were approved."""
+    benign = [r for r in runs if r["kind"] == "benign"]
+    requested = sum(r["approvals"]["requested"] for r in benign)
+    return {
+        "runs": len(benign),
+        "asked": sum(1 for r in benign if r["approvals"]["requested"]),
+        "requests": requested,
+        "approved": sum(r["approvals"]["approved"] for r in benign),
+    }
+
+
+def friction_table(files: Sequence[ResultFile]) -> list[str]:
+    header = [
+        "Agent",
+        "Config",
+        "Harmless runs where a person was asked",
+        "Requests",
+        "Approved",
+    ]
+    rows = []
+    for file in files:
+        f = friction(file.runs)
+        rows.append(
+            [
+                AGENT_NAMES.get(file.agent, file.agent),
+                file.label,
+                f"{f['asked']} of {f['runs']}",
+                str(f["requests"]),
+                str(f["approved"]),
+            ]
+        )
+    return [table(header, rows)]
+
+
 def peaks_text(peaks: Sequence[float]) -> str:
     if not peaks:
         return NOT
@@ -606,6 +646,7 @@ def landed_table(files: Sequence[ResultFile]) -> list[str]:
     ]
     rows = []
     for file in files:
+        scanned = file.start.get("gateway", {}).get("scanner") == "on"
         for group in landed_sessions(file.runs):
             goals = ", ".join(f"{goal} {n}" for goal, n in group["goals"].items())
             rows.append(
@@ -616,7 +657,7 @@ def landed_table(files: Sequence[ResultFile]) -> list[str]:
                     goals,
                     "yes" if group["tainted"] else "no",
                     group["flags"],
-                    peaks_text(group["peaks"]),
+                    peaks_text(group["peaks"]) if scanned else "not scanned",
                 ]
             )
     if not rows:
@@ -655,27 +696,43 @@ def scanner_table(files: Sequence[ResultFile]) -> list[str]:
 
 
 def landed_reading(files: Sequence[ResultFile]) -> list[str]:
-    """Why the attacks in the table above were not sent to a person, said from their sessions."""
-    groups = [group for file in files for group in landed_sessions(file.runs)]
-    if not groups:
-        return []
+    """Why the attacks in the table above were not sent to a person, for each config, said from
+    what it had in force and from their sessions."""
     both = {"reads_untrusted", "reads_sensitive"}
-    covered = [group["tainted"] or both <= set(str(group["flags"]).split(", ")) for group in groups]
+    lines = []
+    for file in files:
+        groups = landed_sessions(file.runs)
+        if not groups:
+            continue
+        policies = set(file.start.get("gateway", {}).get("policies") or [])
+        if not policies >= RULE_OF_TWO:
+            lines.append(
+                f"In {file.config} the policies of the Rule of Two are not in force, so the flags "
+                "of a session and its taint decide nothing, and the calls that landed are the "
+                "ones that no other rule asks about."
+            )
+        elif any(
+            group["tainted"] or both <= set(str(group["flags"]).split(", ")) for group in groups
+        ):
+            lines.append(
+                f"In {file.config} some of these sessions had both flags or were tainted, so "
+                "another reason kept the call from being asked about, and the audit record of "
+                "the call says which."
+            )
+        else:
+            lines.append(
+                f"In {file.config} these sessions did not have both flags and were not tainted, "
+                "so neither rule that looks at the session asked about the call."
+            )
+    if not lines:
+        return []
     asks = (
         "A call that changes something is sent to a person by acme's rule for mail to an address "
         "outside acme.test, by the limit on transfers, by the Rule of Two when the session has "
-        "read both untrusted and sensitive data (the two flags), and when the session is tainted "
-        "(`docs/policies.md`)."
+        "read both untrusted and sensitive data (the two flags), and by the taint rule when the "
+        "session is tainted (`docs/policies.md`)."
     )
-    if any(covered):
-        return [
-            asks + " Some of these sessions had both flags or were tainted, so the audit record of "
-            "their calls says why a call was not asked about."
-        ]
-    return [
-        asks + " These sessions did not have both flags and were not tainted, so neither of the "
-        "rules that look at the session applied."
-    ]
+    return [asks, "", *[f"- {line}" for line in lines]]
 
 
 def provenance_table(files: Sequence[ResultFile]) -> list[str]:
@@ -719,6 +776,9 @@ def render_section(files: Sequence[ResultFile]) -> str:
         )
     stats = {f.path: aggregate(f.runs) for f in files}
     llm_present = any(f.agent == "llm" for f in files)
+    # The files of the configs that have something between the agent and the effect, as they are in
+    # the repository: a run with the config of an earlier release has the same documents and scores.
+    judged = [f for f in files if f.config != "C0" and not f.variant]
     suite = facts_of_suite(files)
     commits = sorted({commit_text(f) for f in files})
     at = f"at commit {commits[0]}" if len(commits) == 1 else "at the commits listed below"
@@ -765,6 +825,7 @@ def render_section(files: Sequence[ResultFile]) -> str:
         "",
         *rate_notes(files, stats),
         "",
+        *reading_block(files, stats),
         "### How the attacks ended",
         "",
         *ended_table(files, stats),
@@ -778,8 +839,10 @@ def render_section(files: Sequence[ResultFile]) -> str:
         *rules_table(files),
         "",
         "A rule asks about a call when it matches, and the approver approves the calls the task "
-        "needs. The same table counts the requests for a call the task needed, which is the "
-        "friction of the layer on honest work.",
+        "needs and rejects every other. A call that several rules ask about is counted under "
+        "each of them. The harmless tasks show what the layers cost an honest user:",
+        "",
+        *friction_table(files),
         "",
         "### Where they landed",
         "",
@@ -787,18 +850,18 @@ def render_section(files: Sequence[ResultFile]) -> str:
         "",
         "### What the scanner made of the documents",
         "",
-        *scanner_table(files),
+        *scanner_table(judged),
         "",
         f"A run is counted once, at the highest score the scanner gave an output in its session. "
         f"An output at {FLAG_SCORE} or more is flagged and annotated, and one at {TAINT_SCORE} "
         "or more taints the session. The scores are the ones in the audit record of each call.",
         "",
-        "### The attacks that landed behind a defense",
+        "### The attacks that landed in C1 and C2",
         "",
-        *landed_table([f for f in files if f.config != "C0"]),
+        *landed_table(judged),
         "",
-        *landed_reading([f for f in files if f.config != "C0"]),
-        *([""] if any(landed_sessions(f.runs) for f in files if f.config != "C0") else []),
+        *landed_reading(judged),
+        *([""] if any(landed_sessions(f.runs) for f in judged) else []),
         "### The LLM agent",
         "",
         *llm_text(files, llm_present),
@@ -808,6 +871,100 @@ def render_section(files: Sequence[ResultFile]) -> str:
         *provenance_table(files),
     ]
     return "\n".join(out).rstrip() + "\n"
+
+
+def reading_block(files: Sequence[ResultFile], stats: Mapping[Path, dict[str, Any]]) -> list[str]:
+    lines = reading(files, stats)
+    return ["### What the numbers say", "", *lines, ""] if lines else []
+
+
+def calls_text(counts: Mapping[str, int]) -> str:
+    """`a` (12 calls), `b` (36 calls) and `c` (4 calls)"""
+    parts = [f"`{rule}` ({plural(n, 'call')})" for rule, n in counts.items()]
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def list_text(items: Sequence[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def reading(files: Sequence[ResultFile], stats: Mapping[Path, dict[str, Any]]) -> list[str]:
+    """The figures of the naive agent in a few sentences, each made from the files."""
+    base = {f.config: f for f in files if f.agent == "naive" and not f.variant}
+    if not all(config in base for config in CONFIGS):
+        return []
+    asr = {config: stats[base[config].path]["asr"] for config in CONFIGS}
+    out = [
+        f"With no defense (C0), {count(asr['C0'])} attacks landed. The access rules and the "
+        f"approvals of C1 left {asr['C1']['k']}, and the Rule of Two with the scanner of C2 left "
+        f"{asr['C2']['k']}."
+    ]
+    for config in ("C1", "C2"):
+        asked = rules_that_refused(base[config].runs)
+        if asked:
+            out.append(
+                f"The rules that asked about an attack, and were refused, in {config} were "
+                f"{calls_text(asked)}."
+                + (
+                    " A call that several rules ask about is counted under each."
+                    if config == "C2"
+                    else ""
+                )
+            )
+    landed = [r for r in base["C2"].runs if r["attack_success"]]
+    if not landed:
+        out.append("No attack landed in C2.")
+    else:
+        by_vector = Counter(str(r["vector"]) for r in landed)
+        if len(by_vector) == 1:
+            where = f"all in the {next(iter(by_vector))} vector"
+        else:
+            where = "in the vectors " + list_text(
+                [f"{vector} ({n})" for vector, n in sorted(by_vector.items())]
+            )
+        sessions = [r.get("session") or {} for r in landed]
+        facts = [f"{len(landed)} that landed in C2 were {where}"]
+        if all(not s.get("tainted") for s in sessions):
+            flags = sorted({", ".join(s.get("flags") or []) or "none" for s in sessions})
+            facts.append(
+                "No session among them was tainted, and the flags at the end were "
+                f"{list_text(flags)}"
+            )
+        peaks = [peak for r in landed if (peak := scan_peak(r)) is not None]
+        if peaks:
+            where_taint = "under" if max(peaks) < TAINT_SCORE else "at or over"
+            facts.append(
+                f"The highest score of an output in them was {max(peaks):.2f}, {where_taint} the "
+                f"{TAINT_SCORE} at which a session is tainted"
+            )
+        out.append(". ".join(["The " + facts[0], *facts[1:]]) + ".")
+    for file in files:
+        if file.agent == "naive" and file.variant:
+            more = stats[file.path]["asr"]["k"] - asr["C2"]["k"]
+            note = str(file.start.get("note") or "").strip().rstrip(".")
+            out.append(
+                f"With the {file.variant}, {count(stats[file.path]['asr'])} attacks landed in "
+                f"{file.config}, {abs(more)} {'more' if more >= 0 else 'fewer'} than with this one."
+                + (f" The note of that run: {note}." if note else "")
+            )
+    harmless = {c: friction(base[c].runs) for c in CONFIGS}
+    n = harmless["C0"]["runs"]
+    if all(stats[base[c].path]["benign_utility"]["k"] == n for c in CONFIGS) and n:
+        sentence = f"All {n} harmless tasks were done in every config."
+    else:
+        sentence = "Not every harmless task was done in every config (see the table)."
+    sentence += (
+        f" A person was asked about {harmless['C1']['asked']} of them in C1 and "
+        f"{harmless['C2']['asked']} in C2."
+    )
+    view = scanner_view(base["C2"].runs).get("no attack")
+    if view:
+        sentence += (
+            f" The scanner flagged {view['flagged']} of the {view['runs']} harmless runs in C2 "
+            f"and tainted {view['tainted']}."
+        )
+    out.append(sentence)
+    return [f"- {line}" for line in out]
 
 
 def llm_text(files: Sequence[ResultFile], llm_present: bool) -> list[str]:
