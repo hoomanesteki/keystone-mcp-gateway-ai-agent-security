@@ -42,6 +42,7 @@ from tests.fixtures.redis import redis, test_redis_url  # noqa: F401
 from tests.fixtures.sandbox import (  # noqa: F401
     _no_sandbox_container_is_left,
     docker_client,
+    echo_image,
     runner,
     sandbox_image,
 )

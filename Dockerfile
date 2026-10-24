@@ -9,6 +9,10 @@
 
 ARG WITH_SCANNER=0
 
+# The docker client, for the containerized stdio upstreams (KS-803), which Keystone starts with
+# `docker run`. Only the binary is used: the daemon is the host's, reached through its socket.
+FROM docker:29.6.2-cli AS docker-cli
+
 FROM python:3.12.15-slim-trixie AS build
 ARG WITH_SCANNER
 COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /usr/local/bin/uv
@@ -53,6 +57,7 @@ FROM python:3.12.15-slim-trixie AS runtime
 RUN useradd --system --uid 10001 --user-group --home-dir /nonexistent --no-create-home keystone
 COPY --from=build /app/.venv /app/.venv
 COPY --from=build /opt/hf-cache /opt/hf-cache
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 # The stdio demo upstream (`python -m examples.upstreams.echo_server`) runs from /app.
 WORKDIR /app
 COPY examples ./examples
