@@ -8,14 +8,17 @@ from __future__ import annotations
 
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, Decision, Effect, ScanResult
+from keystone.gateway.hooks import noop_hook
 
 
 class _Passthrough:
     name = ""
 
+    @noop_hook
     async def before_call(self, ctx: CallContext) -> None:
         return None
 
+    @noop_hook
     async def after_call(self, ctx: CallContext) -> None:
         return None
 

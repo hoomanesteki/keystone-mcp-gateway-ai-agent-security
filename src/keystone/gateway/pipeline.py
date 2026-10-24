@@ -18,6 +18,7 @@ Rules the code below keeps:
 
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import Awaitable, Callable, Collection
 from typing import Literal, Protocol
@@ -30,8 +31,9 @@ from jsonschema.exceptions import best_match
 from keystone.core.canonical import canonical_json
 from keystone.core.errors import Code, Reject, to_tool_result
 from keystone.core.types import CallContext, Effect, ToolResult
+from keystone.gateway.hooks import is_noop
 from keystone.telemetry.metrics import Metrics
-from keystone.telemetry.tracing import SpanHandle, Tracer
+from keystone.telemetry.tracing import NO_SPAN, SpanHandle, Tracer
 
 log = structlog.get_logger()
 
@@ -265,8 +267,13 @@ class Pipeline:
     ) -> None:
         started = time.perf_counter()
         try:
-            with self.tracer.span(
-                f"keystone.interceptor.{interceptor.name}", {"keystone.hook": hook.__name__}
+            # A hook marked `noop_hook` has no span: it has nothing to show (KS-992).
+            with (
+                contextlib.nullcontext(NO_SPAN)
+                if is_noop(hook)
+                else self.tracer.span(
+                    f"keystone.interceptor.{interceptor.name}", {"keystone.hook": hook.__name__}
+                )
             ) as span:
                 try:
                     await hook(ctx)

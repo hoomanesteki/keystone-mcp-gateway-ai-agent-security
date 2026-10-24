@@ -23,6 +23,7 @@ from typing import Protocol
 
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, Decision, Effect, Principal
+from keystone.gateway.hooks import noop_hook
 from keystone.metering.budgets import BudgetExceeded, usd
 from keystone.registry.naming import is_virtual
 
@@ -74,5 +75,6 @@ class BudgetInterceptor:
             )
             raise refusal(exceeded) from None
 
+    @noop_hook
     async def after_call(self, ctx: CallContext) -> None:
         return None

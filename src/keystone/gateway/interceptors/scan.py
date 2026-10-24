@@ -30,6 +30,7 @@ import structlog
 
 from keystone.core.types import CallContext, ScanResult, ToolResult
 from keystone.defense.scanner import Inspection, OutputScanner
+from keystone.gateway.hooks import noop_hook
 from keystone.gateway.sessions import SessionStore, catch_up
 from keystone.registry.naming import is_virtual
 from keystone.telemetry.metrics import Metrics
@@ -53,6 +54,7 @@ class OutputScanInterceptor:
         self._sessions = sessions
         self._metrics = metrics
 
+    @noop_hook
     async def before_call(self, ctx: CallContext) -> None:
         return None
 

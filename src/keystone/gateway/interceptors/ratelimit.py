@@ -26,6 +26,7 @@ import structlog
 
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, Decision, Effect
+from keystone.gateway.hooks import noop_hook
 from keystone.metering.ratelimit import KEY_PREFIX, Bucket, RateLimiter, whole_milliseconds
 from keystone.settings import RateLimitSettings
 from keystone.telemetry.metrics import Metrics
@@ -107,6 +108,7 @@ class RateLimitInterceptor:
             },
         )
 
+    @noop_hook
     async def after_call(self, ctx: CallContext) -> None:
         return None
 
