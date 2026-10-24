@@ -488,6 +488,11 @@ class Settings(BaseSettings):
     migrate_database_url: SecretStr | None = None
     redis_url: SecretStr = SecretStr(DEFAULT_REDIS_URL)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    # `passthrough` is the baseline of the red-team runs (KS-902, ADR-0017): the pipeline keeps its
+    # order, its audit record and the credentials it adds for an upstream, and every other slot is
+    # the Phase 1 stub that lets the call through; the scanner is not built. It exists to measure
+    # what the other slots buy, and it is not a setting for a deployment.
+    profile: Literal["full", "passthrough"] = "full"
     config_path: Path | None = Field(default=None, validation_alias=CONFIG_ENV_VAR)
     tenants: list[TenantConfig] = Field(default_factory=list)
     upstreams: list[UpstreamConfig] = Field(default_factory=list)
@@ -594,6 +599,14 @@ class Settings(BaseSettings):
                 self.dev_principal = DEV_PRINCIPAL
         elif self.dev_principal is not None:
             raise ValueError("dev_principal needs auth.mode none")
+        return self
+
+    @model_validator(mode="after")
+    def _passthrough_is_not_for_production(self) -> "Settings":
+        if self.profile == "passthrough" and self.env == "prod":
+            raise ValueError(
+                "profile passthrough defends nothing and is not allowed when env is prod"
+            )
         return self
 
     @field_validator("oidc_issuer", "oidc_discovery_url", "public_base_url", "otlp_endpoint")

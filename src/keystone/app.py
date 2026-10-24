@@ -268,14 +268,17 @@ def create_app(
             now=budget_clock,
         )
     # The scanner reads every output (KS-704). Its model is not loaded here: the lifespan starts
-    # that in the background, and until it is ready a scan is answered by the rules alone.
-    classifier = load_classifier(settings.scanner) if settings.scanner.enabled else None
+    # that in the background, and until it is ready a scan is answered by the rules alone. The
+    # passthrough profile (KS-902) builds no scanner at all.
+    scanning = settings.scanner.enabled and settings.profile == "full"
+    metrics.set_info(settings.profile, scanning)
+    classifier = load_classifier(settings.scanner) if scanning else None
     # Not in env=test: the tests start hundreds of apps and none of them wants a 700 MB model
     # loaded on its behalf. In a test the model loads at the first scan, if the test scans at all.
     warmed = classifier if settings.env != "test" else None
     scanner = (
         build_scanner_guard(settings.scanner, classifier, on_error=metrics.scan_failed)
-        if settings.scanner.enabled
+        if scanning
         else None
     )
     pipeline = build_pipeline(

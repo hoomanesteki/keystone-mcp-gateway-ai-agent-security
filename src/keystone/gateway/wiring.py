@@ -27,8 +27,10 @@ from keystone.gateway.stubs import ApprovalInterceptor as StubApprovalIntercepto
 from keystone.gateway.stubs import BudgetInterceptor as StubBudgetInterceptor
 from keystone.gateway.stubs import MeteringInterceptor as StubMeteringInterceptor
 from keystone.gateway.stubs import OutputScanInterceptor as StubOutputScanInterceptor
+from keystone.gateway.stubs import PinningInterceptor as StubPinningInterceptor
 from keystone.gateway.stubs import PolicyInterceptor as StubPolicyInterceptor
 from keystone.gateway.stubs import RateLimitInterceptor as StubRateLimitInterceptor
+from keystone.gateway.stubs import SessionFlagsInterceptor as StubSessionFlagsInterceptor
 from keystone.metering.budgets import BudgetService
 from keystone.metering.ratelimit import RateLimiter
 from keystone.policy.engine import PolicyEngine
@@ -103,19 +105,32 @@ def output_slot(settings: Settings, deps: PipelineDeps) -> Interceptor:
     return OutputScanInterceptor(deps.scanner, deps.sessions, deps.metrics)
 
 
-def build_pipeline(
-    settings: Settings,
-    deps: PipelineDeps,
-    overrides: dict[str, Interceptor] | None = None,
-) -> Pipeline:
-    """A slot not named in `overrides` gets its stub. A name that is not a slot is an error,
-    so a typo cannot silently leave a stub in place of the real interceptor."""
-    overrides = overrides or {}
-    unknown = sorted(set(overrides) - set(INTERCEPTOR_ORDER))
-    if unknown:
-        raise ValueError(f"unknown interceptor slot: {', '.join(unknown)}")
-    revalidation = Revalidation()
-    stubs: dict[str, Interceptor] = {
+def passthrough_slots(deps: PipelineDeps) -> dict[str, Interceptor]:
+    """The baseline of the red-team runs (`profile: passthrough`): every slot is the Phase 1 stub
+    but the one that adds the credentials Keystone holds for an upstream. Those are not a defense,
+    and an upstream that wants its key would refuse a baseline that sent none. The output slot has
+    no scanner, so that nothing is scanned and the audit record says so."""
+    return {
+        "rate_limit": StubRateLimitInterceptor(),
+        "pinning": StubPinningInterceptor(),
+        "budget": StubBudgetInterceptor(),
+        "policy": StubPolicyInterceptor(),
+        "approval": StubApprovalInterceptor(),
+        "credential": CredentialInterceptor(deps.vault),
+        # The slot with no scanner, as `scanner.enabled: false` makes it: the audit record has no
+        # scan, which is not the same as a scan that found nothing.
+        "output_scan": OutputScanInterceptor(None),
+        "session_flags": StubSessionFlagsInterceptor(),
+        "metering": StubMeteringInterceptor(),
+    }
+
+
+def full_slots(
+    settings: Settings, deps: PipelineDeps, revalidation: Revalidation
+) -> dict[str, Interceptor]:
+    """The slots of a gateway that defends: each one the real interceptor when it has what it needs,
+    and its stub when it does not."""
+    return {
         "rate_limit": (
             RateLimitInterceptor(
                 deps.rate_limiter, settings.rate_limits, metrics=deps.metrics, clock=deps.clock
@@ -146,6 +161,25 @@ def build_pipeline(
             else StubMeteringInterceptor()
         ),
     }
+
+
+def build_pipeline(
+    settings: Settings,
+    deps: PipelineDeps,
+    overrides: dict[str, Interceptor] | None = None,
+) -> Pipeline:
+    """A slot not named in `overrides` gets its stub. A name that is not a slot is an error,
+    so a typo cannot silently leave a stub in place of the real interceptor."""
+    overrides = overrides or {}
+    unknown = sorted(set(overrides) - set(INTERCEPTOR_ORDER))
+    if unknown:
+        raise ValueError(f"unknown interceptor slot: {', '.join(unknown)}")
+    revalidation = Revalidation()
+    stubs = (
+        passthrough_slots(deps)
+        if settings.profile == "passthrough"
+        else full_slots(settings, deps, revalidation)
+    )
     interceptors = [overrides.get(slot, stubs[slot]) for slot in INTERCEPTOR_ORDER]
     pipeline = Pipeline(
         interceptors,

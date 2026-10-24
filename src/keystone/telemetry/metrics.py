@@ -60,6 +60,7 @@ POLICY_BUCKETS = (0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 
 SCORE_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 # What can fail in a scan: the classifier, the rules, and the action on a flagged output.
 SCAN_STAGES = ("rules", "classifier", "action")
+PROFILES = ("full", "passthrough")
 # The scopes of a rate limit (settings.RateLimitSettings).
 RATE_SCOPES = ("per_tenant", "per_user", "per_agent", "per_tool")
 # The scopes of a budget (settings.BudgetConfig).
@@ -124,6 +125,15 @@ class Metrics:
             "keystone_tool_calls",
             "Tool calls that reached the gateway, by tenant, tool, policy effect and outcome",
             ["tenant", "tool", "effect", "outcome"],
+        )
+        # Which gateway this is, for whoever reads the numbers: a gauge of 1 with the labels that
+        # say how it is set. A measurement of the gateway (the red-team runs, the performance
+        # harness) asks it, so that a run against the wrong configuration is caught and not
+        # published.
+        self.gateway_info = self._gauge(
+            "keystone_gateway_info",
+            "How the gateway is set, as labels on a gauge of 1: its profile, and if it scans",
+            ["profile", "scanner"],
         )
         self.tool_call_seconds = self._histogram(
             "keystone_tool_call_duration_seconds",
@@ -312,6 +322,11 @@ class Metrics:
         """The registry loaded a tenant's tools: count the ones held for review."""
         held = sum(1 for tool in tools.values() if tool.status is ToolStatus.QUARANTINED)
         self.quarantined_tools.labels(tenant=self._tenant(tenant)).set(held)
+
+    def set_info(self, profile: str, scanning: bool) -> None:
+        """Say how this gateway is set. The profile is one of a fixed set."""
+        known = profile if profile in PROFILES else OTHER
+        self.gateway_info.labels(profile=known, scanner="on" if scanning else "off").set(1)
 
     def render(self) -> bytes:
         """The registry in the Prometheus text format, for GET /metrics."""
