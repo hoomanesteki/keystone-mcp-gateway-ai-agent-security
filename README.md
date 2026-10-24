@@ -3,7 +3,7 @@ Self-hosted security gateway for AI agents. One MCP endpoint in front of all you
 
 ## Status
 
-Under construction, built one story at a time. Phases 0 to 7 are in place: Keystone serves one
+Under construction, built one story at a time. Phases 0 to 8 are in place: Keystone serves one
 MCP endpoint and routes every tool call through a fixed interceptor pipeline to its upstreams, HTTP
 or stdio. Callers sign in with an OIDC token (Keycloak locally), see only their own tenant's tools,
 and never hold an upstream credential: Keystone keeps it encrypted and adds it to the call itself.
@@ -20,9 +20,15 @@ looks like an injection taints the session. Under the Rule of Two, a session tha
 untrusted and sensitive data asks a person before it does anything outside, and a tainted session
 asks before any outside action and is refused critical tools outright. New tool descriptions are
 screened too. How well the detector does, measured on data it was not tuned on, is in
-[docs/results.md](docs/results.md), including where it fails. The sandbox for code, the rate limit
-and the budgets are still stubs (Phase 8). `make demo` shows the proxy working, and
-`make demo-attack` shows a planted attack with and without Keystone.
+[docs/results.md](docs/results.md), including where it fails.
+
+Code an agent writes runs in a container with no network, no capabilities and a read-only root,
+started through the Docker socket of a local host (ADR-0012). Calls are limited by token buckets
+for a tenant, a user, an agent and a tool, and by spend budgets that are checked before a call runs
+and rebuilt from a ledger in Postgres. Model requests can go through Keystone too, with the same
+identity, budgets and tracing (ADR-0016), and the console shows budgets and live sessions. `make
+demo` shows the proxy working, and `make demo-attack` shows a planted attack with and without
+Keystone.
 
 - Progress per story: [docs/progress.md](docs/progress.md)
 - Writing policies: [docs/policies.md](docs/policies.md)
