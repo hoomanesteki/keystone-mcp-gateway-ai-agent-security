@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from pydantic import SecretStr, ValidationError
 
@@ -16,7 +17,8 @@ from keystone.settings import LlmProviderSettings, LlmProxySettings, Settings, T
 pytestmark = pytest.mark.phase(8)
 
 IDP = "http://idp.test/realms/keystone"
-MASTER_KEY = "FpAPqO9j92_C-qEbO6vqkdH2olOR4ZHKzRqM7OhjSE0="
+# Made when the tests start and never written anywhere, like the master key of the app fixtures.
+MASTER_KEY = Fernet.generate_key().decode()
 
 
 def tenants(*ids: str) -> list[TenantConfig]:
