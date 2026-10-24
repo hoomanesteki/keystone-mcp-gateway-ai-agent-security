@@ -787,7 +787,7 @@
       "id": 20,
       "type": "timeseries",
       "title": "Rate limited per second",
-      "description": "Phase 8. No data until rate limits arrive.",
+      "description": "Calls a rate limit refused, by tenant and by the scope of the limit: per_tenant, per_user, per_agent or per_tool.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

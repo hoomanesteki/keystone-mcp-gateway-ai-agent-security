@@ -42,6 +42,7 @@ from keystone.identity.credential_repo import vault_from_settings
 from keystone.identity.metadata import add_metadata_route
 from keystone.identity.middleware import Authenticator
 from keystone.identity.vault import Vault, VaultError
+from keystone.metering.ratelimit import MemoryLimiter, RateLimiter, RedisLimiter
 from keystone.policy.engine import CedarPolicyEngine, ObservedEngine
 from keystone.policy.schema_info import args_fields
 from keystone.policy.store import PolicyStore, reload_on_sighup
@@ -102,11 +103,13 @@ def create_app(
     wrap_dispatcher: Callable[[Dispatcher], Dispatcher] | None = None,
     environ: Mapping[str, str] | None = None,
     tracer: Tracer | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> FastAPI:
     """Build the app. The keyword arguments are seams for tests: a different audit sink, a
     real interceptor in one slot, a spy around the dispatcher, the environment that upstream
-    credentials are read from (the process environment by default), or a tracer that keeps its
-    spans in memory."""
+    credentials are read from (the process environment by default), a tracer that keeps its
+    spans in memory, or a clock (seconds since the epoch) that the rate limits and, from KS-805,
+    the budgets read the time from."""
     settings = settings or Settings()
     metrics = Metrics(
         tenants=[t.id for t in settings.tenants], upstreams=[u.id for u in settings.upstreams]
@@ -219,6 +222,8 @@ def create_app(
     session_store: SessionStore = (
         RedisSessionStore(redis, SessionRepo(sessions)) if redis else InMemorySessionStore()
     )
+    # The token buckets share Redis with the sessions, and live in the process when there is none.
+    limiter: RateLimiter = RedisLimiter(redis) if redis else MemoryLimiter()
     # The scanner reads every output (KS-704). Its model is not loaded here: the lifespan starts
     # that in the background, and until it is ready a scan is answered by the rules alone.
     classifier = load_classifier(settings.scanner) if settings.scanner.enabled else None
@@ -243,6 +248,8 @@ def create_app(
             approvals=approvals,
             sessions=session_store,
             scanner=scanner,
+            rate_limiter=limiter,
+            **({"clock": clock} if clock is not None else {}),
         ),
         interceptors,
     )

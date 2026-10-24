@@ -327,6 +327,11 @@ services:
       # The sandbox (KS-801): code an agent writes runs in containers that Keystone starts. false
       # leaves the `sandbox` upstream unregistered; do that wherever there is no Docker socket.
       KEYSTONE_SANDBOX_ENABLED: "${KEYSTONE_SANDBOX_ENABLED:-true}"
+      # The rate limit of one user (KS-804). The other scopes are in keystone.compose.yaml, and all of
+      # them are far above what the smoke scripts and the browser test do. scripts/smoke/phase_8.sh
+      # sets these two for its burst and puts the defaults back when it ends.
+      KEYSTONE_RATE_LIMITS__PER_USER__CAPACITY: "${KEYSTONE_RATE_LIMIT_USER_CAPACITY:-300}"
+      KEYSTONE_RATE_LIMITS__PER_USER__REFILL_PER_S: "${KEYSTONE_RATE_LIMIT_USER_REFILL:-50}"
     volumes:
       - ./keystone.compose.yaml:/etc/keystone/keystone.yaml:ro
       # The policies of this checkout, so an edit on the host takes effect on the next reload
