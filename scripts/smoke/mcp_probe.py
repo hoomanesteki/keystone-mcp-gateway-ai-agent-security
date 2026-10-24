@@ -2,10 +2,12 @@
 
     uv run python scripts/smoke/mcp_probe.py list
     uv run python scripts/smoke/mcp_probe.py call bank__get_balance '{"account": "CHK-001"}'
+    uv run python scripts/smoke/mcp_probe.py burst keystone__whoami '{}' 12
 
 `list` prints `tools: N` and then one name per line. `call` prints one line,
 `error=<true|false> code=<keystone code or -> ms=<time of the call> call_id=<id>`, then the first
-text block.
+text block. `burst` makes the same call N times in one session, as fast as the answers come, and
+prints one line for each: `<n> error=<..> code=<..> retry_after_s=<seconds or ->`.
 The URL comes from KEYSTONE_URL (default http://localhost:8080/mcp) and the bearer token from
 KEYSTONE_TOKEN. The exit code is 0 whenever Keystone answered, whatever the answer was; 2 means it
 could not be reached.
@@ -30,6 +32,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 CODE_KEY = "keystone/code"
 CALL_ID_KEY = "keystone/call_id"
+RETRY_KEY = "keystone/retry_after_s"
 TOKEN_ENV = "KEYSTONE_TOKEN"  # noqa: S105 - the name of the variable, not a token
 TIMEOUT_S = 30.0
 
@@ -67,6 +70,17 @@ async def call_tool(url: str, name: str, arguments: dict[str, Any]) -> None:
             break
 
 
+async def burst_tool(url: str, name: str, arguments: dict[str, Any], count: int) -> None:
+    async with connect(url) as client:
+        for number in range(1, count + 1):
+            result = await client.call_tool(name, arguments)
+            meta = result.meta or {}
+            print(
+                f"{number} error={str(result.is_error).lower()} code={meta.get(CODE_KEY, '-')} "
+                f"retry_after_s={meta.get(RETRY_KEY, '-')}"
+            )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -74,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
     call = commands.add_parser("call")
     call.add_argument("tool")
     call.add_argument("arguments", nargs="?", default="{}", help="a JSON object")
+    burst = commands.add_parser("burst")
+    burst.add_argument("tool")
+    burst.add_argument("arguments", help="a JSON object")
+    burst.add_argument("count", type=int, help="how many calls to make")
     args = parser.parse_args(argv)
     url = os.environ.get("KEYSTONE_URL", "http://localhost:8080/mcp")
 
@@ -81,6 +99,8 @@ def main(argv: list[str] | None = None) -> int:
         with anyio.fail_after(TIMEOUT_S):
             if args.command == "list":
                 await list_tools(url)
+            elif args.command == "burst":
+                await burst_tool(url, args.tool, json.loads(args.arguments), args.count)
             else:
                 await call_tool(url, args.tool, json.loads(args.arguments))
 

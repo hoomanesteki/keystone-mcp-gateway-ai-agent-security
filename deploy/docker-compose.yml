@@ -263,6 +263,31 @@ services:
       timeout: 3s
       retries: 20
 
+  # A fake of the two model APIs (KS-806, examples/fake_llm), so that the LLM proxy has something to
+  # forward to with no provider key and no network. It answers Anthropic's /v1/messages and OpenAI's
+  # /v1/chat/completions, whole or as a stream, with token counts that can be worked out by hand.
+  fake-llm:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.upstreams
+    image: keystone-upstreams:dev
+    command: ["examples.fake_llm.server", "--host", "0.0.0.0", "--port", "8199"]
+    environment:
+      # The key it wants in x-api-key or as a bearer token. Keystone holds the same value in its
+      # vault as the key of both providers, so a request that reaches it without the key is refused.
+      FAKE_LLM_API_KEY: "${FAKE_LLM_API_KEY:-dev-fake-llm-key-7c1e5a90}"
+    ports:
+      - "${FAKE_LLM_PORT:-8199}:8199"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.urlopen('http://127.0.0.1:8199/healthz', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   # Builds the image that the sandbox runs code in (KS-801). It runs once and exits: Keystone starts
   # its own containers from this image through the Docker socket. It has no network and writes
   # nothing, like the containers made from it.
@@ -320,6 +345,10 @@ services:
       ECHO_API_KEY: "${ECHO_API_KEY:-dev-echo-key-0e4b9d13}"
       WEB_API_KEY: "${WEB_API_KEY:-dev-web-key-9d3b6e21}"
       FILES_GLOBEX_API_KEY: "${FILES_GLOBEX_API_KEY:-dev-globex-key-5a7c28e6}"
+      # The key of the model providers (KS-806). keystone.compose.yaml points both at the fake one,
+      # so this is the key that fake-llm wants. For a real provider it is ANTHROPIC_API_KEY or
+      # OPENAI_API_KEY, named in llm_proxy.<provider>.api_key_env.
+      FAKE_LLM_API_KEY: "${FAKE_LLM_API_KEY:-dev-fake-llm-key-7c1e5a90}"
       # The model behind the scanner's rules: protectai-deberta-v2, prompt-guard-2-86m or none.
       KEYSTONE_SCANNER_CLASSIFIER: "${KEYSTONE_SCANNER_CLASSIFIER:-protectai-deberta-v2}"
       # Other containers reach Keystone by its service name.
@@ -337,6 +366,9 @@ services:
       # The policies of this checkout, so an edit on the host takes effect on the next reload
       # (keystone policy reload, or SIGHUP). keystone.compose.yaml names this path.
       - ../policies:/etc/keystone/policies:ro
+      # The prices the LLM proxy costs a request with (KS-806). These are FAKE prices for the fake
+      # models; a real provider needs a pricing.yaml of its real prices (pricing.example.yaml).
+      - ./pricing.compose.yaml:/etc/keystone/pricing.yaml:ro
       # LOCAL AND SINGLE-HOST USE ONLY. The Docker socket lets Keystone start the sandbox's
       # containers, and whoever can use it can start any container on the host as root. A
       # Keystone that is compromised owns the machine it runs on. For anything but a laptop, run
@@ -369,6 +401,8 @@ services:
       web-mcp:
         condition: service_healthy
       files-globex-mcp:
+        condition: service_healthy
+      fake-llm:
         condition: service_healthy
     healthcheck:
       test:

@@ -50,6 +50,8 @@ from keystone.metering.budgets import (
     RedisCounters,
 )
 from keystone.metering.ledger import PostgresLedger
+from keystone.metering.llm_proxy import LlmProxy, mount_llm_proxy, seed_provider_keys
+from keystone.metering.pricing import PriceList
 from keystone.metering.ratelimit import MemoryLimiter, RateLimiter, RedisLimiter
 from keystone.policy.engine import CedarPolicyEngine, ObservedEngine
 from keystone.policy.schema_info import args_fields
@@ -246,6 +248,25 @@ def create_app(
         clock=budget_clock,
         metrics=metrics,
     )
+    # The LLM proxy (KS-806) sends model requests on with the identity, the budgets and the tracing
+    # of a tool call. It exists only when the config turns it on, and then the vault must hold the
+    # provider keys and the price list must be readable: both are checked now, so that a config
+    # that cannot work stops startup and does not answer 503 to the first agent.
+    llm_proxy: LlmProxy | None = None
+    if settings.llm_proxy.enabled:
+        if vault is None:
+            raise VaultError("llm_proxy is enabled, so KEYSTONE_MASTER_KEYS must be set")
+        llm_proxy = LlmProxy(
+            settings,
+            authenticator=authenticator,
+            vault=vault,
+            budgets=budgets,
+            sessions=session_store,
+            prices=PriceList.load(settings.llm_proxy.pricing_file),
+            metrics=metrics,
+            tracer=tracer,
+            now=budget_clock,
+        )
     # The scanner reads every output (KS-704). Its model is not loaded here: the lifespan starts
     # that in the background, and until it is ready a scan is answered by the rules alone.
     classifier = load_classifier(settings.scanner) if settings.scanner.enabled else None
@@ -312,6 +333,15 @@ def create_app(
                 await seed_credentials(
                     vault, settings.upstreams, os.environ if environ is None else environ
                 )
+                # The provider keys of the LLM proxy go in the same way, as the static credentials
+                # of two pseudo-upstreams.
+                if llm_proxy is not None:
+                    await seed_provider_keys(
+                        settings.llm_proxy,
+                        UpstreamRepo(sessions),
+                        vault,
+                        os.environ if environ is None else environ,
+                    )
             # One task enters and leaves the pool, the sync loop and the session manager, as
             # the SDK's cancel scopes require (engineering note 1).
             async with AsyncExitStack() as stack:
@@ -332,6 +362,8 @@ def create_app(
                 await stack.enter_async_context(manager.run())
                 yield
         finally:
+            if llm_proxy is not None:
+                await llm_proxy.aclose()
             if redis is not None:
                 await redis.aclose()
             await engine.dispose()
@@ -382,6 +414,8 @@ def create_app(
     app.mount(PREFIX, admin_api)
     manager = mount_mcp(app, gateway, authenticator)
     add_metadata_route(app, settings)
+    if llm_proxy is not None:
+        mount_llm_proxy(app, llm_proxy)
 
     @app.get("/metrics", include_in_schema=False)
     async def prometheus() -> Response:

@@ -36,7 +36,7 @@ from keystone.policy.testrunner import CaseError
 from keystone.policy.testrunner import render as render_report
 from keystone.policy.testrunner import run as run_policy_cases
 from keystone.registry.config import container_networks, stdio_environments
-from keystone.registry.naming import check_upstream_id
+from keystone.registry.naming import check_upstream_id, is_reserved
 from keystone.registry.pinning import (
     pending_fingerprint,
     schema_text,
@@ -239,7 +239,9 @@ def upstream_list(
     """List upstreams with their status."""
 
     async def action(settings: Settings, sessions: Sessionmaker) -> list[Upstream]:
-        return list(await UpstreamRepo(sessions).list(tenant, include_disabled=all_))
+        found = await UpstreamRepo(sessions).list(tenant, include_disabled=all_)
+        # The provider keys of the LLM proxy are rows too, and are not MCP servers.
+        return [row for row in found if not is_reserved(row.id)]
 
     rows = run_with_database(action)
     if as_json:

@@ -879,7 +879,7 @@
       "id": 22,
       "type": "timeseries",
       "title": "LLM tokens per second",
-      "description": "Phase 8. No data until the LLM proxy arrives.",
+      "description": "Tokens of model requests that went through the LLM proxy, by tenant, by the price list entry that applied and by direction (input, output, cache_read, cache_write). No data until the proxy is on and a request has gone through it.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

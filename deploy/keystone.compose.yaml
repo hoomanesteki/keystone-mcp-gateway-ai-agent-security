@@ -119,3 +119,19 @@ upstreams:
 budgets:
   - {tenant: acme, scope: user, scope_id: lena, window: day, limit_usd: 0.03}
   - {tenant: acme, scope: tenant, window: day, limit_usd: 25}
+
+# The LLM proxy (KS-806): an agent sends its model requests to Keystone instead of to the provider,
+# with its Keystone token as the API key. Keystone checks the token, stops a request that would
+# take a budget over its limit, adds the provider's key from the vault and books what the request
+# cost. Here both providers are the fake one (examples/fake_llm, the fake-llm service), so the stack
+# needs no key and no network, and the prices are fake (pricing.compose.yaml).
+#
+# For a real provider: put its URL in base_url, its key in the variable that api_key_env names,
+# and the provider's real prices in a pricing.yaml of your own (pricing.example.yaml shows the shape
+# and says whose job the prices are). The key never appears in this file.
+llm_proxy:
+  enabled: true
+  tenant: acme
+  pricing_file: /etc/keystone/pricing.yaml
+  anthropic: {base_url: "http://fake-llm:8199", api_key_env: FAKE_LLM_API_KEY}
+  openai: {base_url: "http://fake-llm:8199", api_key_env: FAKE_LLM_API_KEY}

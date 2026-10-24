@@ -65,6 +65,7 @@ from keystone.defense.description_check import Screener
 from keystone.gateway.sessions import SessionDirectory
 from keystone.metering.budgets import BudgetService
 from keystone.policy.store import PolicyStore
+from keystone.registry.naming import is_reserved
 from keystone.registry.pinning import pending_fingerprint, schema_text, unified_diff
 from keystone.registry.repo import ToolRepo, UpstreamRepo
 
@@ -497,6 +498,7 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
                 last_error=r.last_error,
             )
             for r in rows
+            if not is_reserved(r.id)  # the LLM proxy's provider keys are not MCP servers
         ]
 
     @app.get("/sessions", tags=["sessions"], summary="Live sessions of the tenant")

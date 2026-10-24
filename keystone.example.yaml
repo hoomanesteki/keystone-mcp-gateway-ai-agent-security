@@ -192,3 +192,18 @@ budgets:
   - {tenant: acme, scope: tenant, window: day, limit_usd: 25}
   - {tenant: acme, scope: user, scope_id: olivia, window: day, limit_usd: 5}
   - {tenant: acme, scope: agent, scope_id: ops-agent, window: month, limit_usd: 200}
+
+# The LLM proxy (KS-806, ADR-0016): an agent sends its model requests to Keystone with its Keystone
+# token as the API key, and Keystone checks the token, stops a request that would take a budget over
+# its limit, adds the provider's key from the vault and books what the request cost. Off by default.
+# The prices are yours to fill in: copy pricing.example.yaml to pricing.yaml and write in the real
+# ones from each provider's pricing page. A model that is not in the file is refused. The keys are
+# read from the variables named here when Keystone starts and stored in the vault; they never go in
+# this file. Also KEYSTONE_LLM_PROXY__<NAME>.
+llm_proxy:
+  enabled: false
+  tenant: acme                  # whose keys; needed when there is more than one tenant
+  pricing_file: pricing.yaml
+  allow_unpriced: false         # true lets an unpriced model through at no cost, with a warning
+  anthropic: {base_url: "https://api.anthropic.com", api_key_env: ANTHROPIC_API_KEY}
+  openai: {base_url: "https://api.openai.com", api_key_env: OPENAI_API_KEY}
