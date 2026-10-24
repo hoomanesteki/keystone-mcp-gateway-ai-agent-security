@@ -237,12 +237,32 @@ class Pipeline:
         started = time.perf_counter()
         with self.tracer.tool_call(ctx) as span:
             try:
+                reject = await self._charged(ctx, reject)
                 ctx.result = to_tool_result(reject, ctx.call_id)
                 return ctx.result
             finally:
                 self._describe(span, ctx, "rejected", reject)
                 self._count(ctx, "rejected", reject, started)
                 await self._audit(ctx, "rejected", reject)
+
+    async def _charged(self, ctx: CallContext, reject: Reject) -> Reject:
+        """A call to a tool that does not exist costs the principal a token of the rate limit, as
+        any call does; without that, a loop of made-up names was audited and never limited. When a
+        bucket is empty the agent is told to slow down, not that the tool is missing. A limiter
+        that fails leaves the refusal as it was: the call is refused either way."""
+        if reject.code is not Code.TOOL_NOT_FOUND:
+            return reject
+        for interceptor in self.interceptors:
+            charge = getattr(interceptor, "charge_principal", None)
+            if charge is None:
+                continue
+            try:
+                await charge(ctx)
+            except Reject as refused:
+                return refused
+            except Exception:
+                log.error("reject_charge_failed", call_id=ctx.call_id, exc_info=True)
+        return reject
 
     def _count(
         self, ctx: CallContext, outcome: Outcome, reject: Reject | None, started: float

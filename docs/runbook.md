@@ -1281,9 +1281,11 @@ of one user is read from `KEYSTONE_RATE_LIMIT_USER_CAPACITY` and `KEYSTONE_RATE_
 in the environment of `docker compose` (300 and 50), which `scripts/smoke/phase_8.sh` lowers for its
 burst and puts back.
 
-Two limits to know about. A call to a tool that does not exist is refused before it enters the
-pipeline and is not counted, so it is not limited either (it is audited). And the proxy for model
-calls (KS-806) is not rate limited: a budget caps it.
+A call to a tool that does not exist is refused before it enters the pipeline, and it takes a
+token from the principal's buckets (tenant, user and agent; the tool has none) all the same
+(KS-992). When one is empty the agent gets `KS_RATE_LIMITED` and not `KS_TOOL_NOT_FOUND`. A limiter
+that cannot be reached leaves the refusal as `KS_TOOL_NOT_FOUND`. The proxy for model calls
+(KS-806) is not rate limited: a budget caps it.
 
 ## Budgets
 
