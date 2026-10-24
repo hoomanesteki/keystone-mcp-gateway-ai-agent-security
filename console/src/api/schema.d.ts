@@ -836,6 +836,8 @@ export interface operations {
                 /** @description Up to this time, exclusive. */
                 until?: string | null;
                 call_id?: string | null;
+                /** @description The MCP session the calls were made in. */
+                session?: string | null;
                 /** @description Records older than this seq, from next_cursor. */
                 cursor?: number | null;
                 limit?: number;
