@@ -201,8 +201,13 @@ the tools it called. The third is the tool being called, with the tag `external_
 session has both flags and the tool has the tag, the call needs a person's approval. It applies at
 every risk level, to every tenant, and it does not look at the arguments: an internal mail sent
 after the agent read an email asks as well. The tag is what counts, so a tool that changes
-something must carry `external_effect` in the upstream's config (the local stack tags
-`mail__send_email` and `bank__transfer`).
+something must carry `external_effect` in the upstream's config, and a tool that reads must carry
+the tag of what it reads. The local stack tags every tool of its demo upstreams
+(`deploy/keystone.compose.yaml`): reading mail, a file or the transactions of an account is a read
+of untrusted and of sensitive text (a transaction's description is written by whoever paid), fetching
+a page is a read of untrusted text, and sending mail, writing a file and making a transfer are
+external effects. A tool with no tag is invisible to the rule: a session that reads through it has
+no flags, and a call that changes something through it is not asked about.
 
 ### tainted-external-effect
 

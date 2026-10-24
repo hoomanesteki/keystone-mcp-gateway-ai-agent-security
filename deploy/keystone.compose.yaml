@@ -60,6 +60,13 @@ upstreams:
     url: "http://files-mcp:8102/mcp"
     credential_mode: static
     credential_env: {X-Api-Key: FILES_API_KEY}
+    # What each tool is to the Rule of Two (policies/default/approval/rule_of_two.cedar). A drive
+    # holds files that people outside the company wrote or touched, and private ones, so a read is
+    # untrusted and sensitive; a write changes state. A tool with no tag is invisible to the rule.
+    tools:
+      list_files: {risk: medium, tags: [reads_sensitive]}
+      read_file: {risk: medium, tags: [reads_untrusted, reads_sensitive]}
+      write_file: {risk: medium, tags: [external_effect]}
   - id: bank
     tenant: acme
     transport: http
@@ -70,6 +77,9 @@ upstreams:
     # cut 500.99 down to 500 and let it past a limit of 500.
     tools:
       get_balance: {risk: medium, tags: [reads_sensitive]}
+      # The description of a transaction is written by whoever paid or was paid, so reading the
+      # history is a read of untrusted text as well as of private data.
+      list_transactions: {risk: medium, tags: [reads_untrusted, reads_sensitive]}
       transfer: {risk: high, tags: [external_effect], extract: {amount: "$.amount | cents"}}
   - id: echo
     tenant: acme

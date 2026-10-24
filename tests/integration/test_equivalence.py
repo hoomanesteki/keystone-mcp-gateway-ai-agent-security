@@ -17,15 +17,15 @@ from tests.fixtures.upstreams import DemoUpstreams
 # (upstream, tool, arguments). The order matters twice. The transfer changes the balance that a
 # later run would see, so both runs apply the same changes in the same order. And since Phase 7 a
 # session that has read an email (the tool is tagged untrusted and sensitive) is asked about before
-# it sends mail or moves money (the Rule of Two), so the mail is sent and the money moved first, and
-# the email is read near the end.
+# it sends mail or moves money (the Rule of Two). Since KS-902 the files are tagged like the mail,
+# so the mail is sent and the money moved first, and the files and the email are read after.
 CALLS: list[tuple[str, str, dict[str, Any]]] = [
     ("mail", "list_emails", {"unread_only": True}),
     ("mail", "send_email", {"to": "colleague@acme.test", "subject": "Hi", "body": "Hello"}),
-    ("files", "read_file", {"path": "reports/q3-summary.csv"}),
-    ("files", "read_file", {"path": "../etc/passwd"}),  # an error result must match too
     ("bank", "get_balance", {"account": "SAV-002"}),
     ("bank", "transfer", {"from_account": "CHK-001", "to": "SAV-002", "amount": 25.5}),
+    ("files", "read_file", {"path": "reports/q3-summary.csv"}),
+    ("files", "read_file", {"path": "../etc/passwd"}),  # an error result must match too
     ("mail", "read_email", {"email_id": "m05"}),
     ("echo", "echo", {"payload": "equivalence"}),
 ]
