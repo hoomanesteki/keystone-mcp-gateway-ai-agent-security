@@ -1,0 +1,45 @@
+# What the performance harness changes in the compose stack to measure Keystone (KS-903). It is read
+# after docker-compose.yml:
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/perf.override.yml up -d keystone
+#
+# python -m eval.perf.matrix does that for each target it measures, with the PERF_* variables below
+# set for the target. With none set this file leaves the settings of the stack as they are, except
+# the ones that are the same for every target and are listed under "Always".
+#
+#   passthrough   PERF_PROFILE=passthrough
+#   scanner off   PERF_SCANNER=false
+#   rules only    PERF_CLASSIFIER=none
+#   classifier    none (the stack as it is)
+#
+# Always:
+#
+# - 4 CPUs and 4 GB for the keystone container. A limit of the container is what a 4 vCPU host is,
+#   to the extent that Docker can say so: the process still sees the CPUs of the Docker VM, so
+#   code that sizes itself by the CPU count (the classifier's thread pool) sizes itself to those.
+# - One uvicorn worker. `keystone serve` runs `uvicorn.run(app)` in one process on one event loop;
+#   it has no --workers, and there is nothing to set. All the calls of a run share that loop.
+# - Logs at warning level, so that a log line for each call does not become part of the latency.
+# - Rate limits so high that no call is refused. The slots still run, and cost what they cost.
+# - The sandbox off. Its health check (`docker info` every 30 s) holds the event loop for a few
+#   milliseconds (docs/progress.md, "Found"), which is noise in a latency and is not on the path of
+#   an echo call.
+services:
+  keystone:
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
+    environment:
+      KEYSTONE_LOG_LEVEL: WARNING
+      KEYSTONE_SANDBOX_ENABLED: "false"
+      KEYSTONE_RATE_LIMITS__PER_TENANT__CAPACITY: "1000000"
+      KEYSTONE_RATE_LIMITS__PER_TENANT__REFILL_PER_S: "1000000"
+      KEYSTONE_RATE_LIMITS__PER_AGENT__CAPACITY: "1000000"
+      KEYSTONE_RATE_LIMITS__PER_AGENT__REFILL_PER_S: "1000000"
+      KEYSTONE_RATE_LIMITS__PER_USER__CAPACITY: "1000000"
+      KEYSTONE_RATE_LIMITS__PER_USER__REFILL_PER_S: "1000000"
+      KEYSTONE_PROFILE: "${PERF_PROFILE:-full}"
+      KEYSTONE_SCANNER__ENABLED: "${PERF_SCANNER:-true}"
+      KEYSTONE_SCANNER_CLASSIFIER: "${PERF_CLASSIFIER:-protectai-deberta-v2}"

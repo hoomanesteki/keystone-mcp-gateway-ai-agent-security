@@ -49,11 +49,11 @@ from typing import Any, Protocol
 
 import anyio
 import httpx
-from prometheus_client.parser import text_string_to_metric_families
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
+from eval.gateway_info import read_info
 from eval.redteam.approver import OracleApprover
 from eval.redteam.checks import holds
 from eval.redteam.configs import CONFIGS, EXPECTED, RULE_OF_TWO, Config
@@ -212,24 +212,6 @@ class LlmAgent:
 MODEL_WAIT_S = 180.0
 # How long the record of a call is waited for in the audit log, which is written in batches.
 AUDIT_WAIT_S = 3.0
-
-
-def read_info(page: str) -> tuple[dict[str, str] | None, dict[str, bool]]:
-    """How a gateway says it is set, from its `/metrics` page: the labels of
-    `keystone_gateway_info` (profile, scanner, classifier), and for each model whether
-    `keystone_scanner_classifier_ready` says it has loaded. The labels come in the order the
-    client library sorts them, so they are read as labels and not matched as text."""
-    info: dict[str, str] | None = None
-    ready: dict[str, bool] = {}
-    for family in text_string_to_metric_families(page):
-        for sample in family.samples:
-            if sample.name == "keystone_gateway_info" and sample.value == 1:
-                info = dict(sample.labels)
-            elif sample.name == "keystone_scanner_classifier_ready":
-                ready[sample.labels["classifier"]] = sample.value == 1
-    if info is not None and not {"profile", "scanner", "classifier"} <= info.keys():
-        return None, ready
-    return info, ready
 
 
 async def gateway_facts(target: Target, client: httpx.AsyncClient) -> dict[str, Any]:
