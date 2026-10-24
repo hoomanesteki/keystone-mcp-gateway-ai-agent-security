@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import json
 import os
 import platform
@@ -451,12 +452,13 @@ async def measure(
 def token_count(size: int) -> int | None:
     """How many tokens of the scanner's model the payload is, when the extra is installed."""
     try:
-        from transformers import AutoTokenizer
+        # By name, as `keystone.defense.classifier` does: the extra is not part of the type check.
+        tokenizers = importlib.import_module("transformers").AutoTokenizer
 
         from keystone.defense.classifier import SPECS
 
         spec = SPECS[MODEL]
-        tokenizer = AutoTokenizer.from_pretrained(spec.model_id, revision=spec.revision)
+        tokenizer = tokenizers.from_pretrained(spec.model_id, revision=spec.revision)
         return len(tokenizer(payload(size), add_special_tokens=False)["input_ids"])
     except Exception:
         return None
