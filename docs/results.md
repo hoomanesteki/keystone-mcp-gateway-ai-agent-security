@@ -367,3 +367,136 @@ ANTHROPIC_API_KEY=<key> REDTEAM_LLM_BASE_URL=https://api.anthropic.com REDTEAM_L
 | `eval/results/redteam-naive-C2-2026-10-24.jsonl` | C2 full | `aaee3811d301` | 2026-10-24T09:42:10+00:00 | 60 | 0 | yes |
 | `eval/results/redteam-naive-C2-compose-config-of-v0.8.0-2026-10-24.jsonl` | C2 full (compose config of v0.8.0) | `aaee3811d301` | 2026-10-24T09:44:18+00:00 | 60 | 0 | yes |
 <!-- redteam:end -->
+
+<!-- perf:start -->
+## Performance
+
+Measured on 2026-10-24 at commit `a2472b11019e`, by `python -m eval.perf.matrix`. Every number below is computed from `eval/results/perf-2026-10-24.json`, which holds the latency of every call.
+
+The machine: Apple M4, 10 vCPUs, 16 GB of memory, macOS-26.7.1-arm64-arm-64bit, Docker 29.6.2 (its VM has 10 CPUs and 8 GB, Docker Desktop, aarch64). Docker reported the keystone container limited to 4 CPUs and 4 GB. It ran one uvicorn worker and logged at warning level, with the sandbox off and rate limits high enough that no call was refused (`deploy/perf.override.yml`).
+
+The run: 200 MCP sessions opened at once, each making 20 calls of the echo tool one after the other, with a payload of 1 KB (about 197 tokens) or 8 KB (about 1,581 tokens) of English text. The timed calls start together, after each session has made 3 calls that are not counted. A call is timed from the request to the whole answer, and a call that fails is counted and timed like the others. The percentiles are nearest-rank: of 4,000 calls the 95th is the 3,800th fastest. The generator is 4 processes, so that no one of them is the limit. The targets are the echo upstream alone, and Keystone in four settings of one build: passthrough (every slot a stub), full with the scanner off, full with the rules alone, and full with the classifier. Each was checked at `/metrics` before it was measured, and the model had loaded where there is one.
+
+### Against the targets
+
+| Metric | What | Target | Measured | Verdict |
+|---|---|---|---|---|
+| M5 | Added latency per call, scanner off, 200 sessions | p50 at most 10 ms, p95 at most 25 ms | 1 KB: p50 +2695.0 ms, p95 +3686.9 ms (3.2% of the calls failed); 8 KB: p50 +2941.7 ms, p95 +3816.9 ms (4.0% of the calls failed) | not met |
+| M6 | Added latency per call, classifier, outputs up to 2,000 tokens, 200 sessions | p95 at most 150 ms | 1 KB (197 tokens): p95 +40963.9 ms (57.1% of the calls failed); 8 KB (1581 tokens): p95 +56045.5 ms (75.8% of the calls failed) | not met |
+
+### 200 sessions, 20 calls each, 1 KB payload
+
+| Target | p50 (ms) | p95 (ms) | p99 (ms) | Added p50 | Added p95 | Added p99 | Calls / s | Errors |
+|---|---|---|---|---|---|---|---|---|
+| Direct echo | 263.9 | 513.1 | 865.2 | - | - | - | 676 | 0 of 4000 |
+| Keystone passthrough | 2366.5 | 3455.2 | 3863.6 | +2102.6 | +2942.1 | +2998.4 | 78 | 184 of 4000 |
+| Keystone full, scanner off | 2958.9 | 4200.0 | 4740.0 | +2695.0 | +3686.9 | +3874.8 | 64 | 130 of 4000 |
+| Keystone full, rules only | 3087.4 | 4159.0 | 4725.6 | +2823.4 | +3645.9 | +3860.4 | 62 | 175 of 4000 |
+| Keystone full, classifier | 31162.4 | 41477.0 | 44900.3 | +30898.4 | +40963.9 | +44035.1 | 5 | 2286 of 4000 |
+
+### 200 sessions, 20 calls each, 8 KB payload
+
+| Target | p50 (ms) | p95 (ms) | p99 (ms) | Added p50 | Added p95 | Added p99 | Calls / s | Errors |
+|---|---|---|---|---|---|---|---|---|
+| Direct echo | 256.5 | 567.4 | 789.1 | - | - | - | 652 | 0 of 4000 |
+| Keystone passthrough | 2624.1 | 3605.2 | 3796.4 | +2367.6 | +3037.8 | +3007.4 | 71 | 97 of 4000 |
+| Keystone full, scanner off | 3198.2 | 4384.3 | 4786.0 | +2941.7 | +3816.9 | +3997.0 | 60 | 161 of 4000 |
+| Keystone full, rules only | 3863.2 | 5051.3 | 6098.2 | +3606.7 | +4484.0 | +5309.2 | 50 | 99 of 4000 |
+| Keystone full, classifier | 38475.1 | 56612.9 | 64394.5 | +38218.6 | +56045.5 | +63605.5 | 3 | 3033 of 4000 |
+
+### One session, 200 calls, no queue
+
+The same targets with one session making its calls one after the other, so that nothing waits for another call. What a gateway adds here is what it needs, and what it adds with many sessions beyond this is the wait.
+
+1 KB payload:
+
+| Target | p50 (ms) | p95 (ms) | p99 (ms) | Added p50 | Added p95 | Added p99 | Calls / s | Errors |
+|---|---|---|---|---|---|---|---|---|
+| Direct echo | 1.8 | 2.5 | 3.1 | - | - | - | 521 | 0 of 200 |
+| Keystone passthrough | 12.7 | 22.6 | 26.9 | +10.9 | +20.1 | +23.8 | 70 | 0 of 200 |
+| Keystone full, scanner off | 15.6 | 26.2 | 32.9 | +13.8 | +23.8 | +29.9 | 57 | 0 of 200 |
+| Keystone full, rules only | 16.9 | 27.7 | 35.2 | +15.1 | +25.2 | +32.2 | 51 | 0 of 200 |
+| Keystone full, classifier | 533.5 | 897.9 | 1194.7 | +531.7 | +895.4 | +1191.7 | 2 | 0 of 200 |
+
+8 KB payload:
+
+| Target | p50 (ms) | p95 (ms) | p99 (ms) | Added p50 | Added p95 | Added p99 | Calls / s | Errors |
+|---|---|---|---|---|---|---|---|---|
+| Direct echo | 2.1 | 3.6 | 4.7 | - | - | - | 438 | 0 of 200 |
+| Keystone passthrough | 14.3 | 39.6 | 112.2 | +12.2 | +36.0 | +107.5 | 52 | 0 of 200 |
+| Keystone full, scanner off | 18.0 | 34.0 | 45.2 | +15.9 | +30.4 | +40.6 | 48 | 0 of 200 |
+| Keystone full, rules only | 20.8 | 30.6 | 37.2 | +18.7 | +27.0 | +32.5 | 44 | 0 of 200 |
+| Keystone full, classifier | 586.8 | 1319.1 | 2109.5 | +584.7 | +1315.5 | +2104.8 | 1 | 0 of 200 |
+
+### Where the time goes
+
+The mean time a call spent in each stage of the gateway during the timed calls, from `keystone_tool_call_duration_seconds`, in milliseconds. `total` is the time in the gateway, `upstream` the part of it spent waiting for the echo server, and the nine slots the rest. The client's mean is the generator's, which also has the wait for the event loop. At the sessions below every stage includes the time its call waited for the single event loop to come back to it.
+
+| Target | Payload | Client mean (ms) | total | upstream | rate limit | pinning | budget | policy | approval | credential | output scan | session flags | metering |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Keystone passthrough | 1 KB | 2438.3 | 2194.7 | 2221.0 | 0.1 | 0.0 | 0.0 | 0.0 | 0.0 | 39.2 | 0.0 | 0.0 | 0.0 |
+| Keystone passthrough | 8 KB | 2728.4 | 2542.6 | 2511.2 | 0.1 | 0.0 | 0.1 | 0.0 | 0.1 | 46.6 | 0.0 | 0.0 | 0.0 |
+| Keystone full, scanner off | 1 KB | 3028.6 | 2793.5 | 2664.2 | 5.5 | 57.0 | 0.0 | 0.4 | 0.0 | 43.5 | 0.1 | 4.8 | 0.0 |
+| Keystone full, scanner off | 8 KB | 3266.8 | 2976.8 | 2866.5 | 5.7 | 58.0 | 0.0 | 0.4 | 0.0 | 48.0 | 0.0 | 5.0 | 0.0 |
+| Keystone full, rules only | 1 KB | 3076.6 | 2791.5 | 2693.0 | 6.0 | 58.2 | 0.0 | 0.4 | 0.0 | 43.0 | 0.3 | 4.9 | 0.0 |
+| Keystone full, rules only | 8 KB | 3909.3 | 3639.6 | 3422.3 | 6.9 | 78.6 | 0.0 | 0.4 | 0.0 | 61.8 | 1.4 | 5.3 | 0.0 |
+| Keystone full, classifier | 1 KB | 29793.3 | 13465.4 | 10903.0 | 60.4 | 1090.4 | 0.3 | 2.5 | 0.2 | 698.4 | 136.2 | 30.1 | 0.3 |
+| Keystone full, classifier | 8 KB | 36924.4 | 13366.5 | 9406.9 | 82.3 | 2007.3 | 0.4 | 3.5 | 0.2 | 1214.7 | 106.0 | 31.5 | 0.3 |
+
+With one session and no queue, the same counters are the work each stage does:
+
+| Target | Payload | Client mean (ms) | total | upstream | rate limit | pinning | budget | policy | approval | credential | output scan | session flags | metering |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Keystone passthrough | 1 KB | 14.3 | 6.9 | 3.3 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 1.4 | 0.0 | 0.0 | 0.0 |
+| Keystone passthrough | 8 KB | 19.4 | 9.7 | 5.8 | 0.1 | 0.0 | 0.0 | 0.0 | 0.0 | 1.4 | 0.0 | 0.0 | 0.0 |
+| Keystone full, scanner off | 1 KB | 17.6 | 10.0 | 3.9 | 0.2 | 1.0 | 0.0 | 0.4 | 0.0 | 0.9 | 0.0 | 0.3 | 0.0 |
+| Keystone full, scanner off | 8 KB | 20.9 | 11.7 | 4.7 | 0.2 | 1.1 | 0.0 | 0.4 | 0.0 | 1.1 | 0.0 | 0.3 | 0.0 |
+| Keystone full, rules only | 1 KB | 19.7 | 11.7 | 3.7 | 0.2 | 1.0 | 0.0 | 0.4 | 0.0 | 1.5 | 0.2 | 0.3 | 0.0 |
+| Keystone full, rules only | 8 KB | 22.8 | 13.9 | 3.8 | 0.2 | 1.5 | 0.0 | 0.4 | 0.0 | 1.0 | 1.3 | 0.3 | 0.0 |
+| Keystone full, classifier | 1 KB | 589.3 | 487.5 | 43.4 | 6.0 | 24.3 | 0.3 | 4.7 | 0.3 | 20.6 | 158.4 | 5.4 | 0.4 |
+| Keystone full, classifier | 8 KB | 673.7 | 530.2 | 51.2 | 6.1 | 31.3 | 0.2 | 4.8 | 0.2 | 19.7 | 164.7 | 8.5 | 1.0 |
+
+### What failed
+
+The calls that failed, by what Keystone answered, where in the run they were, and what the gateway logged while they were made. A call that failed is counted in the share and left out of the percentiles and the calls a second above.
+
+| Target | Payload | Calls that failed | Share | Where in the run | Logged at warning or above |
+|---|---|---|---|---|---|
+| Keystone passthrough | 1 KB | 184 tool error KS_DENIED: denied: session state is unavailable | 4.6% | 99 of 184 were a first call; 184 began in the first 2 s | 184 session_store_failed (MaxConnectionsError); 4 session_row_not_written (TimeoutError) |
+| Keystone passthrough | 8 KB | 97 tool error KS_DENIED: denied: session state is unavailable | 2.4% | 97 of 97 were a first call; 97 began in the first 2 s | 97 session_store_failed (MaxConnectionsError); 13 session_row_not_written (TimeoutError) |
+| Keystone full, scanner off | 1 KB | 130 tool error KS_DENIED: denied: session state is unavailable | 3.2% | 90 of 130 were a first call; 130 began in the first 2 s | 130 session_store_failed (MaxConnectionsError); 4 session_row_not_written (TimeoutError) |
+| Keystone full, scanner off | 8 KB | 112 tool error KS_DENIED: denied: session state is unavailable; 49 tool error KS_DENIED: denied: the gateway could not finish checking this call | 4.0% | 149 of 161 were a first call; 161 began in the first 2 s | 112 session_store_failed (MaxConnectionsError); 49 interceptor_crashed; 49 session_not_touched (MaxConnectionsError) |
+| Keystone full, rules only | 1 KB | 165 tool error KS_DENIED: denied: session state is unavailable; 10 tool error KS_DENIED: denied: the gateway could not finish checking this call | 4.4% | 100 of 175 were a first call; 175 began in the first 2 s | 165 session_store_failed (MaxConnectionsError); 17 session_row_not_written (TimeoutError); 10 interceptor_crashed |
+| Keystone full, rules only | 8 KB | 99 tool error KS_DENIED: denied: session state is unavailable | 2.5% | 99 of 99 were a first call; 99 began in the first 2 s | 99 session_store_failed (MaxConnectionsError); 11 session_row_not_written (TimeoutError) |
+| Keystone full, classifier | 1 KB | 1982 tool error KS_UPSTREAM_ERROR: failed: upstream echo is down; 204 tool error KS_UPSTREAM_TIMEOUT: timed out: the upstream server did not answer within 30 s; 100 tool error KS_DENIED: denied: session state is unavailable | 57.1% | 100 of 2286 were a first call; 100 began in the first 2 s | 166 session_row_not_touched (TimeoutError); 100 session_store_failed (MaxConnectionsError); 62 session_row_not_written (TimeoutError) |
+| Keystone full, classifier | 8 KB | 2493 tool error KS_UPSTREAM_ERROR: failed: upstream echo is down; 440 tool error KS_UPSTREAM_TIMEOUT: timed out: the upstream server did not answer within 30 s; 100 tool error KS_DENIED: denied: session state is unavailable | 75.8% | 100 of 3033 were a first call; 100 began in the first 2 s | 431 session_row_not_touched (TimeoutError); 100 session_store_failed (MaxConnectionsError); 75 session_row_not_written (TimeoutError) |
+
+### What the numbers say
+
+- At 200 sessions the echo upstream alone serves 676 calls a second at a median of 263.9 ms, and Keystone with the scanner off 64 calls a second at 2958.9 ms, 9% of what the upstream does alone.
+- While those calls were made the keystone container used 101% of CPU on average, of the 400% it was allowed. One event loop on one core can use about 100%. That is 15.3 ms of CPU for each call made, those that failed included.
+- A call spent 2793.5 ms on average inside the gateway, 2664.2 ms of it waiting for the upstream and 111.4 ms in the nine slots, the largest of them `pinning` at 57.0 ms. The client saw a mean of 3028.6 ms. The other 235.1 ms is outside what the gateway counts: the request and the answer on the wire, the check of the token, the wait for the event loop before the pipeline starts, and the generator's own time.
+- One session alone makes 56.8 calls a second through the scanner-off gateway and 200 sessions make 63.9, 13% more. 200 sessions that call one after the other wait for each call 200 / 63.9 = 3.13 s on average, and the clients measured a mean of 3.03 s. The other 199 sessions added little to what the gateway serves, so what it adds at 200 sessions is the wait for one event loop and not the work of a call.
+- With one session and no queue the scanner-off gateway adds p50 13.8 ms and p95 23.8 ms at 1 KB; with 200 sessions it adds p50 2695.0 ms and p95 3686.9 ms.
+- With one session the scan took 158.4 ms on average with the classifier and 0.2 ms with the rules alone at 1 KB, and 136.2 ms with the classifier at 200 sessions.
+- With the classifier every stage is slower, not only the scan, though none of them waits for the model: `pinning` 24.3 ms against 1.0, `credential` 20.6 ms against 1.5, `session_flags` 5.4 ms against 0.3 with one session at 1 KB. While it worked the container used 380% of CPU on average, against about 100% without it.
+- At 200 sessions 2.4% to 75.8% of the calls through Keystone failed, in 8 of its runs, and none of the calls to the upstream alone. The log of the gateway names `session_store_failed (MaxConnectionsError)` most often, 987 times.
+- In the runs where a tenth of the calls or fewer failed, 634 of the 846 failures were the first call of a session and 846 began in the first two seconds: the sessions start together, and their first calls arrive at once.
+
+### The conditions of the runs
+
+| Target | Payload | Host idle before | Container CPU, mean (of 400%) | Container CPU, highest | Container memory, highest (MiB) | Generator, busiest process |
+|---|---|---|---|---|---|---|
+| Direct echo | 1 KB | 87% | - | - | - | 28% of a CPU |
+| Direct echo | 8 KB | 86% | - | - | - | 30% of a CPU |
+| Keystone passthrough | 1 KB | 88% | 101% | 146% | 248 | 8% of a CPU |
+| Keystone passthrough | 8 KB | 87% | 99% | 129% | 255 | 8% of a CPU |
+| Keystone full, scanner off | 1 KB | 88% | 101% | 131% | 248 | 7% of a CPU |
+| Keystone full, scanner off | 8 KB | 86% | 104% | 146% | 261 | 7% of a CPU |
+| Keystone full, rules only | 1 KB | 86% | 102% | 130% | 249 | 7% of a CPU |
+| Keystone full, rules only | 8 KB | 86% | 104% | 137% | 261 | 6% of a CPU |
+| Keystone full, classifier | 1 KB | 85% | 380% | 468% | 1170 | 1% of a CPU |
+| Keystone full, classifier | 8 KB | 88% | 372% | 479% | 1169 | 2% of a CPU |
+
+The host is idle when little else runs on it: the table says how idle it was in the two seconds before the target was measured, the CPU the container used while the calls were made (400% is the 4 CPUs it was limited to), and how busy the busiest process of the generator was (100% is one CPU).
+<!-- perf:end -->

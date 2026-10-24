@@ -327,6 +327,36 @@ def served(run: Mapping[str, Any] | None) -> dict[str, Any] | None:
     return summary if summary["p50_ms"] is not None else None
 
 
+def scan_ms(run: Mapping[str, Any] | None) -> float | None:
+    """The mean time of the scan stage in a run, or None if the run did not count it."""
+    stage = ((run or {}).get("stages") or {}).get("output_scan")
+    return None if stage is None else float(stage["mean_ms"])
+
+
+QUEUE_GAIN = 0.5  # sessions that add under this share to the calls a second leave a queue
+
+
+def queue_line(sessions: int, alone: Mapping[str, Any], many: Mapping[str, Any]) -> str:
+    """What the calls a second of one session and of many say about the wait. Sessions that call
+    one after the other wait, for each call, the sessions divided by the calls a second (Little's
+    law); if the many make hardly more calls a second than one does, that wait is a queue."""
+    gain = many["throughput"] / alone["throughput"] - 1
+    text = (
+        f"One session alone makes {alone['throughput']:.1f} calls a second through the scanner-off "
+        f"gateway and {sessions} sessions make {many['throughput']:.1f}, {gain * 100:.0f}% more. "
+        f"{sessions} sessions that call one after the other wait for each call {sessions} / "
+        f"{many['throughput']:.1f} = {sessions / many['throughput']:.2f} s on average, and the "
+        f"clients measured a mean of {many['mean_ms'] / 1000:.2f} s."
+    )
+    if gain < QUEUE_GAIN:
+        text += (
+            f" The other {sessions - 1} sessions added little to what the gateway serves, so what "
+            f"it adds at {sessions} sessions is the wait for one event loop and not the work of "
+            "a call."
+        )
+    return text
+
+
 def reading(document: Mapping[str, Any]) -> list[str]:
     """What the numbers say, each sentence made from them."""
     out: list[str] = []
@@ -351,7 +381,9 @@ def reading(document: Mapping[str, Any]) -> list[str]:
                 f"While those calls were made the keystone container used {mean_cpu:.0f}% of CPU "
                 "on average"
                 + (f", of the {allowed * 100:.0f}% it was allowed" if allowed else "")
-                + ". One event loop on one core can use about 100%."
+                + ". One event loop on one core can use about 100%. That is "
+                f"{mean_cpu / 100 * mine['wall_s'] / mine['calls'] * 1000:.1f} ms of CPU for each "
+                "call made, those that failed included."
             )
         stages = off.get("stages") or {}
         if "total" in stages:
@@ -372,6 +404,9 @@ def reading(document: Mapping[str, Any]) -> list[str]:
                 "request and the answer on the wire, the check of the token, the wait for the "
                 "event loop before the pipeline starts, and the generator's own time."
             )
+    alone = served(runs_of(document, "scanner-off", sequential=True).get(first))
+    if mine and alone:
+        out.append(queue_line(sessions, alone, mine))
     seq_extra = added(document, "scanner-off", first, sequential=True)
     off_extra = added(document, "scanner-off", first)
     if (
@@ -387,17 +422,22 @@ def reading(document: Mapping[str, Any]) -> list[str]:
             f"{off_extra['p95_ms']:.1f} ms."
         )
     cls = runs_of(document, "classifier").get(first)
-    if cls and cls.get("stages") and "output_scan" in cls["stages"]:
-        scan = cls["stages"]["output_scan"]["mean_ms"]
-        rules = runs_of(document, "rules-only").get(first)
-        rules_scan = (rules or {}).get("stages", {}).get("output_scan", {}).get("mean_ms")
-        out.append(
-            f"The scan took {scan:.1f} ms on average with the classifier"
-            + (f" and {rules_scan:.1f} ms with the rules alone" if rules_scan is not None else "")
-            + f" at {kb(first)}."
-        )
     alone_cls = runs_of(document, "classifier", sequential=True).get(first)
     alone_rules = runs_of(document, "rules-only", sequential=True).get(first)
+    scan = scan_ms(alone_cls)
+    if scan is not None:
+        by_rules, crowded = scan_ms(alone_rules), scan_ms(cls)
+        out.append(
+            f"With one session the scan took {scan:.1f} ms on average with the classifier"
+            + (f" and {by_rules:.1f} ms with the rules alone" if by_rules is not None else "")
+            + f" at {kb(first)}"
+            + (
+                f", and {crowded:.1f} ms with the classifier at {sessions} sessions"
+                if crowded is not None
+                else ""
+            )
+            + "."
+        )
     if alone_cls and alone_rules and alone_cls.get("stages") and alone_rules.get("stages"):
         slower = [
             f"`{stage}` {alone_cls['stages'][stage]['mean_ms']:.1f} ms against "

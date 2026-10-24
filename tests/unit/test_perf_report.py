@@ -256,9 +256,46 @@ def test_the_section_has_the_targets_the_tables_and_the_reading() -> None:
     assert "the largest of them `pinning` at 1.0 ms" in section
     assert "With one session and no queue the scanner-off gateway adds p50 6.0 ms" in section
     assert (
-        "The scan took 90.0 ms on average with the classifier and 0.3 ms with the rules alone"
-        in section
+        "With one session the scan took 90.0 ms on average with the classifier and 0.3 ms with the "
+        "rules alone at 1 KB, and 90.0 ms with the classifier at 10 sessions." in section
     )
+    # 95% of a CPU for one second, over the 100 calls made in it.
+    assert "That is 9.5 ms of CPU for each call made, those that failed included." in section
+
+
+def test_the_wait_is_called_a_queue_only_if_more_sessions_hardly_add_to_the_calls_a_second() -> (
+    None
+):
+    # One session makes 50 calls in a second and ten make 100: twice as many, so no queue is said.
+    many = report.reading(document())
+    [scaling] = [line for line in many if line.startswith("- One session alone makes")]
+
+    assert scaling == (
+        "- One session alone makes 50.0 calls a second through the scanner-off gateway and 10 "
+        "sessions make 100.0, 100% more. 10 sessions that call one after the other wait for each "
+        "call 10 / 100.0 = 0.10 s on average, and the clients measured a mean of 0.02 s."
+    )
+    assert "one event loop and not the work" not in scaling
+
+    # One session makes 50 calls in 0.6 s (83.3 a second); ten make 100 in a second, 20% more.
+    doc = document()
+    doc["targets"]["scanner-off"]["sequential"][0]["summary"]["wall_s"] = 0.6
+    [queued] = [line for line in report.reading(doc) if line.startswith("- One session alone")]
+
+    assert "makes 83.3 calls a second" in queued and "100.0, 20% more." in queued
+    assert queued.endswith(
+        " The other 9 sessions added little to what the gateway serves, so what it adds at 10 "
+        "sessions is the wait for one event loop and not the work of a call."
+    )
+
+
+def test_the_queue_is_left_out_if_the_scanner_off_target_was_not_run_alone() -> None:
+    doc = document()
+    doc["targets"]["scanner-off"]["sequential"] = []
+
+    lines = report.reading(doc)
+
+    assert not any(line.startswith("- One session alone makes") for line in lines)
 
 
 def test_the_conditions_say_how_idle_the_host_was_and_how_busy_the_container_and_generator() -> (
