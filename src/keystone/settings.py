@@ -503,6 +503,10 @@ class Settings(BaseSettings):
     # connection for `redis_pool_timeout_s` instead of refusing at once (KS-992): 200 sessions that
     # open together went past redis-py's default of 100 connections and 2.4 to 4.6% of the calls
     # were refused.
+    # How long the gateway keeps an upstream's opened credential (KS-992). A credential set or
+    # rotated through this process is dropped at once; one changed by the CLI is seen after this
+    # long. 0 reads and decrypts it on every call.
+    credential_cache_ttl_s: float = Field(default=60.0, ge=0)
     redis_pool_size: int = Field(default=500, ge=1)
     redis_pool_timeout_s: float = Field(default=2.0, gt=0)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
