@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import contextlib
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Collection
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 import anyio
 import structlog
@@ -74,6 +75,33 @@ class _Crash(Reject):
     """A Reject standing in for an interceptor that raised something else."""
 
 
+MAX_VALIDATORS = 1024
+# schema hash -> (the schema the validator was built from, the validator)
+_validators: OrderedDict[str, tuple[dict[str, Any], Draft202012Validator]] = OrderedDict()
+
+
+def _validator(ctx: CallContext) -> Draft202012Validator:
+    """The validator of the tool's input schema, made once for each schema hash. Building one is
+    most of what validating a small argument costs (KS-992). The hash only finds the entry: it is
+    used only if the schema it was built from is the schema in hand (the same object, which is the
+    usual case, or an equal one), so a hash that does not match its schema cannot validate a call
+    against another tool's schema. A tool with no hash (one that does not exist) is not kept."""
+    schema = ctx.tool.input_schema
+    key = ctx.tool.schema_hash
+    if not key:
+        return Draft202012Validator(schema)
+    kept = _validators.get(key)
+    if kept is not None and (kept[0] is schema or kept[0] == schema):
+        _validators.move_to_end(key)
+        return kept[1]
+    validator = Draft202012Validator(schema)
+    _validators[key] = (schema, validator)
+    _validators.move_to_end(key)
+    while len(_validators) > MAX_VALIDATORS:
+        _validators.popitem(last=False)
+    return validator
+
+
 def validate_arguments(ctx: CallContext) -> None:
     """Raise Reject(INVALID_ARGUMENTS) unless the arguments fit the size limit and the schema."""
     try:
@@ -85,7 +113,7 @@ def validate_arguments(ctx: CallContext) -> None:
             Code.INVALID_ARGUMENTS, f"arguments are {size} bytes, the limit is {MAX_ARGUMENT_BYTES}"
         )
     try:
-        error = best_match(Draft202012Validator(ctx.tool.input_schema).iter_errors(ctx.arguments))
+        error = best_match(_validator(ctx).iter_errors(ctx.arguments))
     except Exception:
         # A broken schema is the upstream's fault, and the agent cannot fix it.
         log.error("tool_schema_unusable", call_id=ctx.call_id, tool=ctx.tool.name, exc_info=True)
