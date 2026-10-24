@@ -176,6 +176,17 @@ HOST = re.compile(
 
 Classifier = Literal["protectai-deberta-v2", "prompt-guard-2-86m", "none"]
 ScanAction = Literal["pass", "annotate", "redact", "block"]
+# How the rules' score and the model's make one (KS-792, ADR-0011): `rules_first` or `max`.
+ScanJoin = Literal["rules_first", "max"]
+
+# What the evaluation measured on the dev split (eval/detector/combine.py, ADR-0011), which are
+# therefore the defaults. The model reads a long text in windows of this many tokens of the text
+# (the two special tokens come on top), each sharing `WINDOW_OVERLAP` of them with the one before.
+# Up to Phase 8 the windows were 510 and 64.
+WINDOW_TOKENS = 128
+WINDOW_OVERLAP = 64
+# How much of the model's score counts for a text that the rules did not flag.
+MODEL_WEIGHT = 0.7
 
 
 class ScannerActions(BaseModel):
@@ -203,6 +214,18 @@ class ScannerSettings(BaseModel):
     # The longest a scan waits for the model. A model that has not answered by then is left out
     # of that scan, which is then scored by the rules alone (`model` says "timeout").
     classifier_timeout_ms: int = Field(default=300, ge=1, le=10_000)
+    # How the score of the rules and the score of the model make one (ADR-0011). `rules_first`: a
+    # text that the rules flag (their score is at `thresholds.suspicious` or more) keeps the rules'
+    # score and is not given to the model; for any other text the model adds to the rules' score
+    # at `model_weight` of its own, so on its own it can flag a text and never taint a session.
+    # `max`: the higher of the two, and the model reads every text, which is what Phase 7 shipped.
+    join: ScanJoin = "rules_first"
+    model_weight: float = Field(default=MODEL_WEIGHT, gt=0, le=1)
+    # The windows the model reads a long text in: tokens of the text in a window, and tokens shared
+    # with the window before. A short window keeps an attack from being diluted by the document
+    # around it, which is why the model is weak on documents; it also costs more windows for a text.
+    window_tokens: int = Field(default=WINDOW_TOKENS, ge=16, le=510)
+    window_overlap: int = Field(default=WINDOW_OVERLAP, ge=0)
     thresholds: ScannerThresholds = Field(default_factory=ScannerThresholds)
     actions: ScannerActions = Field(default_factory=ScannerActions)
     # Hosts a markdown image may point to without a mark against it. An image anywhere else, or any
@@ -226,6 +249,12 @@ class ScannerSettings(BaseModel):
         if not all(HOST.match(host) for host in hosts):
             raise ValueError("allowed_domains takes host names such as cdn.acme.test")
         return hosts
+
+    @model_validator(mode="after")
+    def _windows_move_forward(self) -> "ScannerSettings":
+        if self.window_overlap >= self.window_tokens:
+            raise ValueError("window_overlap must be less than window_tokens")
+        return self
 
 
 IMAGE_REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,254}$")

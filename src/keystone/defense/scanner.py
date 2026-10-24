@@ -33,6 +33,8 @@ MAX_JSON_CHARS = 5_000_000
 # What `model` says when the classifier was asked and gave no answer in time, and when it raised.
 TIMEOUT = "timeout"
 FAILED = "error"
+# What it says when the rules had already flagged the text and the model was not asked (KS-792).
+SKIPPED = "skipped"
 
 
 @dataclass(frozen=True)
@@ -138,14 +140,30 @@ def label_for(score: float, thresholds: ScannerThresholds) -> Label:
     return "benign"
 
 
+def rules_first(rules: float, model: float | None, *, floor: float, weight: float) -> float:
+    """The score of a text from the score of the rules and the score of the model (KS-792,
+    ADR-0011). A text the rules flag, at `floor` or more, keeps their score whatever the model
+    says: the model is not asked. For any other text the model adds to the rules' score as a second
+    witness that is right `weight` of the time it is sure, `1 - (1 - rules) * (1 - weight * model)`,
+    the same way the rules' own hits add up. So the model can raise a score and never lowers one,
+    and with a weight under 0.85 it cannot make an `injection` of a text the rules do not flag.
+    `model` is None when there is none or it gave no answer."""
+    if model is None or rules >= floor:
+        return rules
+    return 1 - (1 - rules) * (1 - weight * model)
+
+
 class CompositeScanner:
-    """Scores a text with the rules and, when there is one, a classifier. The final score is the
-    higher of the two: the rules are cheap and exact about what they name, and the classifier sees
-    what no pattern names. A classifier that does not answer within `classifier_timeout_ms` is left
-    out of that scan, which is then the rules alone, and `model` says "timeout". A classifier that
-    raises is left out the same way, `model` says "error", and `on_error("classifier")` is called.
-    The rules are not guarded here: an exception in them reaches the caller, which is
-    `OutputScanner`."""
+    """Scores a text with the rules and, when there is one, a classifier. The rules are cheap and
+    exact about what they name, and the classifier sees what no pattern names. With
+    `scanner.join` set to `rules_first` (the default) a text that the rules flag is judged by them
+    alone and the model is not asked (`model` says "skipped"); any other text gets the model's
+    score at `model_weight` added to the rules' (`rules_first`). With `max` the final score is the
+    higher of the two and the model reads every text, which is what Phase 7 shipped. A classifier
+    that does not answer within `classifier_timeout_ms` is left out of that scan, which is then the
+    rules alone, and `model` says "timeout". A classifier that raises is left out the same way,
+    `model` says "error", and `on_error("classifier")` is called. The rules are not guarded here:
+    an exception in them reaches the caller, which is `OutputScanner`."""
 
     def __init__(
         self,
@@ -169,19 +187,37 @@ class CompositeScanner:
         window, truncated = self._window(text)
         details = self._rules_pass(window, truncated)
         classifier = self._classifier
-        if classifier is not None:
+        if classifier is not None and self._skips_model(details.score):
+            details = details.model_copy(update={"model": SKIPPED})
+        elif classifier is not None:
             view = prepare(reveal_tags(window))[0]
             answer, model = await self._ask(classifier, view)
-            score = details.score if answer is None else max(details.score, round(answer, 6))
+            heard = None if answer is None else round(answer, 6)
+            # Rounded so that a score meant to sit on a threshold does so, as for the rules.
+            score = round(self._join(details.score, heard), 6)
             details = details.model_copy(
                 update={
                     "score": score,
                     "label": label_for(score, self._cfg.thresholds),
                     "model": model,
-                    "classifier_score": None if answer is None else round(answer, 6),
+                    "classifier_score": heard,
                 }
             )
         return details.model_copy(update={"latency_ms": (time.perf_counter() - started) * 1000})
+
+    def _skips_model(self, rules: float) -> bool:
+        """Whether the rules have flagged the text, so that the model is not asked."""
+        return self._cfg.join == "rules_first" and rules >= self._cfg.thresholds.suspicious
+
+    def _join(self, rules: float, model: float | None) -> float:
+        if self._cfg.join == "max":
+            return rules if model is None else max(rules, model)
+        return rules_first(
+            rules,
+            model,
+            floor=self._cfg.thresholds.suspicious,
+            weight=self._cfg.model_weight,
+        )
 
     def scan_text(self, text: str) -> ScanDetails:
         """The rules alone, without waiting for anything. They are a few milliseconds of Python."""

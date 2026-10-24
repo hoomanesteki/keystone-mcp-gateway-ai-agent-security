@@ -270,6 +270,10 @@ class HFClassifier:
         loader: Callable[[], Engine] | None = None,
     ) -> None:
         self.name = name or model_id
+        # How a long text is cut for the model: tokens in a window with the two special tokens, and
+        # tokens shared with the window before (`scanner.window_tokens` and `window_overlap`).
+        self.max_length = max_length
+        self.stride = stride
         self._loader: Callable[[], Engine] = loader or partial(
             build_engine, model_id, revision, labels_map, max_length, stride, batch_size
         )
@@ -433,7 +437,14 @@ def load_classifier(cfg: ScannerSettings) -> Classifier | None:
             fix="install keystone[scanner], or set scanner.classifier to none",
         )
         return None
-    return HFClassifier(spec.model_id, spec.labels, name=spec.key, revision=spec.revision)
+    return HFClassifier(
+        spec.model_id,
+        spec.labels,
+        max_length=cfg.window_tokens + SPECIAL_TOKENS,
+        stride=cfg.window_overlap,
+        name=spec.key,
+        revision=spec.revision,
+    )
 
 
 async def warm_up(classifier: Classifier) -> None:

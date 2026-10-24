@@ -74,7 +74,7 @@ async def inspect(guard: OutputScanner, result: ToolResult, risk: Risk = Risk.LO
 
 async def test_a_classifier_that_raises_falls_back_to_the_rules() -> None:
     metrics = Metrics()
-    guard = build(metrics, classifier=Falling())
+    guard = build(metrics, classifier=Falling(), join="max")
 
     with structlog.testing.capture_logs() as logs:
         seen = await inspect(guard, result_of(OVERRIDE))
@@ -157,7 +157,7 @@ async def test_an_exception_while_cleaning_withholds_the_output(
 
 async def test_cancellation_is_not_swallowed() -> None:
     metrics = Metrics()
-    guard = build(metrics, classifier=Falling(anyio.get_cancelled_exc_class()()))
+    guard = build(metrics, classifier=Falling(anyio.get_cancelled_exc_class()()), join="max")
 
     with pytest.raises(anyio.get_cancelled_exc_class()):
         await inspect(guard, result_of(OVERRIDE))
@@ -167,8 +167,8 @@ async def test_cancellation_is_not_swallowed() -> None:
 
 async def test_the_metric_counts_each_stage_apart() -> None:
     metrics = Metrics()
-    await inspect(build(metrics, classifier=Falling()), result_of(OVERRIDE))
-    await inspect(build(metrics, classifier=Falling()), result_of(OVERRIDE))
+    await inspect(build(metrics, classifier=Falling(), join="max"), result_of(OVERRIDE))
+    await inspect(build(metrics, classifier=Falling(), join="max"), result_of(OVERRIDE))
     await inspect(build(metrics, rules=[Rule("explodes", 0.9, explodes)]), result_of(OVERRIDE))
 
     assert (failures(metrics, "classifier"), failures(metrics, "rules")) == (2, 1)

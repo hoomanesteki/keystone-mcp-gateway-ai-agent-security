@@ -290,7 +290,11 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_SCANNER__CLASSIFIER` | `protectai-deberta-v2` | The model behind the rules: `protectai-deberta-v2`, `prompt-guard-2-86m` or `none`. Needs the extra `keystone[scanner]`. |
 | `KEYSTONE_SCANNER_CLASSIFIER` | unset | The same setting under a shorter name (one underscore). It wins when both are set. `KEYSTONE_SCANNER_CLASSIFIER=none` turns the model off. |
 | `KEYSTONE_SCANNER__CLASSIFIER_TIMEOUT_MS` | `300` | How long a scan waits for the model. After that the scan goes on with the rules alone and its `model` says `timeout`. 1 to 10,000. |
-| `KEYSTONE_SCANNER__THRESHOLDS__SUSPICIOUS` | `0.5` | A score from here up is `suspicious`. |
+| `KEYSTONE_SCANNER__JOIN` | `rules_first` | How the rules' score and the model's make one: `rules_first` (a text the rules flag keeps their score and the model is not asked; any other text gets the model's score added at `MODEL_WEIGHT`) or `max` (the higher of the two, and the model reads every text, which Phase 7 shipped). |
+| `KEYSTONE_SCANNER__MODEL_WEIGHT` | `0.7` | How much of the model's score counts for a text the rules did not flag. Over 0 and up to 1. A weight under 0.85 means the model alone can flag a text and cannot taint a session. |
+| `KEYSTONE_SCANNER__WINDOW_TOKENS` | `128` | The model reads a long text in windows of this many tokens of the text (16 to 510). A short window keeps an attack from being lost in the document around it, and gives a long text more windows to read. |
+| `KEYSTONE_SCANNER__WINDOW_OVERLAP` | `64` | Tokens a window shares with the one before. Less than `WINDOW_TOKENS`. |
+| `KEYSTONE_SCANNER__THRESHOLDS__SUSPICIOUS` | `0.5` | A score from here up is `suspicious`. It is also the score at which the rules-first join stops asking the model. |
 | `KEYSTONE_SCANNER__THRESHOLDS__INJECTION` | `0.85` | A score from here up is an `injection`. Not below `SUSPICIOUS`. |
 | `KEYSTONE_SCANNER__ALLOWED_DOMAINS` | `[]` | JSON list of hosts a markdown image may point to without a mark against it. A name covers its subdomains. |
 | `KEYSTONE_SCANNER__MAX_SCAN_CHARS` | `200000` | The most text one scan reads. A longer text is read at both ends, half of this at each. |
