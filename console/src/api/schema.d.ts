@@ -200,6 +200,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/scan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Scan a text as the output of a tool, and say what an agent would be given
+         * @description The same scan and the same action as the output of a call gets, for a text that did
+         *     not come from one: the rules, the model if there is one, and the action for the risk.
+         *     It changes nothing, records nothing in the audit log and taints no session. A test of a
+         *     defense against another benchmark's attacks uses it (`eval/agentdojo`).
+         */
+        post: operations["scan_text_scan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/upstreams": {
         parameters: {
             query?: never;
@@ -637,6 +660,68 @@ export interface components {
             version: string;
             /** Policies */
             policies: components["schemas"]["PolicyEntry"][];
+        };
+        /** ScanBody */
+        ScanBody: {
+            /**
+             * Text
+             * @description The text to scan, as the output of a tool: what an agent would be given.
+             */
+            text: string;
+            /**
+             * Risk
+             * @description The risk of the tool the text came from. It picks the action for a text that scores as an injection: `scanner.actions` has one for each risk.
+             * @default medium
+             * @enum {string}
+             */
+            risk: "low" | "medium" | "high" | "critical";
+        };
+        /**
+         * ScanOutcome
+         * @description What the scanner makes of a text, and what an agent would be given in its place.
+         */
+        ScanOutcome: {
+            /** @description The score, the label, the rules that hit and the action. */
+            scan: components["schemas"]["ScanResult"];
+            /**
+             * Content
+             * @description The content blocks after the action: the text as it came for `pass`, with a warning for `annotate`, with invisible characters and leaking links cut out for `redact`, and the refusal that stands in for the output for `block`.
+             */
+            content: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Error
+             * @description The content is a refusal (`block`).
+             */
+            is_error: boolean;
+        };
+        /** ScanResult */
+        ScanResult: {
+            /** Score */
+            score: number;
+            /**
+             * Label
+             * @enum {string}
+             */
+            label: "benign" | "suspicious" | "injection";
+            /**
+             * Rule Hits
+             * @default []
+             */
+            rule_hits: string[];
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "pass" | "annotate" | "redact" | "block" | "error";
+            /** Model */
+            model?: string | null;
+            /**
+             * Latency Ms
+             * @default 0
+             */
+            latency_ms: number;
         };
         /** SessionInfo */
         SessionInfo: {
@@ -1429,6 +1514,66 @@ export interface operations {
                 };
             };
             /** @description Keystone has no master keys. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    scan_text_scan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScanBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScanOutcome"];
+                };
+            };
+            /** @description No token, or one that is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The token lacks the admin role. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description The scanner is off. */
             503: {
                 headers: {
                     [name: string]: unknown;

@@ -1943,6 +1943,7 @@ found (404), so the answer does not say it exists. The OpenAPI schema is at
 | `GET /sessions` | Live sessions of the tenant, read from Redis |
 | `GET /policies` | The version in force and the ids of the tenant's policies |
 | `POST /policies/reload` | Read the policy files again (see Policies) |
+| `POST /scan` | `{"text": "...", "risk": "medium"}`. Scan a text as the output of a tool of that risk and say what an agent would be given: `scan` (the score, the label, the rules that hit, the model and the action) and `content`, the blocks after the action (the text as it came, with a warning, with the hidden characters cut out, or the refusal that stands in for it). It changes nothing, writes no audit record and taints no session. 503 when the scanner is off. An AgentDojo run uses it (`eval/agentdojo/NOTES.md`) |
 | `GET /approvals` | The tenant's approval requests in one state: `status` (`pending` by default, or `approved`, `rejected`, `expired`, `consumed`) and `limit` (1 to 200, 100 by default). Pending ones come oldest first. Approver or admin |
 | `GET /approvals/{id}` | One request, with the last 10 calls of the session that asked (`recent_calls`, as the audit shows them). Approver or admin |
 | `POST /approvals/{id}/decision` | `{"approve": true, "note": "..."}`. Approver or admin. See Approvals |
