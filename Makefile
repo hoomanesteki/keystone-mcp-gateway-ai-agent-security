@@ -13,7 +13,7 @@ COMPOSE := docker compose -f deploy/docker-compose.yml $(if $(wildcard .env),--e
 # The console has its own package, and console/.nvmrc names the Node version it runs on.
 CONSOLE := pnpm --dir console
 
-.PHONY: help prose commits setup lint fmt type policy test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo demo-attack github-setup console-types console-check console-e2e sandbox-image echo-image
+.PHONY: help prose commits setup lint fmt type policy test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo demo-attack github-setup console-types console-check console-e2e sandbox-image echo-image perf perf-smoke
 
 help:
 	@grep -E '^[a-z0-9-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | column -t -s $$'\t'
@@ -88,6 +88,12 @@ gate: up echo-image ## everything a phase gate runs: make gate PHASE=N
 		if [ -f $$f ]; then echo "== smoke: phase $$k"; bash $$f || exit 1; fi; \
 		k=$$((k+1)); \
 	done
+
+perf: ## the performance matrix against the running stack: 5 targets, 200 sessions (about an hour)
+	$(RUN) python -m eval.perf.matrix
+
+perf-smoke: ## 10 sessions x 5 calls against the running stack, as the nightly job does
+	$(RUN) python -m eval.perf.matrix --smoke
 
 console-types: ## regenerate console/src/api/schema.d.ts from the admin API's schema
 	$(RUN) python scripts/dump_openapi.py console/openapi.json

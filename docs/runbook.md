@@ -1711,6 +1711,57 @@ What the numbers do not say is the last section of `docs/results.md`. The attack
 are the templates of this repository, written alongside the rules, so the public prompts are the
 independent check.
 
+## Performance
+
+`eval/perf` (KS-903) measures what the gateway adds to a call, and where the time goes. It needs the
+stack up (`make up`) and a machine with little else running on it.
+
+    make perf-smoke       # 10 sessions x 5 calls, the echo upstream and the stack as it runs
+    make perf             # the full matrix: about an hour on a laptop; keep the machine awake
+    uv run python -m eval.perf.report         # write the section of docs/results.md
+
+On a laptop run the matrix under `caffeinate -i` (macOS) or `systemd-inhibit` (Linux): a sleep in
+the middle of a run stops the clocks of the containers and the numbers with them.
+
+The matrix has five targets: the echo upstream alone (port 8104, the API key of the stack), and
+Keystone in four settings of one build, each made by restarting the keystone service with
+`deploy/perf.override.yml` and `PERF_PROFILE`, `PERF_SCANNER` or `PERF_CLASSIFIER`: passthrough,
+full with the scanner off, full with the rules alone, and full with the classifier. The override
+limits the container to 4 CPUs and 4 GB, sets the log level to warning, turns the sandbox off
+(its health check holds the event loop for a few milliseconds) and raises the rate limits to the
+largest the settings take, so that no call is refused and every slot still runs. `keystone serve`
+runs one uvicorn worker on one event loop, and there is no setting for more: every call of a run
+shares it. Before it measures a target the matrix reads `keystone_gateway_info` at `/metrics`,
+refuses a gateway that is not what the target says, waits for the model to load where there is one,
+and waits until the host is at least 85% idle over two seconds (it says so in the result if the
+host never was).
+
+N sessions (200) open at once and each makes M calls (20) of the echo tool one after the other with
+a payload of S bytes (1 KB and 8 KB) of plain English. After three calls a session that are not
+counted, the timed calls start together. A call is timed from the request to the whole answer. A
+call that fails is counted in the error rate, by what Keystone answered, and left out of the
+percentiles: a gateway that refuses a call quickly would otherwise look faster the more it failed.
+`eval/perf/load.py` shares the sessions out over four processes, because one process that runs
+200 clients is itself slow and puts its own time into every latency, and it records how busy each
+process was. A token of the local realm lives five minutes, so each process gets its own and a new
+one every two minutes. A run that lasts ten minutes stops making calls and says so.
+
+For each target and payload there is a second run with one session making 200 calls, so that
+nothing waits for another call. The difference between the two is the queue. The gateway is
+restarted for each payload, and the run with one session comes first and warms it, so that what one
+run did to the process (a pool used up, a session lost) is not in the next. While a run is made the
+matrix also reads the log of the container, and counts the events logged at warning level or above
+by name and error, which is how a failure is traced to its cause.
+
+The gateway counts the time every call spends in each stage of its pipeline
+(`keystone_tool_call_duration_seconds{stage}`: `total`, `upstream`, and each of the nine slots). The
+matrix reads those counters just before the timed calls and just after, and the mean of each stage
+is that of the calls that were timed. It also samples `docker stats` for the container while they
+are made. The result is `eval/results/perf-<date>.json`, with every latency, and a file is never
+written over. The report names the file, the commit and the machine (CPU model, vCPUs, memory,
+Docker, the VM Docker runs in), and `python -m eval.perf.report --check` fails when
+`docs/results.md` is not what the file renders.
+
 ## Audit
 
 Every tool call leaves one row in the `audit_events` table: who (tenant, user, agent, session),
