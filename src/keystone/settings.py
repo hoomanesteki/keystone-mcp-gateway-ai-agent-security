@@ -492,6 +492,12 @@ class Settings(BaseSettings):
     # Without it, migrations use `database_url`.
     migrate_database_url: SecretStr | None = None
     redis_url: SecretStr = SecretStr(DEFAULT_REDIS_URL)
+    # One pool serves sessions, rate limits, budgets and approvals. The pool waits for a free
+    # connection for `redis_pool_timeout_s` instead of refusing at once (KS-992): 200 sessions that
+    # open together went past redis-py's default of 100 connections and 2.4 to 4.6% of the calls
+    # were refused.
+    redis_pool_size: int = Field(default=500, ge=1)
+    redis_pool_timeout_s: float = Field(default=2.0, gt=0)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     # `passthrough` is the baseline of the red-team runs (KS-902, ADR-0017): the pipeline keeps its
     # order, its audit record and the credentials it adds for an upstream, and every other slot is

@@ -353,6 +353,8 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_MIGRATE_DATABASE_URL` | unset | Where `keystone db upgrade` and `keystone serve --migrate` connect, when that is not `KEYSTONE_DATABASE_URL`: creating tables takes the role that owns them. Unset means they use `KEYSTONE_DATABASE_URL`. Compose sets it to the owner. |
 | `KEYSTONE_APP_DB_PASSWORD` | the development password | Read by the migration that creates the `keystone_app` role. With `KEYSTONE_ENV=prod` and no value, that migration stops. It is not a Keystone setting: set the same value in the password of `KEYSTONE_DATABASE_URL`. |
 | `KEYSTONE_REDIS_URL` | `redis://localhost:56379/0` | Redis URL. Session state lives here. Set it to an empty string to keep session state in the gateway process instead (one process only, lost on restart). |
+| `KEYSTONE_REDIS_POOL_SIZE` | `500` | Connections in the one Redis pool that sessions, rate limits, budgets and approvals share. A caller that finds them all in use waits for one. |
+| `KEYSTONE_REDIS_POOL_TIMEOUT_S` | `2` | How long such a caller waits, in seconds. After that the call is refused as before (`session state is unavailable`), because a call that cannot read its session must not run. |
 | `KEYSTONE_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` |
 | `KEYSTONE_CONFIG` | unset | Path to a YAML file with the same keys |
 | `KEYSTONE_ALLOWED_HOSTS` | `["127.0.0.1:*","localhost:*","[::1]:*"]` | JSON list of `Host` header values the MCP endpoint accepts (DNS rebinding guard). `:*` matches any port. Add the service name, for example `keystone:*`, to reach it from another container. |
