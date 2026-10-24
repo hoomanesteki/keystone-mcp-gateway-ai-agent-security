@@ -452,12 +452,12 @@ async def test_reaper_removes_stale(
     try:
         # Made a moment ago, so ten minutes is not enough to reap it.
         assert await runner.reap(max_age_s=600) == 0
-        assert {c.id for c in docker_client.containers.list(all=True)} >= {stale.id, other.id}
+        assert {c["Id"] for c in docker_client.api.containers(all=True)} >= {stale.id, other.id}
 
         removed = await runner.reap(max_age_s=0)
 
         assert removed == 1
-        ids = {c.id for c in docker_client.containers.list(all=True)}
+        ids = {c["Id"] for c in docker_client.api.containers(all=True)}
         assert stale.id not in ids
         # Only containers with the label are touched.
         assert other.id in ids
@@ -475,4 +475,4 @@ async def test_reaper_removes_a_running_container_that_is_old_enough(
     )
 
     assert await runner.reap(max_age_s=0) == 1
-    assert not docker_client.containers.list(all=True, filters={"id": survivor.id})
+    assert not docker_client.api.containers(all=True, filters={"id": survivor.id})

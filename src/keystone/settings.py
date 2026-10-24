@@ -268,6 +268,43 @@ class SandboxSettings(BaseModel):
         return value
 
 
+class RateLimit(BaseModel):
+    """One token bucket (KS-804): `capacity` calls at once, and `refill_per_s` more each second.
+    A capacity under 1 would refuse every call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    capacity: float = Field(ge=1, le=1_000_000)
+    refill_per_s: float = Field(gt=0, le=1_000_000)
+
+
+class RateLimitSettings(BaseModel):
+    """How fast calls may come, by who makes them. Every scope is optional, a scope that is not set
+    has no limit, and a call is checked against all that are set. A virtual tool and a call that
+    waits for approval count like any other, since they are calls."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # All the calls of a tenant, whoever makes them.
+    per_tenant: RateLimit | None = None
+    # The calls of one user (the token's `sub`), through any agent.
+    per_user: RateLimit | None = None
+    # The calls of one agent (the OAuth client), of every user.
+    per_agent: RateLimit | None = None
+    # The calls to one tool, from every user of the tenant: it protects the upstream behind it.
+    per_tool: RateLimit | None = None
+
+    def scopes(self) -> list[tuple[str, RateLimit]]:
+        """The scopes that are set, in the order a call is checked."""
+        found = (
+            ("per_tenant", self.per_tenant),
+            ("per_user", self.per_user),
+            ("per_agent", self.per_agent),
+            ("per_tool", self.per_tool),
+        )
+        return [(name, limit) for name, limit in found if limit is not None]
+
+
 class HealthSettings(BaseModel):
     """How the gateway watches its upstreams (KS-209)."""
 
@@ -338,6 +375,7 @@ class Settings(BaseSettings):
     # set, because it is the one a person types to change a running stack.
     scanner_classifier: Classifier | None = None
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
+    rate_limits: RateLimitSettings = Field(default_factory=RateLimitSettings)
     # A short name for `sandbox.enabled`, so that KEYSTONE_SANDBOX_ENABLED=false turns the sandbox
     # off without the nested spelling (KEYSTONE_SANDBOX__ENABLED). It wins when both are set.
     sandbox_enabled: bool | None = None

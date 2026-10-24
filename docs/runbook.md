@@ -298,6 +298,7 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_SANDBOX__RUNTIME` | `runc` | The Docker runtime of the containers: `runc`, or `runsc` where gVisor is installed. |
 | `KEYSTONE_SANDBOX__TIMEOUT_S` | `30` | How long one run may take before its container is killed. Above 0, at most 300. |
 | `KEYSTONE_SANDBOX__MAX_CONCURRENT` | `4` | Containers running at once. A call over that waits for one to end. |
+| `KEYSTONE_RATE_LIMITS__<SCOPE>__CAPACITY` and `KEYSTONE_RATE_LIMITS__<SCOPE>__REFILL_PER_S` | unset (no limit) | A token bucket for one scope: how many calls at once (1 or more) and how many more each second (above 0). `<SCOPE>` is `PER_TENANT`, `PER_USER`, `PER_AGENT` or `PER_TOOL`. Also `rate_limits.per_user: {capacity: 60, refill_per_s: 1}` in the YAML, and an environment variable changes one field of what the file sets. See Rate limits. |
 
 Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
 
@@ -1102,6 +1103,65 @@ says the sandbox is up.
 The tests marked `docker` run the runner against the daemon. Without a daemon or the image they
 are skipped and say why; with `KEYSTONE_REQUIRE_DOCKER=1` (which `make test-int`, `make gate` and
 the integration job of CI set) that is a failure.
+
+## Rate limits
+
+A looping agent should hit a wall before it floods an upstream (KS-804). Each limit is a token
+bucket: it holds `capacity` tokens, gets `refill_per_s` back every second, and a call takes one. A
+bucket that is empty refuses the call with `KS_RATE_LIMITED` and says how long until it has a
+token.
+
+```yaml
+rate_limits:
+  per_tenant: {capacity: 600, refill_per_s: 10}   # everything a tenant does
+  per_user:   {capacity: 60,  refill_per_s: 1}    # one user, the token's `sub`, through any agent
+  per_agent:  {capacity: 120, refill_per_s: 2}    # one OAuth client, for all of its users
+  per_tool:   {capacity: 30,  refill_per_s: 0.5}  # one tool, for everybody: it protects the upstream
+```
+
+Every scope is optional, and a scope left out has no limit. A call is checked against all the
+scopes that are set, in the order above, and the first bucket with no token refuses it. Nothing is
+taken from any bucket when one refuses, so a call refused for the tool has not used a token of the
+user's. A scope belongs to a tenant: the same user id in two tenants has two buckets.
+
+What counts: every call, including the two tools Keystone serves itself, and a call that goes on to
+wait for approval. The limit is the first slot, so a flood of calls that the policy would deny, or
+that would each make an approval request, is a flood of refusals and not of rows. An agent that
+polls `keystone__await_approval` in a loop is limited like one that polls a mail server. The call
+that the await tool runs once a person has approved is not counted again: it was counted when it
+first arrived, and the await was counted as the call it is. (This is what closes the finding of the
+Phase 6 gate, that nothing limited how many approval requests one agent could make.)
+
+The answer to a call that is refused is the usual one (ADR-0007):
+
+```
+[keystone:KS_RATE_LIMITED] call 01J... rate limited: too many calls: your user's limit is used up, try again in 2.0 seconds
+```
+
+`retry_after_s` and `scope` are in the metadata of the text block, and also as `keystone/retry_after_s`
+and `keystone/scope` in the metadata of the result, where a client library looks. The wait is rounded
+up to the millisecond, so a client that sleeps that long is not refused again for a fraction of one.
+The audit record has the decision `deny`, the source `rate_limit`, the reason `rate-limit:<scope>`,
+the code `KS_RATE_LIMITED` and `dispatched` false, and `keystone_rate_limited_total{tenant,scope}`
+counts it.
+
+The buckets are in Redis under `ks:rl:<scope>:<tenant>:<id>` (a hash of `tokens` and `ts`), checked
+by one Lua script that takes the time as an argument and does all the scopes of a call in one step,
+so two Keystone processes share them and a check cannot be raced. A bucket expires when it would be
+full again, so an idle user costs nothing. A Redis that is flushed gives every bucket back full. With
+no Redis (`KEYSTONE_REDIS_URL` empty) the buckets are in the process. Because the time comes from
+Keystone and not from Redis, two processes whose clocks differ disagree a little: a bucket does not
+refill for time that went backwards. A Redis that cannot be reached denies the call, as it does for
+the session state, and never lets it through without a limit.
+
+The compose stack sets limits far above what the smoke scripts and the browser test do. The limit
+of one user is read from `KEYSTONE_RATE_LIMIT_USER_CAPACITY` and `KEYSTONE_RATE_LIMIT_USER_REFILL`
+in the environment of `docker compose` (300 and 50), which `scripts/smoke/phase_8.sh` lowers for its
+burst and puts back.
+
+Two limits to know about. A call to a tool that does not exist is refused before it enters the
+pipeline and is not counted, so it is not limited either (it is audited). And the proxy for model
+calls (KS-806) is not rate limited: a budget caps it.
 
 ## Sessions
 

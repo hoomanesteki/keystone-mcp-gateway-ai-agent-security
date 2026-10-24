@@ -21,7 +21,7 @@ from tests.fixtures.cli import invoke
 from tests.fixtures.fake_idp import FakeIdp
 from tests.fixtures.keystone import KeystoneApp, McpConnect
 from tests.fixtures.mcp_results import one, texts
-from tests.fixtures.sandbox import containers_of, wait_until
+from tests.fixtures.sandbox import containers_of, list_containers, wait_until
 from tests.fixtures.upstreams import DemoUpstreams
 
 pytestmark = [pytest.mark.phase(8), pytest.mark.services, pytest.mark.docker]
@@ -251,9 +251,7 @@ async def test_the_container_carries_the_call_id_of_the_audit_record(
 
         group.start_soon(call)
         found = await anyio.to_thread.run_sync(
-            lambda: wait_until(
-                lambda: docker_client.containers.list(filters={"label": "keystone.sandbox=1"})
-            )
+            lambda: wait_until(lambda: list_containers(docker_client, "keystone.sandbox=1"))
         )
         assert found, "no container appeared"
         [running] = found

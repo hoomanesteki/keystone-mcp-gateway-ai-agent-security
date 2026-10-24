@@ -5,6 +5,7 @@ from typing import Any
 
 import anyio
 import pytest
+from docker.errors import NotFound
 
 from keystone.sandbox.runner import (
     CALL_LABEL,
@@ -161,65 +162,73 @@ def test_a_runner_runs_at_least_one_container_at_a_time() -> None:
         SandboxRunner(max_concurrent=0)
 
 
-class FakeContainer:
-    def __init__(self, name: str, created: float, *, fails: bool = False) -> None:
-        self.attrs = {"Created": created}
-        self.short_id = name
-        self.fails = fails
-        self.removed = False
+class FakeApi:
+    """The low-level calls the reaper makes: a listing of dicts, and a removal by id."""
 
-    def remove(self, **_options: Any) -> None:
-        if self.fails:
-            raise OSError("the daemon went away")
-        self.removed = True
-
-
-class FakeContainers:
-    def __init__(self, found: list[FakeContainer]) -> None:
+    def __init__(self, found: list[dict[str, Any]]) -> None:
         self.found = found
-        self.filters: list[dict[str, Any]] = []
+        self.listings: list[dict[str, Any]] = []
+        self.removed: list[str] = []
+        self.stuck: set[str] = set()
+        self.gone: set[str] = set()
 
-    def list(self, **options: Any) -> list[FakeContainer]:
-        self.filters.append(options)
+    def containers(self, **options: Any) -> list[dict[str, Any]]:
+        self.listings.append(options)
         return self.found
+
+    def remove_container(self, container_id: str, **_options: Any) -> None:
+        if container_id in self.gone:
+            raise NotFound("already removed")
+        if container_id in self.stuck:
+            raise OSError("the daemon went away")
+        self.removed.append(container_id)
 
 
 class FakeClient:
-    def __init__(self, found: list[FakeContainer]) -> None:
-        self.containers = FakeContainers(found)
+    def __init__(self, found: list[dict[str, Any]]) -> None:
+        self.api = FakeApi(found)
 
 
 async def test_the_reaper_asks_for_the_label_and_keeps_what_is_young() -> None:
-    old, young = FakeContainer("old", created=100.0), FakeContainer("young", created=900.0)
-    client = FakeClient([old, young])
+    client = FakeClient([{"Id": "old", "Created": 100}, {"Id": "young", "Created": 900}])
     runner = SandboxRunner(client, clock=lambda: 1000.0)
 
     removed = await runner.reap(max_age_s=600)
 
-    assert (removed, old.removed, young.removed) == (1, True, False)
-    assert client.containers.filters == [{"all": True, "filters": {"label": "keystone.sandbox=1"}}]
+    assert (removed, client.api.removed) == (1, ["old"])
+    assert client.api.listings == [{"all": True, "filters": {"label": "keystone.sandbox=1"}}]
 
 
 async def test_a_container_that_cannot_be_removed_does_not_stop_the_others() -> None:
-    stuck, fine = FakeContainer("stuck", 0.0, fails=True), FakeContainer("fine", 0.0)
-    runner = SandboxRunner(FakeClient([stuck, fine]), clock=lambda: 1000.0)
+    client = FakeClient([{"Id": "stuck", "Created": 0}, {"Id": "fine", "Created": 0}])
+    client.api.stuck.add("stuck")
+    runner = SandboxRunner(client, clock=lambda: 1000.0)
 
     assert await runner.reap(max_age_s=1) == 1
-    assert fine.removed
+    assert client.api.removed == ["fine"]
+
+
+async def test_a_container_a_run_removed_in_the_meantime_is_not_an_error() -> None:
+    client = FakeClient([{"Id": "gone", "Created": 0}, {"Id": "there", "Created": 0}])
+    client.api.gone.add("gone")
+    runner = SandboxRunner(client, clock=lambda: 1000.0)
+
+    assert await runner.reap(max_age_s=1) == 1
+    assert client.api.removed == ["there"]
 
 
 async def test_the_reaper_goes_on_after_a_failure() -> None:
     client = FakeClient([])
     calls = 0
 
-    def list_containers(**_options: Any) -> list[FakeContainer]:
+    def list_containers(**_options: Any) -> list[dict[str, Any]]:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise OSError("the daemon is away")
         return []
 
-    client.containers.list = list_containers  # type: ignore[method-assign]
+    client.api.containers = list_containers  # type: ignore[method-assign]
     runner = SandboxRunner(client)
 
     with anyio.move_on_after(2):

@@ -169,3 +169,15 @@ sandbox:
   runtime: runc
   timeout_s: 30        # one run; its container is killed after this
   max_concurrent: 4    # containers at once
+
+# How fast calls may come (KS-804). Each scope is a token bucket: `capacity` calls at once, and
+# `refill_per_s` more every second. A call is checked against every scope that is set, and refused
+# with KS_RATE_LIMITED and a retry_after_s by the first with no token. A scope left out has no limit.
+# per_user is one user (the token's `sub`), per_agent one OAuth client, per_tool one tool for
+# everybody, per_tenant everything a tenant does. Virtual tools and calls that wait for approval
+# count too. Also KEYSTONE_RATE_LIMITS__PER_USER__CAPACITY and the like.
+rate_limits:
+  per_tenant: {capacity: 600, refill_per_s: 10}
+  per_user: {capacity: 60, refill_per_s: 1}
+  per_agent: {capacity: 120, refill_per_s: 2}
+  per_tool: {capacity: 30, refill_per_s: 0.5}

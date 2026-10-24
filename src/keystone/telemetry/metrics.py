@@ -9,8 +9,8 @@ protected than logs, and a user label would also make the series count grow with
 
 The metrics of Phases 6 to 8 (approvals, the scanner, rate limits, budgets, LLM tokens) were
 declared before anything set them, so the dashboard could name them from the start. Approvals
-(KS-604) and the scanner (KS-704) are set now; rate limits, budgets and LLM tokens wait for
-Phase 8.
+(KS-604), the scanner (KS-704) and rate limits (KS-804) are set now; budgets and LLM tokens
+wait for the rest of Phase 8.
 """
 
 from __future__ import annotations
@@ -60,6 +60,8 @@ POLICY_BUCKETS = (0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 
 SCORE_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 # What can fail in a scan: the classifier, the rules, and the action on a flagged output.
 SCAN_STAGES = ("rules", "classifier", "action")
+# The scopes of a rate limit (settings.RateLimitSettings).
+RATE_SCOPES = ("per_tenant", "per_user", "per_agent", "per_tool")
 
 
 @dataclass(frozen=True)
@@ -176,10 +178,13 @@ class Metrics:
             "Scans that failed and were worked around, by stage",
             ["stage"],
         )
-        # Declared for Phase 8. Nothing sets these yet.
+        # Set by the rate limit slot (KS-804), for each call it refuses.
         self.rate_limited = self._counter(
-            "keystone_rate_limited", "Calls refused by a rate limit (Phase 8)", ["tenant", "scope"]
+            "keystone_rate_limited",
+            "Calls refused by a rate limit, by tenant and scope",
+            ["tenant", "scope"],
         )
+        # Declared for Phase 8. Nothing sets this yet.
         self.budget_spent_usd = self._gauge(
             "keystone_budget_spent_usd",
             "Spend in the current budget window (Phase 8)",
@@ -222,6 +227,12 @@ class Metrics:
         """The score of one output that was scanned. A scan that failed has no score and is not
         observed: it is counted by `scan_failed`."""
         self.scan_score.labels(tenant=self._tenant(tenant)).observe(score)
+
+    def rate_limit_refused(self, tenant: str, scope: str) -> None:
+        """A call that a rate limit refused. `scope` is one of RATE_SCOPES."""
+        self.rate_limited.labels(
+            tenant=self._tenant(tenant), scope=scope if scope in RATE_SCOPES else OTHER
+        ).inc()
 
     def session_tainted(self, tenant: str) -> None:
         """An injection tainted a session that was not tainted when the call began."""
