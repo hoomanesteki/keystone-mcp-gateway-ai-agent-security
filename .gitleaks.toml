@@ -42,3 +42,13 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 paths = ['''^tests/integration/test_upstream_client\.py$''']
 regexes = ['''^wrong-key-0123$''']
+
+# The development master key that .env.example publishes was written into one test file for a few
+# commits, and the scan reads every commit. The file makes its own key now. Path and value must
+# both match, so any other key-looking string in this file, or this one anywhere else, is caught.
+[[allowlists]]
+description = "The published development master key, in one test file's history"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^tests/unit/test_llm_settings\.py$''']
+regexes = ['''^FpAPqO9j92_C-qEbO6vqkdH2olOR4ZHKzRqM7OhjSE0=$''']
