@@ -334,6 +334,77 @@ class BudgetConfig(BaseModel):
         return self
 
 
+class LlmProviderSettings(BaseModel):
+    """One model provider the proxy forwards to (KS-806)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Where the provider's API is. The proxy adds the path (/v1/messages, /v1/chat/completions).
+    base_url: str
+    # The environment variable that holds the provider's API key. Keystone reads it at startup and
+    # stores the key in the vault, encrypted, as the static credential of `llm_anthropic` or
+    # `llm_openai`. The key itself is never in this file.
+    api_key_env: str | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _an_http_url(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError("a provider's base_url must be an http or https URL")
+        if parts.query or parts.fragment or parts.username or parts.password:
+            raise ValueError("a provider's base_url has no credentials, query or fragment")
+        return value.rstrip("/")
+
+    @field_validator("api_key_env")
+    @classmethod
+    def _a_variable_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+            raise ValueError(f"{value!r} is not a valid environment variable name")
+        if value.upper().startswith("KEYSTONE_"):
+            # Pointing the key at the master key would store Keystone's own secret as a credential.
+            raise ValueError(f"{value} is Keystone's own setting and cannot be a provider key")
+        return value
+
+
+class LlmProxySettings(BaseModel):
+    """The passthrough for model calls (KS-806, ADR-0016): the same identity, budget and tracing as
+    a tool call. Off by default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    # The tenant whose vault holds the provider keys, and so the tenant the proxy serves: an
+    # upstream id is unique across tenants, and `llm_anthropic` can belong to one. With one tenant
+    # in the config it is that one.
+    tenant: str | None = None
+    # The price list (pricing.example.yaml shows the shape). A relative path is read from the
+    # working directory.
+    pricing_file: Path = Path("pricing.yaml")
+    # A model with no price is refused with a 400, unless this is on: then it is allowed, costs
+    # nothing and a warning is logged.
+    allow_unpriced: bool = False
+    # The longest answer assumed when a request does not say (OpenAI's max_tokens is optional), for
+    # the estimate a budget is checked against.
+    default_max_tokens: int = Field(default=4096, ge=1, le=1_000_000)
+    # The largest request body the proxy reads.
+    max_body_bytes: int = Field(default=8 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024)
+    # How long the proxy waits on a provider for a byte, for a stream or a whole answer.
+    timeout_s: float = Field(default=600.0, gt=0, le=3600)
+    anthropic: LlmProviderSettings = Field(
+        default_factory=lambda: LlmProviderSettings(
+            base_url="https://api.anthropic.com", api_key_env="ANTHROPIC_API_KEY"
+        )
+    )
+    openai: LlmProviderSettings = Field(
+        default_factory=lambda: LlmProviderSettings(
+            base_url="https://api.openai.com", api_key_env="OPENAI_API_KEY"
+        )
+    )
+
+
 class HealthSettings(BaseModel):
     """How the gateway watches its upstreams (KS-209)."""
 
@@ -406,6 +477,7 @@ class Settings(BaseSettings):
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     rate_limits: RateLimitSettings = Field(default_factory=RateLimitSettings)
     budgets: list[BudgetConfig] = Field(default_factory=list)
+    llm_proxy: LlmProxySettings = Field(default_factory=LlmProxySettings)
     # A short name for `sandbox.enabled`, so that KEYSTONE_SANDBOX_ENABLED=false turns the sandbox
     # off without the nested spelling (KEYSTONE_SANDBOX__ENABLED). It wins when both are set.
     sandbox_enabled: bool | None = None
@@ -447,6 +519,22 @@ class Settings(BaseSettings):
     def _the_short_name_of_the_classifier(self) -> "Settings":
         if self.scanner_classifier is not None:
             self.scanner = self.scanner.model_copy(update={"classifier": self.scanner_classifier})
+        return self
+
+    @model_validator(mode="after")
+    def _the_tenant_of_the_llm_proxy(self) -> "Settings":
+        proxy = self.llm_proxy
+        if not proxy.enabled:
+            return self
+        if proxy.tenant is None:
+            if len(self.tenants) != 1:
+                raise ValueError(
+                    "llm_proxy.tenant must name the tenant whose vault holds the provider keys, "
+                    "since the config does not list exactly one tenant"
+                )
+            self.llm_proxy = proxy.model_copy(update={"tenant": self.tenants[0].id})
+        elif self.tenants and proxy.tenant not in {t.id for t in self.tenants}:
+            raise ValueError(f"llm_proxy.tenant {proxy.tenant!r} is not in `tenants`")
         return self
 
     @model_validator(mode="after")

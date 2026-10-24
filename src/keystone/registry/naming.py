@@ -14,7 +14,11 @@ _UPSTREAM_ID = re.compile(r"^[a-z][a-z0-9_]{1,30}$")
 # No configured upstream may have this id, so a tool whose upstream is this one can only be one of
 # Keystone's own, and the pipeline can treat it as such without asking the registry.
 VIRTUAL_UPSTREAM = "keystone"
-RESERVED_UPSTREAM_IDS = frozenset({VIRTUAL_UPSTREAM})
+# The pseudo-upstreams that hold the provider keys of the LLM proxy as static credentials in the
+# vault (KS-806). They are rows so that a credential has an upstream to belong to, and they are
+# never synced, probed or listed: no tool is called by their names.
+LLM_UPSTREAM_IDS = frozenset({"llm_anthropic", "llm_openai"})
+RESERVED_UPSTREAM_IDS = frozenset({VIRTUAL_UPSTREAM, *LLM_UPSTREAM_IDS})
 
 
 # The upstreams that Keystone runs itself, named in the config with `transport: builtin` (KS-802).
@@ -35,6 +39,11 @@ def is_virtual(tool: ToolRef) -> bool:
 
 def check_upstream_id(upstream_id: str) -> None:
     """Raise ValueError unless `upstream_id` can be the first half of an exposed tool name."""
+    if upstream_id in LLM_UPSTREAM_IDS:
+        raise ValueError(
+            f"invalid upstream id {upstream_id!r}: it is reserved for the provider keys of the "
+            "LLM proxy"
+        )
     if is_reserved(upstream_id):
         raise ValueError(
             f"invalid upstream id {upstream_id!r}: it is reserved for Keystone's own tools "

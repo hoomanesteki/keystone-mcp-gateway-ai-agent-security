@@ -9,8 +9,8 @@ protected than logs, and a user label would also make the series count grow with
 
 The metrics of Phases 6 to 8 (approvals, the scanner, rate limits, budgets, LLM tokens) were
 declared before anything set them, so the dashboard could name them from the start. Approvals
-(KS-604), the scanner (KS-704) and rate limits (KS-804) are set now; budgets and LLM tokens
-wait for the rest of Phase 8.
+(KS-604), the scanner (KS-704), rate limits (KS-804), budgets (KS-805) and LLM tokens (KS-806) are
+all set now.
 """
 
 from __future__ import annotations
@@ -64,6 +64,12 @@ SCAN_STAGES = ("rules", "classifier", "action")
 RATE_SCOPES = ("per_tenant", "per_user", "per_agent", "per_tool")
 # The scopes of a budget (settings.BudgetConfig).
 BUDGET_SCOPES = ("tenant", "user", "agent")
+# What the tokens of a model request are counted as. A cache token is priced apart from a fresh
+# one, so it is counted apart too.
+TOKEN_DIRECTIONS = ("input", "output", "cache_read", "cache_write")
+# The label of a model that the proxy let through with no price (llm_proxy.allow_unpriced). The
+# name the caller sent is not used: callers choose it, and the set of labels must stay bounded.
+UNPRICED = "unpriced"
 
 
 @dataclass(frozen=True)
@@ -186,7 +192,6 @@ class Metrics:
             "Calls refused by a rate limit, by tenant and scope",
             ["tenant", "scope"],
         )
-        # Declared for Phase 8. Nothing sets this yet.
         # Set by the budget service (KS-805): for each tenant and scope, the highest spend in the
         # current window among the budgets of that scope.
         self.budget_spent_usd = self._gauge(
@@ -194,11 +199,17 @@ class Metrics:
             "Highest spend in the current window among the budgets of a scope, in US dollars",
             ["tenant", "scope"],
         )
+        # Set by the LLM proxy (KS-806) from the provider's own count. `model` is the name of the
+        # entry in the price list that priced the request, which may be a pattern such as
+        # some-family-*, so the set of values is the size of that file and not the number of
+        # models callers name.
         self.llm_tokens = self._counter(
             "keystone_llm_tokens",
-            "LLM tokens used, by model and direction (Phase 8)",
+            "Tokens used by model requests through the LLM proxy, by price list entry and "
+            "direction (input, output, cache_read, cache_write)",
             ["tenant", "model", "direction"],
         )
+        self._model = _Known(None, OTHER)
 
     # -- declaring
 
@@ -243,6 +254,14 @@ class Metrics:
         self.budget_spent_usd.labels(
             tenant=self._tenant(tenant), scope=scope if scope in BUDGET_SCOPES else OTHER
         ).set(usd)
+
+    def llm_tokens_used(self, tenant: str, model: str, counts: Mapping[str, int]) -> None:
+        """The tokens of one model request, by direction (TOKEN_DIRECTIONS). A direction with no
+        tokens leaves its series alone, so a model that was never used has none."""
+        labels = {"tenant": self._tenant(tenant), "model": self._model(model)}
+        for direction, count in counts.items():
+            if count > 0 and direction in TOKEN_DIRECTIONS:
+                self.llm_tokens.labels(direction=direction, **labels).inc(count)
 
     def session_tainted(self, tenant: str) -> None:
         """An injection tainted a session that was not tainted when the call began."""

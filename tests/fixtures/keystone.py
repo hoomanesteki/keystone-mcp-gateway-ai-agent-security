@@ -37,6 +37,7 @@ from keystone.settings import (
 from tests.fixtures.approvals import approval_service, approver  # noqa: F401
 from tests.fixtures.audit import AuditView
 from tests.fixtures.fake_idp import FakeIdp, fake_idp  # noqa: F401
+from tests.fixtures.fake_llm import fake_llm, fake_prices  # noqa: F401
 from tests.fixtures.policies import POLICY_ROOT, ROOT
 from tests.fixtures.redis import redis, test_redis_url  # noqa: F401
 from tests.fixtures.sandbox import (  # noqa: F401
