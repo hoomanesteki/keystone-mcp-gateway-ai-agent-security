@@ -54,6 +54,14 @@ from keystone.settings import ScannerSettings
 RESULTS_DOC = REPO / "docs" / "results.md"
 START = "<!-- detector:start -->"
 END = "<!-- detector:end -->"
+# The kinds of text of the dev diagnosis, in the order the table gives them.
+KINDS_OF_TEXT = (
+    "documents with an attack",
+    "harmless documents",
+    "hard negatives",
+    "public injections",
+    "harmless public prompts",
+)
 # The order of the rows of a table, and the configs that make a row of their own.
 ORDER = ("rules", "previous_classifier", "previous_combined", "classifier", "combined")
 # What Phase 7 shipped: the higher of the two scores over windows of 512 tokens (510 of the text).
@@ -315,7 +323,8 @@ def combination_sections(record: Mapping[str, Any] | None) -> list[str]:
             *(f"Model, windows of {k.split('/')[0]}" for k in shapes),
         ]
         body = []
-        for kind, info in diagnosis.items():
+        for kind in [k for k in KINDS_OF_TEXT if k in diagnosis]:
+            info = diagnosis[kind]
             body.append(
                 [
                     kind,
@@ -350,8 +359,8 @@ def combination_sections(record: Mapping[str, Any] | None) -> list[str]:
             "",
         ]
     out += [
-        f"I picked windows of {size} tokens with an overlap of {overlap} and a model weight of "
-        f"{weight} by a rule written before the numbers: of the joins the "
+        f"The windows of {size} tokens with an overlap of {overlap} and the model weight of "
+        f"{weight} were picked by a rule written before the numbers: of the joins the "
         "gateway can run, the candidates within the noise of the best recall on dev (7 of the "
         f"{record['injections']} injections) are tied, and of those the larger window wins. "
         "The test split was scored once, with that choice.",

@@ -147,6 +147,27 @@ on shared CPUs should expect the timeout to cut off more, and should measure its
 To let the model read longer outputs, raise `scanner.classifier_timeout_ms` (at most 10,000). It
 adds that much to the call, since the scan waits for the model before the result goes back.
 
+### After KS-792: windows of 128 tokens
+
+The model reads a long text in windows of 128 tokens of the text, overlapping by 64, since KS-792
+(ADR-0011); the tables above are for windows of 510. `scripts/bench_scanner.py --classifier
+--skip-rules` on the same machine with the new default, 30 timings for each size, on the day of the
+test report (a load average of 4 while it ran):
+
+| Text | Characters | Bucket | Wall p50 ms | Wall p95 ms | CPU p50 ms | Over 300 ms |
+|---|---|---|---|---|---|---|
+| model alone | 400 | under 500 tokens | 72 | 120 | 89 | 0 of 30 |
+| model alone | 1,600 | under 500 tokens | 311 | 610 | 479 | 18 of 30 |
+| model alone | 4,000 | 500 to 2,000 | 924 | 1,220 | 1,427 | 30 of 30 |
+| model alone | 10,240 | over 2,000 | 2,266 | 2,809 | 3,562 | 30 of 30 |
+| model alone | 20,000 | over 2,000 | 2,299 | 2,738 | 3,686 | 30 of 30 |
+
+A text of N tokens is now N/64 windows of 130 tokens, about twice the tokens a window of 510 reads,
+so a text takes two to three times as long as before and the default wait of 300 ms covers about
+1,500 characters, where it covered 3,500. A text of more than 32 windows (about 2,000 tokens) is
+sampled across its length, which is why 10,240 and 20,000 characters cost the same. The rules-first
+join does not ask the model about a text the rules flag, a third of the texts of the evaluation.
+
 ### What the model sees in the planted attacks
 
 `scripts/bench_scanner.py --scores`, with the model and the rules together (the final score is the

@@ -594,7 +594,7 @@ def test_the_dev_section_gives_the_table_the_diagnosis_and_the_choice() -> None:
     assert "| documents with an attack | 100 | 78% | 36% | 64% |" in lines
     assert "finds +0.15 (95% +0.10 to +0.20) of the injections more than the rules alone" in lines
     assert "and the higher of the two over windows of 510 finds -0.36" in lines
-    assert "I picked windows of 128 tokens with an overlap of 64 and a model weight of 0.7" in lines
+    assert "The windows of 128 tokens with an overlap of 64 and the model weight of 0.7" in lines
     assert "(7 of the 463 injections)" in lines
 
 

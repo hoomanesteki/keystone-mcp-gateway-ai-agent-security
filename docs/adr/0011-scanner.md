@@ -386,6 +386,58 @@ Community License, behind a form that asks for a full legal name, a date of birt
 That cannot be accepted without a login and a person's name, so I did not accept it. The entry in
 `SPECS` stays as it was, and its labels stay unverified.
 
+*KS-792 result.* The test split was scored once with the choice, on 2026-10-24 at commit
+`6eb2e45` with a clean tree (`eval/results/detector-2026-10-24.json`, and the line of
+`eval/results/test-runs.jsonl`). The report scores it in three passes of the scanner, so that the
+change is measured and not told. Recall at a false positive rate of 5 percent or less:
+
+| Scanner | Recall (95%) | Documents | Public prompts |
+|---|---|---|---|
+| The rules alone | 0.59 (0.54 to 0.63) | 0.68 | 0.09 |
+| Phase 7: the higher of the two, windows of 510 | 0.35 (0.31 to 0.39) | 0.12 | 0.73 |
+| The model alone, windows of 128 | 0.52 (0.48 to 0.56) | 0.28 | 0.72 |
+| Rules first, then the model, windows of 128 | **0.71 (0.67 to 0.74)** | 0.82 | 0.75 |
+
+The pass of Phase 7 found 0.3481 again, the figure of the gate report, which shows that the two runs
+measure the same thing. The join is 11.9 points above the rules alone, eight times the bar I set
+(1.5 points), so nothing in the rule I wrote down applies and **the default stays**. The dev
+number (0.67) was not an upper estimate this time: the test split gave 0.71. M4, a recall of 0.90,
+is still missed, by 19 points. The remaining misses are the attacks the rules do not name and the
+model is not sure of: `tool_knowledge` and `fake_error_recovery` are found 0.47 and 0.52 of the time
+(the rules alone find 0.29 and 0.24), and every other template is found 0.97 to 1.00. What stands in
+the way is the hard negatives, which no reading of the shape of a text can separate from an attack
+that it quotes. The test split has 66 of them among its 453 harmless texts, and the join flags 22:
+4.9 percent of all the harmless texts before one other is counted, against the 5 percent allowed. The
+rules alone flag 16, which is their whole false positive rate of 0.035.
+
+What the join costs, on the same test split:
+
+- **More warnings.** At the flag threshold (0.5) the join flags 0.78 of the injections at a false
+  positive rate of 0.082 (precision 0.92); the rules alone flag 0.59 at 0.035 (0.95), and the join of
+  Phase 7 flagged 0.73 at 0.071 (0.92). Of the 66 hard negatives, 22 are flagged, against 16 for the
+  rules and 19 for Phase 7. Windows of 128 flag 3 of the 16 how-to guides that windows of 510 did not,
+  and 15 of the 15 security articles.
+- **A session is tainted by fewer attacks.** The model cannot taint, so the taint is the rules': a
+  recall of 0.25 at a precision of 0.99 and a false positive rate of 0.002. The join of Phase 7
+  tainted 0.53 of the injections at a precision of 0.90 and a false positive rate of 0.064. The model's
+  sure verdicts used to taint on 28 points more of the attacks and on 6 percent of the harmless texts;
+  now they warn. The Rule of Two is what stands behind an attack that the rules do not see, and the
+  red-team runs (KS-902) measure what that comes to.
+- **Time.** One text at a time with all the time the model wants, p50 and p95 in milliseconds by
+  length: under 500 tokens 60 and 299 (94 and 268 in Phase 7), 500 to 2,000 tokens 479 and 1,939
+  (1,058 and 1,715), over 2,000 tokens 3.3 and 3,563 (3,091 and 6,899). The medians fall because the
+  model is not asked about a third of the texts (321 of 973), and most of the 50 texts over 2,000
+  tokens are among them. A text of a few hundred tokens or more that does go to the model takes two to
+  three times as long as with windows of 510 (`docs/spikes/scanner.md`).
+- **The wait.** At the default wait of 300 ms, 12 percent of the scans fall back to the rules (19
+  percent in Phase 7), and the recall at 5 percent is 0.66, against 0.59 for the rules. The join of
+  Phase 7 reads 0.71 under the same wait. That row was already called unstable in the Phase 7 report,
+  and its height is the wait: it takes the model away from the long texts, where some of its confident
+  mistakes are (the CSV reports), and leaves the rules there. The rules-first join keeps those
+  mistakes small by weight and the model on the long texts that it can finish. M4 is read from the
+  unhurried numbers, as in Phase 7, and a deployment that wants the model to read longer texts raises
+  `scanner.classifier_timeout_ms` and pays that time.
+
 **A contract changes.** `ScanResult.action` (plan section 3.6) gains `"error"` beside `pass`,
 `annotate`, `redact` and `block`, so that the audit record can say `scan_action="error"`. Nothing
 else in `core` changes. The audit column is text and takes the value as it is.
@@ -402,15 +454,17 @@ else in `core` changes. The audit column is text and takes the value as it is.
 - A business email that says "please send the invoice to bob@example.com" scores 0.4 on
   `tool_directive` alone, and stays benign. With "do not tell the user" in the same text it is
   suspicious. That is the weighting working as intended and also its cost.
-- At the default timeout the model reads about 3,500 characters on this machine, and anything
-  longer is scored by the rules alone. Latency is close to linear in length (about 0.08 ms of wall
-  time and 0.14 to 0.2 ms of CPU for each character) and five to seven times worse on a busy
-  machine (`docs/spikes/scanner.md`). `scanner.classifier_timeout_ms` is the lever, and each
+- At the default timeout the model reads about 1,500 characters on this machine with windows of 128
+  tokens (3,500 with windows of 510, up to Phase 8), and anything longer is scored by the rules
+  alone. Latency is close to linear in length up to 32 windows and five to seven times worse on a
+  busy machine (`docs/spikes/scanner.md`). `scanner.classifier_timeout_ms` is the lever, and each
   millisecond of it can be added to a call.
 - The model is sure of a short text that is only an attack, and often loses the same instruction
-  inside a longer ordinary email or page (0.00 to 0.004 on four of the six planted pieces). The
-  rules caught three of those four. One planted email, m15, is missed by both. The final score is a
-  maximum because the two miss different things.
+  inside a longer ordinary email or page (0.00 to 0.004 on four of the six planted pieces, with
+  windows of 510 tokens; windows of 128 lose less, KS-792). The rules caught three of those four. One
+  planted email, m15, is missed by both. Phase 7 made the final score a maximum because the two miss
+  different things; the rules-first join keeps that and does not let the model's mistakes outrank the
+  rules.
 - The model is English only and can be wrong about imperative text: one how-to sentence scored
   0.9996. A false positive costs a warning wrapped round the output for a low-risk tool, and the
   redaction or the withholding of a high-risk or critical one (KS-703), so the evaluation reports
@@ -430,9 +484,9 @@ else in `core` changes. The audit column is text and takes the value as it is.
 - The lower-case views make the rules about twice as fast and make their places in the text
   unreliable for cutting. `hidden_unicode` and `markdown_exfil` are the rules whose places are
   used to cut a text (KS-703), and they are run again on the text as it came.
-- On the test split the higher of the two scores finds fewer attacks than the rules alone at a
-  false positive rate of 5 percent (0.35 against 0.59), although it ranks best over all
-  thresholds (ROC AUC 0.884). The model flags 11 of 197 harmless documents and 18 of 66 hard
+- In Phase 7, on the test split, the higher of the two scores found fewer attacks than the rules
+  alone at a false positive rate of 5 percent (0.35 against 0.59), although it ranked best over all
+  thresholds (ROC AUC 0.884). KS-792 replaced it (above). The model flags 11 of 197 harmless documents and 18 of 66 hard
   negatives at 0.5, and a maximum keeps every flag the model gives. Dev says the same (0.16
   against 0.52). On dev the model gives 0.95 or more to 42 of 456 harmless texts, 30 of them hard
   negatives, which is more than the 5 percent the metric allows, so the threshold of the model rows
@@ -443,14 +497,17 @@ else in `core` changes. The audit column is text and takes the value as it is.
   the report says so under that table.
 - On the public prompts the rules reach a recall of 0.09 at 5 percent and the model 0.71; on the
   generated documents it is 0.68 and 0.12. The two miss different things, which is why there are
-  two, and also why a maximum is the blunt way to join them.
+  two, and also why a maximum is the blunt way to join them. With windows of 128 the model alone
+  finds 0.28 of the documents, and rules first, then the model, finds 0.82 of them and 0.75 of the
+  public prompts.
 
 ## Revisit when
 
 The evaluation shows a rule that is wrong more often than right at its weight, the gateway needs
 to scan outputs of several megabytes (then the rules move out of the process, or the scan is split
 and yields between pieces), or the model is too slow for the outputs a deployment has (a quantized
-or ONNX copy, or a smaller model, would be measured against the same dev split first), or the
-maximum is replaced by another way to join the scores. The rules alone beat the maximum at 5
-percent on both splits, so a join that asks the rules to agree before a session is tainted is the
-first thing to try, and it would be tuned on dev.
+or ONNX copy, or a smaller model, would be measured against the same dev split first). Or the model
+is to taint sessions again, which needs a weight of 0.85 or more and a precision that the model has
+not shown (0.87 on dev); or a scan that runs out of time is to keep the windows it had finished
+(the highest score so far, which can only be lower than the whole) instead of dropping the model; or
+a stacked model learned on a larger dev split replaces the weight. Each would be tuned on dev first.
