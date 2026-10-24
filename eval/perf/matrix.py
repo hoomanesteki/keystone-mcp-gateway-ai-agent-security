@@ -40,7 +40,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -416,6 +416,22 @@ def token_count(size: int) -> int | None:
         return None
 
 
+def show(key: str, run_: Mapping[str, Any]) -> None:
+    """One line for a run, as soon as it is made, so that a run that dies later has told what the
+    earlier ones measured."""
+    summary = run_["summary"]
+    if not summary:
+        print(f"{key:12} {run_['size']:5} B  no call was timed: {run_['errors']}", flush=True)
+        return
+    ms = " ".join(f"p{q} {summary[f'p{q}_ms']:8.1f}" for q in (50, 95, 99))
+    print(
+        f"{key:12} {run_['size']:5} B  {run_['sessions']:3} x {run_['calls_each']:<3} {ms} ms"
+        f"  {summary['throughput']:7.1f}/s  errors {summary['errors']}"
+        + ("  (stopped early)" if run_["stopped_early"] else ""),
+        flush=True,
+    )
+
+
 async def matrix(
     targets: Sequence[Target],
     sizes: Sequence[int],
@@ -426,10 +442,15 @@ async def matrix(
     quiet: bool = True,
     restart: bool = True,
     sample: bool = True,
+    checkpoint: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    """Make the runs and return the document. `checkpoint` is called with the document after
+    every run, so that a file on disk always holds what has been measured so far, and says
+    `complete: false` until the last run is made."""
     started = datetime.now(UTC)
     document: dict[str, Any] = {
         "version": 1,
+        "complete": False,
         "date": started.date().isoformat(),
         "started": started.isoformat(timespec="seconds"),
         "machine": machine_facts(),
@@ -445,30 +466,44 @@ async def matrix(
         },
         "targets": {},
     }
-    for target in targets:
-        gateway = configure(target) if restart and not target.direct else None
-        conditions = wait_until_quiet() if quiet else None
-        entry: dict[str, Any] = {
-            "label": target.label,
-            "gateway": gateway,
-            "conditions": conditions,
-            "runs": [],
-            "sequential": [],
-        }
-        document["targets"][target.key] = entry
-        for size in sizes:
-            print(
-                f"== {target.key}, {size} bytes, {sessions} x {calls}", file=sys.stderr, flush=True
-            )
-            entry["runs"].append(await measure(target, size, sessions, calls, processes, sample))
-            if sequential:
-                print(
-                    f"== {target.key}, {size} bytes, 1 x {sequential}", file=sys.stderr, flush=True
+
+    def save() -> None:
+        if checkpoint:
+            checkpoint(document)
+
+    try:
+        for target in targets:
+            gateway = configure(target) if restart and not target.direct else None
+            conditions = wait_until_quiet() if quiet else None
+            entry: dict[str, Any] = {
+                "label": target.label,
+                "gateway": gateway,
+                "conditions": conditions,
+                "runs": [],
+                "sequential": [],
+            }
+            document["targets"][target.key] = entry
+            for size in sizes:
+                print(f"== {target.key}, {size} bytes, {sessions} x {calls}", file=sys.stderr)
+                entry["runs"].append(
+                    await measure(target, size, sessions, calls, processes, sample)
                 )
-                entry["sequential"].append(
-                    await measure(target, size, 1, sequential, 1, sample=False)
-                )
+                show(target.key, entry["runs"][-1])
+                save()
+                if sequential:
+                    print(f"== {target.key}, {size} bytes, 1 x {sequential}", file=sys.stderr)
+                    entry["sequential"].append(
+                        await measure(target, size, 1, sequential, 1, sample=False)
+                    )
+                    show(target.key, entry["sequential"][-1])
+                    save()
+    except BaseException as error:
+        document["error"] = f"{type(error).__name__}: {error}"
+        save()
+        raise
     document["finished"] = datetime.now(UTC).isoformat(timespec="seconds")
+    document["complete"] = True
+    save()
     return document
 
 
@@ -503,26 +538,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"refused: {out} exists, and a result file is never written over", file=sys.stderr
             )
             return 2
+
+        def write(partial: dict[str, Any]) -> None:
+            out.write_text(json.dumps(partial), encoding="utf-8")
+
         try:
-            document = asyncio.run(
+            asyncio.run(
                 matrix(
-                    targets, args.sizes, args.sessions, args.calls, args.sequential, args.processes
+                    targets,
+                    args.sizes,
+                    args.sessions,
+                    args.calls,
+                    args.sequential,
+                    args.processes,
+                    checkpoint=write,
                 )
             )
         finally:
             restore()
         failures = []
-        out.write_text(json.dumps(document), encoding="utf-8")
         print(f"written to {out}", file=sys.stderr)
-    for key, entry in document["targets"].items():
-        for run_ in entry["runs"]:
-            summary = run_["summary"]
-            if summary:
-                ms = " ".join(f"p{q} {summary[f'p{q}_ms']:8.1f}" for q in (50, 95, 99))
-                print(
-                    f"{key:12} {run_['size']:5} B  {ms} ms  {summary['throughput']:7.1f}/s"
-                    f"  errors {summary['errors']}"
-                )
     for failure in failures:
         print(f"FAILED {failure}", file=sys.stderr)
     return 1 if failures else 0

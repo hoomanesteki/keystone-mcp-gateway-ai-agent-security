@@ -57,7 +57,9 @@ CALL_TIMEOUT_S = 120.0
 MAX_RUN_S = 600.0
 # A token of the local realm lives 300 s.
 REFRESH_S = 120.0
-SETUP_TIMEOUT_S = 180.0
+# Opening 200 sessions and making their calls that are not counted, through a gateway that
+# answers ten calls a second, takes minutes.
+SETUP_TIMEOUT_S = 600.0
 
 
 class Bearer(httpx2.Auth):
@@ -274,7 +276,8 @@ async def run_children(
             writer.write(f"{GO}\n".encode())
             await writer.drain()
         answers = [
-            json.loads(await read_line(pipes(child)[1], CALL_TIMEOUT_S * 4)) for child in children
+            json.loads(await read_line(pipes(child)[1], spec.max_s + CALL_TIMEOUT_S + 60))
+            for child in children
         ]
         for child in children:
             await child.wait()

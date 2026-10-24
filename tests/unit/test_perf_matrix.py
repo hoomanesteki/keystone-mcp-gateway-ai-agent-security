@@ -5,6 +5,7 @@ to `Settings` the way compose would hand them to Keystone, and the commands the 
 are captured and looked at.
 """
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -211,3 +212,110 @@ def test_the_matrix_waits_for_a_quiet_host_and_says_when_it_never_came(
     # A host that cannot say how idle it is is not held up.
     monkeypatch.setattr(matrix, "idle_percent", lambda: None)
     assert wait_until_quiet(max_wait_s=1)["quiet"] is True
+
+
+def fake_measure(**more: Any) -> Any:
+    async def measure(
+        target: Target, size: int, sessions: int, calls: int, processes: int, sample: bool = True
+    ) -> dict[str, Any]:
+        if more.get("fail_at") == (target.key, size, sessions):
+            raise TimeoutError("a load process did not answer")
+        return {
+            "size": size,
+            "sessions": sessions,
+            "calls_each": calls,
+            "summary": {
+                "p50_ms": 1.0,
+                "p95_ms": 2.0,
+                "p99_ms": 3.0,
+                "throughput": 9.0,
+                "errors": 0,
+            },
+            "errors": {},
+            "stopped_early": False,
+        }
+
+    return measure
+
+
+def stub_the_stack(monkeypatch: pytest.MonkeyPatch, **more: Any) -> None:
+    monkeypatch.setattr(matrix, "measure", fake_measure(**more))
+    monkeypatch.setattr(matrix, "configure", lambda target: {"profile": "full"})
+    monkeypatch.setattr(matrix, "machine_facts", lambda: {"cpu": "x"})
+    monkeypatch.setattr(matrix, "token_count", lambda size: size // 5)
+    monkeypatch.setattr(matrix, "limits", lambda: {"cpus": 4.0, "memory_bytes": 4})
+
+
+async def test_the_matrix_writes_what_it_has_after_every_run_and_says_when_it_is_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_the_stack(monkeypatch)
+    written: list[dict[str, Any]] = []
+
+    def checkpoint(document: dict[str, Any]) -> None:
+        written.append(
+            {
+                "complete": document["complete"],
+                "runs": sum(len(e["runs"]) for e in document["targets"].values()),
+                "sequential": sum(len(e["sequential"]) for e in document["targets"].values()),
+            }
+        )
+
+    document = await matrix.matrix(
+        [BY_KEY["direct"], BY_KEY["scanner-off"]], [1024, 8192], 200, 20, 200, 4,
+        quiet=False, checkpoint=checkpoint,
+    )  # fmt: skip
+
+    # Four runs of 200 sessions and four of one session, one write after each, then the last.
+    assert len(written) == 9
+    assert all(w["complete"] is False for w in written[:-1]) and written[-1]["complete"] is True
+    assert (written[0]["runs"], written[0]["sequential"]) == (1, 0)
+    assert document["complete"] is True and "error" not in document
+    assert document["settings"]["payload_tokens"] == {"1024": 204, "8192": 1638}
+    assert document["settings"]["container"] == {"cpus": 4.0, "memory_bytes": 4}
+
+
+async def test_a_matrix_that_dies_leaves_the_file_with_what_it_measured_and_why_it_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_the_stack(monkeypatch, fail_at=("scanner-off", 8192, 200))
+    saved: list[dict[str, Any]] = []
+
+    with pytest.raises(TimeoutError):
+        await matrix.matrix(
+            [BY_KEY["direct"], BY_KEY["scanner-off"]], [1024, 8192], 200, 20, 0, 4,
+            quiet=False, checkpoint=lambda d: saved.append(json.loads(json.dumps(d))),
+        )  # fmt: skip
+
+    last = saved[-1]
+    assert last["complete"] is False
+    assert last["error"] == "TimeoutError: a load process did not answer"
+    assert len(last["targets"]["direct"]["runs"]) == 2
+    assert len(last["targets"]["scanner-off"]["runs"]) == 1  # the 1 KB run is kept
+
+
+def test_a_run_is_shown_on_one_line_as_soon_as_it_is_made(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_ = {
+        "size": 1024,
+        "sessions": 200,
+        "calls_each": 20,
+        "summary": {
+            "p50_ms": 12.5,
+            "p95_ms": 30.0,
+            "p99_ms": 41.25,
+            "throughput": 99.5,
+            "errors": 0,
+        },
+        "errors": {},
+        "stopped_early": True,
+    }
+
+    matrix.show("scanner-off", run_)
+    matrix.show("rules-only", {**run_, "summary": None, "errors": {"open: ConnectError": 200}})
+
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("scanner-off") and "p50     12.5" in out[0]
+    assert "99.5/s  errors 0  (stopped early)" in out[0]
+    assert "no call was timed: {'open: ConnectError': 200}" in out[1]

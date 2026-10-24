@@ -322,6 +322,19 @@ def reading(document: Mapping[str, Any]) -> list[str]:
     return [f"- {line}" for line in out]
 
 
+def incomplete_text(document: Mapping[str, Any]) -> list[str]:
+    """A warning, in front of everything, for a file the matrix did not finish."""
+    if document.get("complete", True):
+        return []
+    error = document.get("error")
+    return [
+        "**Not complete**: the matrix ended before its last run"
+        + (f" ({error})" if error else "")
+        + ". The targets and payloads it did not reach are left out.",
+        "",
+    ]
+
+
 def machine_text(machine: Mapping[str, Any], box: Mapping[str, Any]) -> str:
     """The machine, the Docker VM and the limits of the container, in a paragraph."""
     vm = machine.get("docker_vm") or {}
@@ -353,6 +366,7 @@ def render_section(document: Mapping[str, Any], source: Path | None = None) -> s
         f"Measured on {document['date']} at commit {where}, by `python -m eval.perf.matrix`. Every "
         f"number below is computed from {named}, which holds the latency of every call.",
         "",
+        *incomplete_text(document),
         machine_text(machine, box),
         "",
         f"The run: {settings['sessions']} MCP sessions opened at once, each making "

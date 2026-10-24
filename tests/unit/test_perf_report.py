@@ -292,6 +292,24 @@ def test_a_target_that_was_not_run_is_left_out_and_not_filled_in() -> None:
     assert "None" not in section and "nan" not in section.lower()
 
 
+def test_a_file_the_matrix_did_not_finish_says_so_in_front_of_everything() -> None:
+    doc = document()
+    doc["complete"] = False
+    doc["error"] = "TimeoutError: a load process did not answer"
+    del doc["targets"]["classifier"]
+
+    section = render_section(doc)
+
+    assert (
+        "**Not complete**: the matrix ended before its last run (TimeoutError: a load process"
+        in (section.split("### Against the targets")[0])
+    )
+    assert "Keystone full, classifier" not in section
+    complete = dict(document(), complete=True)
+    assert "Not complete" not in render_section(complete)
+    assert "Not complete" not in render_section(document())  # an older file has no flag
+
+
 def test_the_text_follows_the_voice_rules() -> None:
     import lint_prose
 
