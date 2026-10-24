@@ -850,8 +850,15 @@ def repeats_reading(chosen: Sequence[ResultFile], earlier: Sequence[ResultFile])
     return [first + " " + second]
 
 
+def without_session(file: ResultFile) -> int:
+    """How many runs of a file have no flags, taint or scores of a session. Where it is more than
+    none the session of a run was not found in the gateway, and what is said of sessions leaves
+    those runs out."""
+    return sum(1 for run in file.runs if run.get("session") is None)
+
+
 def provenance_table(files: Sequence[ResultFile]) -> list[str]:
-    header = ["File", "Config", "Commit", "Started", "Runs", "Complete"]
+    header = ["File", "Config", "Commit", "Started", "Runs", "Without a session", "Complete"]
     rows = [
         [
             f"`{short(f.path)}`",
@@ -859,6 +866,7 @@ def provenance_table(files: Sequence[ResultFile]) -> list[str]:
             commit_text(f),
             str(f.start.get("at", "")),
             str(len(f.runs)),
+            str(without_session(f)),
             "yes" if f.complete else "no: it ended early or is missing runs",
         ]
         for f in files

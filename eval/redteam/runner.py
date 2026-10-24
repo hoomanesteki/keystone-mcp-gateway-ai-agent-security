@@ -43,7 +43,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -129,6 +129,9 @@ class Outcome:
     turns: int = 0
     stopped: str = "done"
     request_ids: list[str] = field(default_factory=list)
+    # The id Keystone gave each tool call the agent made, which is how the session of the run is
+    # found in the audit log: by its calls, and not by when it began.
+    call_ids: list[str] = field(default_factory=list)
     obeyed: int = 0
     detail: str | None = None
     input_tokens: int = 0
@@ -164,6 +167,7 @@ class NaiveAgent:
             output="\n".join(result_text(entry) for entry in transcript.calls),
             tool_calls=len(transcript.calls),
             error_codes=[c.error_code for c in transcript.calls if c.error_code],
+            call_ids=[c.call_id for c in transcript.calls if c.call_id],
             obeyed=sum(1 for c in transcript.calls if isinstance(c, Injected)),
         )
 
@@ -191,6 +195,7 @@ class LlmAgent:
             output=run.output,
             tool_calls=len(run.calls),
             error_codes=run.error_codes,
+            call_ids=[c.call_id for c in run.calls if c.call_id],
             turns=run.turns,
             stopped=run.stopped,
             request_ids=run.request_ids,
@@ -205,6 +210,8 @@ class LlmAgent:
 
 # How long a gateway that has just started is given to load the model of its scanner.
 MODEL_WAIT_S = 180.0
+# How long the record of a call is waited for in the audit log, which is written in batches.
+AUDIT_WAIT_S = 3.0
 
 
 def read_info(page: str) -> tuple[dict[str, str] | None, dict[str, bool]]:
@@ -293,33 +300,43 @@ def check_config(config: Config, facts: Mapping[str, Any], *, model: bool = True
 
 
 async def session_facts(
-    target: Target, client: httpx.AsyncClient, since: datetime
+    target: Target, client: httpx.AsyncClient, call_ids: Sequence[str]
 ) -> dict[str, Any] | None:
-    """The flags and the taint of the session the run opened: the newest session of olivia through
-    ops-agent that began after `since`, and the score the scanner gave each output it read in it
-    (from the audit log). None if the gateway shows no session."""
+    """The flags and the taint of the session the run opened, and the score the scanner gave each
+    output it read in it (from the audit log). The session is the one of the last call the agent
+    made, found in the audit log by the id Keystone gave the call, so that no clock is compared.
+    The audit writer batches for a few hundredths of a second, so the record of the last call is
+    waited for, and with it those before it. None if the agent made no call or the gateway shows
+    no session for it."""
+    if not call_ids:
+        return None
     token = await anyio.to_thread.run_sync(target.tokens.admin)
     headers = {"Authorization": f"Bearer {token}"}
-    answer = await client.get(
-        f"{target.base_url.rstrip('/')}{API}/sessions?limit=200", headers=headers
-    )
-    if answer.status_code != 200:
+    base = target.base_url.rstrip("/")
+    record = None
+    deadline = time.monotonic() + AUDIT_WAIT_S
+    while record is None:
+        found = await client.get(
+            f"{base}{API}/audit", params={"call_id": call_ids[-1], "limit": 1}, headers=headers
+        )
+        if found.status_code == 200 and found.json()["items"]:
+            record = found.json()["items"][0]
+        elif time.monotonic() >= deadline:
+            return None
+        else:
+            await anyio.sleep(0.05)
+    session_id = record["session_id"]
+    listing = await client.get(f"{base}{API}/sessions?limit=200", headers=headers)
+    if listing.status_code != 200:
         return None
-    mine = [
-        s
-        for s in answer.json()
-        if s["user_id"] == "olivia"
-        and s["agent_id"] == "ops-agent"
-        and datetime.fromisoformat(s["created_at"]) >= since
-    ]
-    if not mine:
+    session = next((s for s in listing.json() if s["session_id"] == session_id), None)
+    if session is None:
         return None
-    newest = max(mine, key=lambda s: s["created_at"])
     return {
-        "flags": newest["flags"],
-        "tainted": newest["tainted"],
-        "calls": newest["call_count"],
-        "scans": await scan_facts(target, client, newest["session_id"], headers),
+        "flags": session["flags"],
+        "tainted": session["tainted"],
+        "calls": session["call_count"],
+        "scans": await scan_facts(target, client, session_id, headers),
     }
 
 
@@ -374,8 +391,7 @@ async def run_once(
     """Do one run and return its record."""
     await target.witness.areset(scenario.setup.variant)
     started = time.perf_counter()
-    # The gateway's clock and this one are the same machine's, give or take the time to ask.
-    since = datetime.now(UTC) - timedelta(seconds=1)
+    began = datetime.now(UTC)
     outcome = Outcome(output="", tool_calls=0, error_codes=[], stopped="error")
     error: str | None = None
     approver = OracleApprover(client, target.tokens.approver, scenario.expected_actions)
@@ -400,7 +416,7 @@ async def run_once(
         cost = await ledger_cost(target.database_url, outcome.request_ids)
     return {
         "type": "run",
-        "at": since.isoformat(timespec="seconds"),
+        "at": began.isoformat(timespec="seconds"),
         "scenario": scenario.id,
         "task": scenario.task,
         "kind": scenario.kind,
@@ -439,7 +455,7 @@ async def run_once(
         "input_tokens": outcome.input_tokens,
         "output_tokens": outcome.output_tokens,
         "cost_usd": cost,
-        "session": await session_facts(target, client, since),
+        "session": await session_facts(target, client, outcome.call_ids),
         "seconds": round(seconds, 3),
         "error": error or outcome.detail,
     }

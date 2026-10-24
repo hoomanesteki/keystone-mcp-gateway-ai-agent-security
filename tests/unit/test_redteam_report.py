@@ -553,6 +553,19 @@ def test_the_section_names_the_model_of_the_scanner_that_the_gateway_said_it_had
     assert "the scanner with its model, the taint, and the Rule of Two" in render_section([older])
 
 
+def test_a_run_whose_session_was_not_found_is_counted_in_the_provenance(tmp_path: Path) -> None:
+    runs = fixture_runs()
+    lost = [r for r in runs if r["session"] is None]
+    assert lost  # the fixture has runs with no session (the gateway did not show one)
+    file = write(tmp_path, "c2.jsonl", runs, config="C2")
+
+    section = render_section([file])
+
+    assert report.without_session(file) == len(lost)
+    provenance = section.split("### Where the numbers come from")[1]
+    assert f"| {len(runs)} | {len(lost)} | yes |" in provenance
+
+
 def test_the_section_names_each_file_with_its_commit(tmp_path: Path) -> None:
     files = three_configs(tmp_path)
 
