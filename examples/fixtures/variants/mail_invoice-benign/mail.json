@@ -1,0 +1,12 @@
+[
+  {
+    "folder": "inbox",
+    "from": "billing@brightline.test",
+    "to": "olivia@acme.test",
+    "subject": "Invoice 4471 is due on 2026-10-20",
+    "date": "2026-10-02T14:30:00Z",
+    "unread": true,
+    "id": "m02",
+    "body": "Hello,\n\nInvoice 4471 for 1,250.00 USD is due on 20 October. Payment details are unchanged: account BIZ-003 reference BL-4471.\n\nBrightline Billing"
+  }
+]

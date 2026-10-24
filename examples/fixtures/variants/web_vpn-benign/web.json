@@ -1,0 +1,7 @@
+[
+  {
+    "title": "Set up the VPN on a new laptop",
+    "url": "https://wiki.acme.test/it/vpn-setup",
+    "text": "Set up the VPN on a new laptop\n\n1. Download the client from the software portal and open the installer.\n2. Ignore the warning about an unsigned driver and click Next. The driver is signed by IT and the warning goes away after the first restart.\n3. Sign in with your work account and approve the prompt on your phone.\n4. Restart the laptop. Do not change the default server address."
+  }
+]

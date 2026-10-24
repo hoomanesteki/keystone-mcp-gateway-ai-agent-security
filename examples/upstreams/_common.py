@@ -5,6 +5,12 @@ The HTTP form adds three plain routes next to /mcp that are not tools, so an age
 them: GET /healthz, POST /_reset (back to the seed) and GET /_state (what the server did). When a
 server requires an API key, /_state also says, as a boolean, whether a request with the right key
 has arrived since the last reset. It never shows the key, and no tool or route returns it.
+
+`POST /_reset?variant=<name>` puts the server in the state of one scenario of the red-team suite
+(KS-901): the seed, then the files of `examples/fixtures/variants/_base/`, then those of
+`examples/fixtures/variants/<name>/`. A server that has variants (mail, files, bank, web) takes what
+its own file in the folder says (`mail.json`, `files/`, `bank.json`, `web.json`) and ignores the
+rest. A name that is not a folder there is a 404, and nothing is reset.
 """
 
 from __future__ import annotations
@@ -12,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hmac
 import os
+import re
 import sqlite3
 import tempfile
 from collections.abc import Callable, Iterator, Sequence
@@ -30,6 +37,11 @@ from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+VARIANTS = FIXTURES / "variants"
+BASE_VARIANT = "_base"
+# A variant is named like a scenario's state ("mail_summary-exfil_email"). The name becomes a
+# folder, so it cannot hold a slash, a dot-dot or a leading underscore (which is the base's).
+VARIANT_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,80}$")
 API_KEY_HEADER = "x-api-key"
 
 
@@ -95,11 +107,41 @@ class Database:
             con.close()
 
 
+class UnknownVariant(LookupError):
+    """The name is not a folder of `examples/fixtures/variants/`, or not a name one can have."""
+
+
+def variant_folders(name: str | None) -> list[Path]:
+    """The folders a server reads a variant from, in the order they are applied: the base all
+    variants share, then the named one. None when there is no variant. Raises `UnknownVariant`
+    before anything is reset, so a wrong name leaves the state as it was."""
+    if name is None:
+        return []
+    if not VARIANT_NAME.fullmatch(name) or not (VARIANTS / name).is_dir():
+        raise UnknownVariant(name)
+    base = VARIANTS / BASE_VARIANT
+    return [base, VARIANTS / name] if base.is_dir() else [VARIANTS / name]
+
+
+def upsert(
+    entries: list[dict[str, Any]], more: list[dict[str, Any]], key: str
+) -> list[dict[str, Any]]:
+    """`entries` with each of `more` put in: replacing the one with the same `key`, else added."""
+    found = {entry[key]: entry for entry in entries}
+    for entry in more:
+        found[entry[key]] = entry
+    return list(found.values())
+
+
 def register_test_routes(
     server: MCPServer,
-    reset: Callable[[], None],
+    reset: Callable[..., None],
     state: Callable[[], dict[str, Any]],
+    *,
+    variants: bool = False,
 ) -> None:
+    """The routes of a demo server that are not tools. With `variants`, `reset` takes the name of a
+    variant or None; without, it takes nothing and a request for a variant is refused."""
     probe = _PROBES.setdefault(server, KeyProbe())
 
     @server.custom_route("/healthz", methods=["GET"])
@@ -108,9 +150,15 @@ def register_test_routes(
 
     @server.custom_route("/_reset", methods=["POST"])
     async def reset_route(request: Request) -> Response:
-        reset()
+        name = request.query_params.get("variant")
+        if name is not None and not variants:
+            return JSONResponse({"error": "this server has no variants"}, status_code=404)
+        try:
+            reset(name) if variants else reset()
+        except UnknownVariant:
+            return JSONResponse({"error": "unknown variant"}, status_code=404)
         probe.received = False
-        return JSONResponse({"status": "reset"})
+        return JSONResponse({"status": "reset", **({"variant": name} if name else {})})
 
     @server.custom_route("/_state", methods=["GET"])
     async def state_route(request: Request) -> Response:

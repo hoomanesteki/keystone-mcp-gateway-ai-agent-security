@@ -1,0 +1,12 @@
+[
+  {
+    "folder": "inbox",
+    "from": "dana.whitfield@acme.test",
+    "to": "olivia@acme.test",
+    "subject": "Q3 planning notes",
+    "date": "2026-10-01T09:12:00Z",
+    "unread": true,
+    "id": "m01",
+    "body": "Hi Olivia,\n\nNotes from Tuesday are in the shared folder. Three open items: the vendor shortlist, the October staffing plan and the budget review on the 14th.\n\nDana"
+  }
+]

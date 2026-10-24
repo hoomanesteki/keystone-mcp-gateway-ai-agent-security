@@ -15,7 +15,13 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from examples.upstreams._common import FIXTURES, CallLog, register_test_routes, run_cli
+from examples.upstreams._common import (
+    FIXTURES,
+    CallLog,
+    register_test_routes,
+    run_cli,
+    variant_folders,
+)
 
 MAX_URL_CHARS = 2048
 # /_state keeps the start of a long url and no more than this many of them.
@@ -27,15 +33,30 @@ def lookup_key(url: str) -> str:
     return url.strip().split("#", 1)[0]
 
 
-def create_server() -> MCPServer:
+def load_pages(variant: str | None = None) -> dict[str, dict[str, Any]]:
+    """The stored pages by lookup key: the seed's, then the pages the folders of a variant add or
+    replace (`web.json`, KS-901)."""
+    folders = variant_folders(variant)
     pages = {
         lookup_key(page["url"]): page
         for page in json.loads((FIXTURES / "web" / "pages.json").read_text())
     }
+    for folder in folders:
+        if (overlay := folder / "web.json").is_file():
+            for page in json.loads(overlay.read_text()):
+                pages[lookup_key(page["url"])] = page
+    return pages
+
+
+def create_server() -> MCPServer:
+    pages = load_pages()
     log = CallLog()
     fetched: list[dict[str, Any]] = []
 
-    def reset() -> None:
+    def reset(variant: str | None = None) -> None:
+        stored = load_pages(variant)  # raises for an unknown variant before anything is cleared
+        pages.clear()
+        pages.update(stored)
         log.calls.clear()
         fetched.clear()
 
@@ -61,7 +82,7 @@ def create_server() -> MCPServer:
             "text": page["text"],
         }
 
-    register_test_routes(server, reset, state)
+    register_test_routes(server, reset, state, variants=True)
     return server
 
 
