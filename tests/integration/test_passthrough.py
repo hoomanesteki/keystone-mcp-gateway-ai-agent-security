@@ -97,9 +97,10 @@ async def test_the_gateway_says_its_profile_and_whether_it_scans(
     baseline = mail_only(keystone_app_factory, poisoned_mail, profile="passthrough")
     full = mail_only(keystone_app_factory, poisoned_mail)
 
+    # The test apps score by their rules (TEST_SCANNER), so the info says they have no model.
     assert series(baseline, "keystone_gateway_info") == [
-        'keystone_gateway_info{profile="passthrough",scanner="off"} 1.0'
+        'keystone_gateway_info{classifier="none",profile="passthrough",scanner="off"} 1.0'
     ]
     assert series(full, "keystone_gateway_info") == [
-        'keystone_gateway_info{profile="full",scanner="on"} 1.0'
+        'keystone_gateway_info{classifier="none",profile="full",scanner="on"} 1.0'
     ]

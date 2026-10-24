@@ -61,6 +61,8 @@ SCORE_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 # What can fail in a scan: the classifier, the rules, and the action on a flagged output.
 SCAN_STAGES = ("rules", "classifier", "action")
 PROFILES = ("full", "passthrough")
+# The models the scanner can use (settings.Classifier), and "none" for a gateway that has no model.
+CLASSIFIERS = ("none", "protectai-deberta-v2", "prompt-guard-2-86m")
 # The scopes of a rate limit (settings.RateLimitSettings).
 RATE_SCOPES = ("per_tenant", "per_user", "per_agent", "per_tool")
 # The scopes of a budget (settings.BudgetConfig).
@@ -132,8 +134,16 @@ class Metrics:
         # published.
         self.gateway_info = self._gauge(
             "keystone_gateway_info",
-            "How the gateway is set, as labels on a gauge of 1: its profile, and if it scans",
-            ["profile", "scanner"],
+            "How the gateway is set, as labels on a gauge of 1: its profile, if it scans, and "
+            "the model of the scanner that was built (none if it has no model)",
+            ["profile", "scanner", "classifier"],
+        )
+        # The model loads in the background after the gateway starts, and until it has loaded a
+        # scan is answered by the rules alone. A measurement waits for this to be 1.
+        self.classifier_ready = self._gauge(
+            "keystone_scanner_classifier_ready",
+            "1 once the scanner's model is loaded, 0 while it loads or when it could not be",
+            ["classifier"],
         )
         self.tool_call_seconds = self._histogram(
             "keystone_tool_call_duration_seconds",
@@ -323,10 +333,21 @@ class Metrics:
         held = sum(1 for tool in tools.values() if tool.status is ToolStatus.QUARANTINED)
         self.quarantined_tools.labels(tenant=self._tenant(tenant)).set(held)
 
-    def set_info(self, profile: str, scanning: bool) -> None:
-        """Say how this gateway is set. The profile is one of a fixed set."""
+    def set_info(self, profile: str, scanning: bool, classifier: str = "none") -> None:
+        """Say how this gateway is set. The profile and the model are each one of a fixed set. A
+        model that is built is not ready until `classifier_loaded` says so."""
         known = profile if profile in PROFILES else OTHER
-        self.gateway_info.labels(profile=known, scanner="on" if scanning else "off").set(1)
+        model = classifier if classifier in CLASSIFIERS else OTHER
+        self.gateway_info.labels(
+            profile=known, scanner="on" if scanning else "off", classifier=model
+        ).set(1)
+        if model != "none":
+            self.classifier_ready.labels(classifier=model).set(0)
+
+    def classifier_loaded(self, classifier: str) -> None:
+        """The scanner's model has loaded: scans from now on can use it."""
+        model = classifier if classifier in CLASSIFIERS else OTHER
+        self.classifier_ready.labels(classifier=model).set(1)
 
     def render(self) -> bytes:
         """The registry in the Prometheus text format, for GET /metrics."""

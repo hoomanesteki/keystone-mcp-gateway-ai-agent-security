@@ -186,11 +186,14 @@ it changes nothing. A script that fails or is stopped restarts Keystone with the
 stack.
 
 The runner does not trust the label it is given. Before the first run it reads
-`keystone_gateway_info{profile,scanner}` from `/metrics` and the policy ids from the admin API, and
-it stops with status 2 and `this is not C2: its scanner is off, not on` if they are not what the
-label needs. A passthrough gateway says so too:
+`keystone_gateway_info{profile,scanner,classifier}` from `/metrics` and the policy ids from the
+admin API, and it stops with status 2 and `this is not C2: its scanner is off, not on` if they are
+not what the label needs. C2 needs a scanner with its model, and the model loads in the background
+for about 7 seconds after the gateway starts, so the runner first waits (up to 3 minutes) until
+`keystone_scanner_classifier_ready` says it has loaded; a scan made before that is scored by the
+rules alone. A gateway whose extra is not installed says `classifier="none"`, and C2 is refused.
 
-    curl -s localhost:8080/metrics | grep keystone_gateway_info
+    curl -s localhost:8080/metrics | grep -E 'keystone_gateway_info|classifier_ready'
 
 A run is one scenario, one config, one agent, once. The runner puts the upstreams in the state of
 the scenario (`POST /_reset?variant=`), starts the approver, lets the agent do the task as olivia
@@ -1633,9 +1636,12 @@ The image sets `HF_HUB_OFFLINE=1`: the model is in it, and the container never g
 for it.
 
 The gateway loads the model in the background when it starts (`scanner_classifier_ready` in the
-log when it is done, `scanner_classifier_not_ready` when it cannot), so only the first seconds of a
-run are scored by the rules alone. An app under test (`env=test`) does not, and loads it at its
-first scan.
+log when it is done, `scanner_classifier_not_ready` when it cannot, and the gauge
+`keystone_scanner_classifier_ready{classifier}` at `/metrics`, 0 until it has loaded and 1 after),
+so only the first seconds of a run are scored by the rules alone. A measurement of the model waits
+for the gauge. `keystone_gateway_info` carries the model that was built, `classifier="none"` where
+there is none. An app under test (`env=test`) does not load it in the background, and loads it at
+its first scan.
 
 `prompt-guard-2-86m` (Llama Prompt Guard 2) is gated on Hugging Face: accept its license with an
 account, and give the gateway a token. Its labels are not verified here (ADR-0011).

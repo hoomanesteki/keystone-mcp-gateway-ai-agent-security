@@ -866,6 +866,16 @@ def provenance_table(files: Sequence[ResultFile]) -> list[str]:
     return [table(header, rows)]
 
 
+def model_text(files: Sequence[ResultFile]) -> str:
+    """` (`name`)` for the model that the gateway of a C2 file said it had, or nothing."""
+    names = {
+        str(f.start.get("gateway", {}).get("classifier"))
+        for f in files
+        if f.config == "C2" and f.agent == "naive" and not f.variant
+    } - {"None", "none"}
+    return f" (`{sorted(names)[0]}`)" if len(names) == 1 else ""
+
+
 def facts_of_suite(files: Sequence[ResultFile]) -> dict[str, int]:
     """How many tasks, goals, templates and vectors the runs touched, from the first file."""
     runs = files[0].runs if files else ()
@@ -921,9 +931,9 @@ def render_section(files: Sequence[ResultFile], earlier: Sequence[ResultFile] = 
         "passthrough`: every part of the pipeline is a stub except the credentials, and nothing "
         "is scanned. C1 has the access rules and the approvals (acme's rule for mail to outside "
         "addresses, the limit on transfers) and has neither the Rule of Two policies nor the "
-        "scanner. C2 is everything: the scanner with its model, the taint, and the Rule of Two. "
-        "The runner asks the gateway how it is set before it starts and refuses to run against "
-        "one that does not match the label.",
+        f"scanner. C2 is everything: the scanner with its model{model_text(files)}, the taint, and "
+        "the Rule of Two. The runner asks the gateway how it is set before it starts, waits for "
+        "the model to load, and refuses to run against a gateway that does not match the label.",
         "",
         "The naive agent runs the script of the task and does whatever instruction it reads in a "
         "tool result. That is the worst case for obedience, and it is deterministic, so it ran "

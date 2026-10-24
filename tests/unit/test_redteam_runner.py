@@ -7,19 +7,26 @@ how it picks scenarios, and what the first line of a result file says.
 
 from typing import Any
 
+import httpx
 import pytest
 
+from eval.redteam import runner
 from eval.redteam.runner import (
     EXPECTED,
-    GATEWAY_INFO,
     RULE_OF_TWO,
     ConfigMismatch,
     NaiveAgent,
+    Target,
+    Tokens,
     check_config,
+    facts_with_the_model,
+    gateway_facts,
     pick,
+    read_info,
     start_line,
 )
 from eval.redteam.suite import load_scenarios
+from eval.redteam.witness import Witness
 
 pytestmark = pytest.mark.phase(9)
 
@@ -30,10 +37,27 @@ BASE_POLICIES = [
 ]
 
 
-def facts(profile: str, scanner: str, *policies: str) -> dict[str, Any]:
+MODEL = "protectai-deberta-v2"
+
+
+def facts(
+    profile: str,
+    scanner: str,
+    *policies: str,
+    classifier: str | None = None,
+    ready: bool | None = None,
+) -> dict[str, Any]:
+    """What a gateway says of itself. A gateway that scans has its model, loaded, unless the test
+    says it has not."""
+    if classifier is None:
+        classifier = MODEL if scanner == "on" else "none"
+    if ready is None and classifier != "none":
+        ready = True
     return {
         "profile": profile,
         "scanner": scanner,
+        "classifier": classifier,
+        "classifier_ready": ready,
         "policies": sorted(policies),
         "policy_version": 3,
     }
@@ -68,6 +92,16 @@ def test_the_policies_are_not_looked_at_for_the_passthrough() -> None:
         ("C1", facts("full", "on", *BASE_POLICIES), "its scanner is on, not off"),
         ("C1", facts("full", "off", *RULE_OF_TWO), "the policies of the Rule of Two are in force"),
         ("C0", facts("full", "on", *RULE_OF_TWO), "its profile is full, not passthrough"),
+        (
+            "C2",
+            facts("full", "on", *RULE_OF_TWO, classifier="none"),
+            "its scanner has no model, so it scores by the rules alone",
+        ),
+        (
+            "C2",
+            facts("full", "on", *RULE_OF_TWO, ready=False),
+            f"its model {MODEL} has not loaded",
+        ),
     ],
 )
 def test_a_gateway_that_is_not_as_the_label_says_is_refused(
@@ -77,6 +111,16 @@ def test_a_gateway_that_is_not_as_the_label_says_is_refused(
         check_config(config, found)
 
 
+def test_a_scanner_on_the_rules_alone_is_accepted_only_where_the_caller_says_so() -> None:
+    rules_only = facts("full", "on", *RULE_OF_TWO, classifier="none")
+
+    check_config("C2", rules_only, model=False)
+    with pytest.raises(ConfigMismatch, match="no model"):
+        check_config("C2", rules_only)
+    # C1 has no scanner, so a model is not asked of it.
+    check_config("C1", facts("full", "off", *BASE_POLICIES))
+
+
 def test_one_missing_rule_of_two_policy_is_a_gateway_without_the_rule_of_two() -> None:
     two_of_three = sorted(RULE_OF_TWO)[:2]
 
@@ -84,18 +128,119 @@ def test_one_missing_rule_of_two_policy_is_a_gateway_without_the_rule_of_two() -
         check_config("C2", facts("full", "on", *BASE_POLICIES, *two_of_three))
 
 
-def test_the_info_line_of_the_metrics_page_is_read() -> None:
+def test_the_info_of_the_metrics_page_is_read_as_labels_in_any_order() -> None:
     page = (
         "# HELP keystone_gateway_info How this gateway is set.\n"
         "# TYPE keystone_gateway_info gauge\n"
-        'keystone_gateway_info{profile="passthrough",scanner="off"} 1.0\n'
+        'keystone_gateway_info{classifier="none",profile="passthrough",scanner="off"} 1.0\n'
+        "# TYPE keystone_scanner_classifier_ready gauge\n"
+        f'keystone_scanner_classifier_ready{{classifier="{MODEL}"}} 1.0\n'
         'keystone_calls_total{tool="x"} 4.0\n'
     )
 
-    found = GATEWAY_INFO.search(page)
+    info, ready = read_info(page)
 
-    assert found is not None and found["profile"] == "passthrough" and found["scanner"] == "off"
-    assert GATEWAY_INFO.search("keystone_calls_total 4.0\n") is None
+    assert info == {"classifier": "none", "profile": "passthrough", "scanner": "off"}
+    assert ready == {MODEL: True}
+    # The same labels in another order are the same gateway.
+    shuffled = 'keystone_gateway_info{scanner="on",profile="full",classifier="x"} 1.0\n'
+    assert read_info(shuffled)[0] == {"classifier": "x", "profile": "full", "scanner": "on"}
+
+
+def test_a_page_without_the_info_or_with_part_of_it_says_nothing() -> None:
+    assert read_info("keystone_calls_total 4.0\n") == (None, {})
+    # An older gateway that has no model label does not say how it is set.
+    older = 'keystone_gateway_info{profile="full",scanner="on"} 1.0\n'
+    assert read_info(older) == (None, {})
+    not_one = 'keystone_gateway_info{classifier="none",profile="full",scanner="on"} 0.0\n'
+    assert read_info(not_one) == (None, {})
+    assert read_info(f'keystone_scanner_classifier_ready{{classifier="{MODEL}"}} 0.0\n')[1] == {
+        MODEL: False
+    }
+
+
+class FakeGateway:
+    """`/metrics` and `/admin/api/v1/policies` of a gateway whose model loads after `loads_after`
+    reads of the metrics page."""
+
+    def __init__(self, loads_after: int = 0, model: str = MODEL) -> None:
+        self.model = model
+        self.loads_after = loads_after
+        self.reads = 0
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/metrics":
+            self.reads += 1
+            ready = 1 if self.reads > self.loads_after else 0
+            info = f'classifier="{self.model}",profile="full",scanner="on"'
+            lines = [f"keystone_gateway_info{{{info}}} 1.0"]
+            if self.model != "none":
+                lines.append(
+                    f'keystone_scanner_classifier_ready{{classifier="{self.model}"}} {ready}.0'
+                )
+            return httpx.Response(200, text="\n".join(lines) + "\n")
+        assert request.url.path == "/admin/api/v1/policies"
+        return httpx.Response(
+            200, json={"version": "v1", "policies": [{"id": p} for p in sorted(RULE_OF_TWO)]}
+        )
+
+    def client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(self.handler), base_url="http://keystone.test"
+        )
+
+
+def target() -> Target:
+    return Target(
+        base_url="http://keystone.test",
+        witness=Witness({}),
+        tokens=Tokens(agent=lambda: "a", approver=lambda: "p", admin=lambda: "r"),
+    )
+
+
+async def test_the_facts_of_a_gateway_are_its_info_its_model_and_its_policies() -> None:
+    found = await gateway_facts(target(), FakeGateway().client())
+
+    assert (found["profile"], found["scanner"], found["classifier"]) == ("full", "on", MODEL)
+    assert found["classifier_ready"] is True
+    assert found["policies"] == sorted(RULE_OF_TWO) and found["policy_version"] == "v1"
+    # A gateway with no model has none to wait for.
+    none = await gateway_facts(target(), FakeGateway(model="none").client())
+    assert none["classifier"] == "none" and none["classifier_ready"] is None
+
+
+async def test_a_gateway_that_is_still_loading_its_model_is_asked_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = FakeGateway(loads_after=2)
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(runner.anyio, "sleep", no_wait)
+
+    found = await facts_with_the_model(target(), gateway.client())
+
+    assert found["classifier_ready"] is True and gateway.reads == 3
+
+
+async def test_a_model_that_never_loads_is_given_up_on_and_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = FakeGateway(loads_after=10**6)
+    clock = iter(range(0, 10**6, 100))
+    monkeypatch.setattr(runner.time, "monotonic", lambda: float(next(clock)))
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(runner.anyio, "sleep", no_wait)
+
+    found = await facts_with_the_model(target(), gateway.client())
+
+    assert found["classifier_ready"] is False and gateway.reads < 10
+    with pytest.raises(ConfigMismatch, match=f"its model {MODEL} has not loaded"):
+        check_config("C2", found)
 
 
 def test_scenarios_are_picked_by_id_with_a_wildcard_and_a_limit() -> None:

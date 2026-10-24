@@ -23,16 +23,21 @@ output slot is built with no scanner and writes no score, because the Phase 1 st
 model are not built at all. The pipeline's own audit record is still written, so a run in this
 profile can be read back like any other. The profile exists to measure, and `Settings` refuses it
 when `env` is `prod`, so that a stray variable cannot turn every defense off in a deployment. A
-gateway says how it is set at `/metrics`: `keystone_gateway_info{profile,scanner}`.
+gateway says how it is set at `/metrics`: `keystone_gateway_info{profile,scanner,classifier}`, where
+`classifier` is the model that was built and is `none` where there is none (the extra is not
+installed, or the scanner is off).
 
 **C1 and C2 are settings of that build, and the runner checks them.** C1 mounts a copy of
 `policies/` without the two files of the Rule of Two (`rule_of_two.cedar` under `default/access/`
 and `default/approval/`) and turns the scanner off, so that the access rules, acme's rule for mail
 to outside addresses and the limit on transfers remain. C2 is the stack as it is. A label is a claim,
-so the runner asks the gateway before the first run: the profile and the scanner from `/metrics`,
-and the policy ids in force from the admin API. If they are not what the label needs it stops with
-status 2 and writes nothing. `scripts/redteam.sh` sets the three configs with
-`deploy/redteam.override.yml`, which changes nothing when no variable is set.
+so the runner asks the gateway before the first run: the profile, the scanner and its model from
+`/metrics`, and the policy ids in force from the admin API. C2 needs a scanner with a model, and the
+model loads in the background for several seconds after the gateway starts, with the rules alone
+scoring every scan until it has (`keystone_scanner_classifier_ready`), so the runner waits for it. If
+what it finds is not what the label needs it stops with status 2 and writes nothing.
+`scripts/redteam.sh` sets the three configs with `deploy/redteam.override.yml`, which changes
+nothing when no variable is set.
 
 **The approver is an oracle.** The approver is lena (role `approver`, signed in through
 `keystone-cli`). She polls the pending requests through the admin API, as a person with the console

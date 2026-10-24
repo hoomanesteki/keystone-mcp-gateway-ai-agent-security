@@ -49,6 +49,7 @@ from typing import Any, Protocol
 
 import anyio
 import httpx
+from prometheus_client.parser import text_string_to_metric_families
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
@@ -202,19 +203,35 @@ class LlmAgent:
 # -- asking the gateway how it is set
 
 
-GATEWAY_INFO = re.compile(
-    r"^keystone_gateway_info\{profile=\"(?P<profile>[a-z]+)\",scanner=\"(?P<scanner>[a-z]+)\"\} "
-    r"1(?:\.0)?$",
-    re.MULTILINE,
-)
+# How long a gateway that has just started is given to load the model of its scanner.
+MODEL_WAIT_S = 180.0
+
+
+def read_info(page: str) -> tuple[dict[str, str] | None, dict[str, bool]]:
+    """How a gateway says it is set, from its `/metrics` page: the labels of
+    `keystone_gateway_info` (profile, scanner, classifier), and for each model whether
+    `keystone_scanner_classifier_ready` says it has loaded. The labels come in the order the
+    client library sorts them, so they are read as labels and not matched as text."""
+    info: dict[str, str] | None = None
+    ready: dict[str, bool] = {}
+    for family in text_string_to_metric_families(page):
+        for sample in family.samples:
+            if sample.name == "keystone_gateway_info" and sample.value == 1:
+                info = dict(sample.labels)
+            elif sample.name == "keystone_scanner_classifier_ready":
+                ready[sample.labels["classifier"]] = sample.value == 1
+    if info is not None and not {"profile", "scanner", "classifier"} <= info.keys():
+        return None, ready
+    return info, ready
 
 
 async def gateway_facts(target: Target, client: httpx.AsyncClient) -> dict[str, Any]:
-    """How the gateway says it is set: its profile and scanner from `/metrics`, and the ids of the
-    policies in force for the admin's tenant from the admin API."""
+    """How the gateway says it is set: its profile, scanner and model from `/metrics` (and whether
+    the model has loaded), and the ids of the policies in force for the admin's tenant from the
+    admin API."""
     page = await client.get(f"{target.base_url.rstrip('/')}/metrics")
     page.raise_for_status()
-    found = GATEWAY_INFO.search(page.text)
+    found, ready = read_info(page.text)
     if found is None:
         raise ConfigMismatch("the gateway does not say how it is set at /metrics")
     token = await anyio.to_thread.run_sync(target.tokens.admin)
@@ -226,19 +243,41 @@ async def gateway_facts(target: Target, client: httpx.AsyncClient) -> dict[str, 
     return {
         "profile": found["profile"],
         "scanner": found["scanner"],
+        "classifier": found["classifier"],
+        # None where there is no model to wait for.
+        "classifier_ready": ready.get(found["classifier"]),
         "policy_version": body.get("version"),
         "policies": sorted(p["id"] for p in body.get("policies", [])),
     }
 
 
-def check_config(config: Config, facts: Mapping[str, Any]) -> None:
-    """Raise unless the gateway is set as the label says."""
+async def facts_with_the_model(target: Target, client: httpx.AsyncClient) -> dict[str, Any]:
+    """`gateway_facts`, asked again until the model of the scanner has loaded. The model loads in
+    the background after the gateway starts, and a scan made before it has is scored by the rules
+    alone, so a run that starts early measures another scanner. Gives up after `MODEL_WAIT_S`
+    and returns what it last saw, for `check_config` to refuse."""
+    deadline = time.monotonic() + MODEL_WAIT_S
+    while True:
+        facts = await gateway_facts(target, client)
+        if facts["classifier_ready"] is not False or time.monotonic() >= deadline:
+            return facts
+        await anyio.sleep(1.0)
+
+
+def check_config(config: Config, facts: Mapping[str, Any], *, model: bool = True) -> None:
+    """Raise unless the gateway is set as the label says. A label that has the scanner on also has
+    its model, loaded, unless `model` is False (a test that runs on the rules alone)."""
     profile, scanner, rule_of_two = EXPECTED[config]
     problems = []
     if facts["profile"] != profile:
         problems.append(f"its profile is {facts['profile']}, not {profile}")
     if facts["scanner"] != scanner:
         problems.append(f"its scanner is {facts['scanner']}, not {scanner}")
+    elif scanner == "on" and model:
+        if facts.get("classifier") in (None, "none"):
+            problems.append("its scanner has no model, so it scores by the rules alone")
+        elif not facts.get("classifier_ready"):
+            problems.append(f"its model {facts['classifier']} has not loaded")
     present = set(facts["policies"]) >= RULE_OF_TWO
     if rule_of_two is not None and rule_of_two != present:
         problems.append(
@@ -428,6 +467,7 @@ async def run_matrix(
     variant: str | None = None,
     subset: bool = False,
     note: str = "",
+    model: bool = True,
     on_run: Callable[[dict[str, Any]], None] | None = None,
 ) -> Progress:
     """Run every scenario `seeds` times and write a line for each run to `out`, a file that must not
@@ -436,8 +476,8 @@ async def run_matrix(
     progress = Progress()
     out.parent.mkdir(parents=True, exist_ok=True)
     async with httpx.AsyncClient(base_url=target.base_url, timeout=30) as client:
-        facts = await gateway_facts(target, client)
-        check_config(config, facts)
+        facts = await facts_with_the_model(target, client)
+        check_config(config, facts, model=model)
         with out.open("x", encoding="utf-8") as handle:
             start = start_line(
                 config,

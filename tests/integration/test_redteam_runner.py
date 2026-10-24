@@ -87,8 +87,15 @@ async def test_runner_naive_c0_vs_c2_smoke(
     await run_matrix(
         chosen, "C0", NaiveAgent(), target(baseline, redteam_upstreams, fake_idp), c0, subset=True
     )
+    # The app of a test scores by its rules (TEST_SCANNER), so it is C2 without a model.
     await run_matrix(
-        chosen, "C2", NaiveAgent(), target(full, redteam_upstreams, fake_idp), c2, subset=True
+        chosen,
+        "C2",
+        NaiveAgent(),
+        target(full, redteam_upstreams, fake_idp),
+        c2,
+        subset=True,
+        model=False,
     )
 
     [start0, attack0, benign0, end0] = lines(c0)
@@ -225,6 +232,7 @@ async def test_a_run_that_is_cut_off_by_the_budget_of_the_runner_is_said_in_the_
         # One run costs a few thousandths of a cent at the fake prices, so a limit of a hundredth
         # of a cent stops the batch after the first run.
         max_usd=0.0000001,
+        model=False,
         seeds=2,
     )
 

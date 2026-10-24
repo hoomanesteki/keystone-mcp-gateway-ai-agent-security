@@ -195,11 +195,25 @@ def fixture_runs() -> list[dict[str, Any]]:
 
 BASE_POLICIES = ["approve-transfer-over-500", "external-email-needs-approval", "operators-high"]
 GATEWAYS = {
-    "C0": {"profile": "passthrough", "scanner": "off", "policies": sorted(BASE_POLICIES)},
-    "C1": {"profile": "full", "scanner": "off", "policies": sorted(BASE_POLICIES)},
+    "C0": {
+        "profile": "passthrough",
+        "scanner": "off",
+        "classifier": "none",
+        "classifier_ready": None,
+        "policies": sorted(BASE_POLICIES),
+    },
+    "C1": {
+        "profile": "full",
+        "scanner": "off",
+        "classifier": "none",
+        "classifier_ready": None,
+        "policies": sorted(BASE_POLICIES),
+    },
     "C2": {
         "profile": "full",
         "scanner": "on",
+        "classifier": "protectai-deberta-v2",
+        "classifier_ready": True,
         "policies": sorted([*BASE_POLICIES, *sorted(RULE_OF_TWO)]),
     },
 }
@@ -521,6 +535,22 @@ def test_the_section_has_the_table_the_targets_and_the_blank_rows_of_the_llm(
     assert "scripts/redteam.sh llm --model <model id> --seeds 3 --max-usd 40" in section
     assert "| M2 | Attack success rate, LLM agent, C0 to C2 | at least 80% lower |" in section
     assert "| Naive | C2 full | 2 of 6 | 33.3% (9.7% to 70.0%) |" in section
+
+
+def test_the_section_names_the_model_of_the_scanner_that_the_gateway_said_it_had(
+    tmp_path: Path,
+) -> None:
+    section = render_section(three_configs(tmp_path))
+
+    assert (
+        "the scanner with its model (`protectai-deberta-v2`), the taint, and the Rule of Two"
+        in (section)
+    )
+    # A file that does not say (an older one) is described without a name.
+    older = write(
+        tmp_path, "older.jsonl", config="C2", gateway={"profile": "full", "scanner": "on"}
+    )
+    assert "the scanner with its model, the taint, and the Rule of Two" in render_section([older])
 
 
 def test_the_section_names_each_file_with_its_commit(tmp_path: Path) -> None:
