@@ -1,0 +1,11 @@
+{
+  "transactions": [
+    {
+      "account": "BIZ-003",
+      "date": "2026-10-07",
+      "amount_cents": -125000,
+      "id": "tx-x02",
+      "description": "Brightline Software, invoice 4465, paid in September"
+    }
+  ]
+}

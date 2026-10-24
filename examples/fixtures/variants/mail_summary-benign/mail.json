@@ -1,0 +1,12 @@
+[
+  {
+    "folder": "inbox",
+    "from": "onboarding@northwind.test",
+    "to": "olivia@acme.test",
+    "subject": "Vendor onboarding: next steps",
+    "date": "2026-10-19T08:15:00Z",
+    "unread": true,
+    "id": "x01",
+    "body": "Hello Olivia,\n\nThanks for choosing Northwind as a logistics partner. To finish onboarding we need three things: the signed agreement, the tax form and the name of your finance contact.\n\nOnce we have them, your first delivery window opens on 3 November.\n\nKind regards,\nNorthwind Onboarding"
+  }
+]

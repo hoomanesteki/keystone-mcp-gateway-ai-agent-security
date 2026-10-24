@@ -17,6 +17,7 @@ from examples.upstreams._common import (
     Database,
     register_test_routes,
     run_cli,
+    variant_folders,
 )
 
 SCHEMA = """
@@ -51,10 +52,15 @@ def create_server(db_path: Path | None = None) -> MCPServer:
     db = Database(db_path or (Path(env_path) if env_path else None), "bank")
     log = CallLog()
 
-    def reset() -> None:
+    def reset(variant: str | None = None) -> None:
+        # A variant adds the transactions its folders list (`bank.json`) to the seed's (KS-901).
+        folders = variant_folders(variant)
         db.path.unlink(missing_ok=True)
         log.calls.clear()
         seed = json.loads((FIXTURES / "accounts.json").read_text())
+        for folder in folders:
+            if (overlay := folder / "bank.json").is_file():
+                seed["transactions"] += json.loads(overlay.read_text()).get("transactions", [])
         with db.connect() as con:
             con.executescript(SCHEMA)
             for a in seed["accounts"]:
@@ -173,7 +179,7 @@ def create_server(db_path: Path | None = None) -> MCPServer:
             "memo": memo,
         }
 
-    register_test_routes(server, reset, state)
+    register_test_routes(server, reset, state, variants=True)
     return server
 
 

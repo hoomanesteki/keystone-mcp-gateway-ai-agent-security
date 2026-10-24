@@ -16,6 +16,8 @@ from examples.upstreams._common import (
     Database,
     register_test_routes,
     run_cli,
+    upsert,
+    variant_folders,
 )
 
 SCHEMA = """
@@ -42,14 +44,20 @@ def create_server(db_path: Path | None = None, poisoned: bool | None = None) -> 
     db = Database(db_path or (Path(env_path) if env_path else None), "mail")
     log = CallLog()
 
-    def reset() -> None:
+    def reset(variant: str | None = None) -> None:
+        # A variant is the seed and the mail its folders add or replace by id. It does not take the
+        # poisoned flag: its state is what its files say (KS-901).
+        folders = variant_folders(variant)
         db.path.unlink(missing_ok=True)
         log.calls.clear()
+        mails = json.loads((FIXTURES / "mailbox.json").read_text())
+        if poisoned and variant is None:
+            mails += json.loads((FIXTURES / "injections" / "mailbox-poisoned.json").read_text())
+        for folder in folders:
+            if (overlay := folder / "mail.json").is_file():
+                mails = upsert(mails, json.loads(overlay.read_text()), "id")
         with db.connect() as con:
             con.executescript(SCHEMA)
-            mails = json.loads((FIXTURES / "mailbox.json").read_text())
-            if poisoned:
-                mails += json.loads((FIXTURES / "injections" / "mailbox-poisoned.json").read_text())
             for mail in mails:
                 con.execute(
                     "INSERT INTO emails VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -135,7 +143,7 @@ def create_server(db_path: Path | None = None, poisoned: bool | None = None) -> 
             )
         return {"status": "sent", "id": f"s{cursor.lastrowid}", "to": address}
 
-    register_test_routes(server, reset, state)
+    register_test_routes(server, reset, state, variants=True)
     return server
 
 
