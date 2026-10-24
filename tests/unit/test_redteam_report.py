@@ -24,6 +24,8 @@ from eval.redteam.report import (
     aggregate,
     breakdown,
     choose,
+    compare_runs,
+    earlier_runs,
     friction,
     how_it_ended,
     landed_sessions,
@@ -32,10 +34,13 @@ from eval.redteam.report import (
     reading,
     reduction,
     render_section,
+    repeats_reading,
+    repeats_table,
     rules_that_asked,
     rules_that_refused,
     scan_peak,
     scanner_view,
+    section_for,
     section_in,
     update_document,
 )
@@ -734,5 +739,92 @@ def test_the_committed_document_is_what_the_report_renders_from_the_committed_fi
         return
     # A hand edit of the document, or of a result file, or of the code that words it, shows here.
     # `python -m eval.redteam.report` writes the document again.
-    rendered = render_section(choose(read_results(path) for path in paths))
+    rendered = section_for(read_results(path) for path in paths)
     assert section_in(text) == rendered.strip()
+
+
+# -- runs repeated
+
+
+def repeat_of(
+    tmp_path: Path, name: str, at: str, *, moved: dict[str, float] | None = None
+) -> ResultFile:
+    """The fixture runs of a C2 file, started at `at`, where the scanner gave the outputs of the
+    scenarios in `moved` another score (as it does when the model answers late)."""
+    runs = fixture_runs()
+    for line in runs:
+        if line["scenario"] in (moved or {}) and line["session"]:
+            line["session"] = {
+                **line["session"],
+                "scans": [
+                    {"tool": "x", "score": (moved or {})[line["scenario"]], "action": "pass"}
+                ],
+            }
+    return write(tmp_path, name, runs, config="C2", at=at)
+
+
+def test_earlier_runs_are_the_whole_files_of_the_kinds_that_were_chosen(tmp_path: Path) -> None:
+    first = repeat_of(tmp_path, "a.jsonl", "2026-10-24T10:00:00+00:00")
+    second = repeat_of(tmp_path, "b.jsonl", "2026-10-24T11:00:00+00:00")
+    third = repeat_of(tmp_path, "c.jsonl", "2026-10-24T12:00:00+00:00")
+    partial = write(tmp_path, "d.jsonl", end=False, at="2026-10-24T09:00:00+00:00")
+    other = write(tmp_path, "e.jsonl", config="C1", at="2026-10-24T09:30:00+00:00")
+    files = [third, partial, first, other, second]
+
+    chosen = choose(files)
+    earlier = earlier_runs(files, chosen)
+
+    assert [f.path.name for f in chosen] == ["e.jsonl", "c.jsonl"]  # C1, then C2
+    # The partial file and the file of another kind are not repeats of what was chosen.
+    assert [f.path.name for f in earlier] == ["a.jsonl", "b.jsonl"]
+
+
+def test_two_runs_are_compared_by_outcome_and_by_score(tmp_path: Path) -> None:
+    old = repeat_of(tmp_path, "old.jsonl", "2026-10-24T10:00:00+00:00")
+    new = repeat_of(
+        tmp_path,
+        "new.jsonl",
+        "2026-10-24T11:00:00+00:00",
+        moved={"mail_invoice.exfil_email": 0.2, "web_vpn.benign": 0.0},
+    )
+
+    assert compare_runs(new, old) == {"runs": 10, "outcome": 0, "scores": 2}
+    assert compare_runs(new, new) == {"runs": 10, "outcome": 0, "scores": 0}
+    # A run that came out another way is counted as that, whatever its scores.
+    changed = fixture_runs()
+    changed[2]["attack_success"] = False
+    flipped = write(tmp_path, "flip.jsonl", changed, config="C2", at="2026-10-24T12:00:00+00:00")
+    assert compare_runs(flipped, old)["outcome"] == 1
+
+
+def test_the_repeat_table_and_its_words_say_how_far_the_runs_agree(tmp_path: Path) -> None:
+    old = repeat_of(tmp_path, "old.jsonl", "2026-10-24T10:00:00+00:00")
+    new = repeat_of(
+        tmp_path, "new.jsonl", "2026-10-24T11:00:00+00:00", moved={"mail_invoice.exfil_email": 0.2}
+    )
+
+    rows = repeats_table([new], [old])[0]
+    words = repeats_reading([new], [old])[0]
+
+    assert "| C2 full | `new.jsonl` (the one above) |" in rows
+    assert "| C2 full | `old.jsonl` |" in rows and "| 0 of 10 | 1 of 10 |" in rows
+    assert (
+        "In 10 comparisons of a scenario with its repeat, the attack and the task came out" in words
+    )
+    assert "The scores of the scanner differ in 1 of them. The scanner waits 300 ms" in words
+    assert repeats_table([new], []) == [] and repeats_reading([new], []) == []
+
+
+def test_the_section_has_repeat_runs_only_when_there_are_some(tmp_path: Path) -> None:
+    old = repeat_of(tmp_path, "old.jsonl", "2026-10-24T10:00:00+00:00")
+    new = repeat_of(tmp_path, "new.jsonl", "2026-10-24T11:00:00+00:00")
+
+    alone = section_for([new])
+    both = section_for([old, new])
+
+    assert "### Repeat runs" not in alone and "### Repeat runs" in both
+    # Both files are named under the numbers, with their commits.
+    assert "`old.jsonl`" in both.split("### Where the numbers come from")[1]
+    assert "`old.jsonl`" not in alone
+    # The numbers of the table are those of the newest file.
+    assert "| Naive | C2 full | 2 of 6 |" in both

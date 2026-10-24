@@ -31,6 +31,7 @@ from eval.detector.metrics import wilson
 from eval.redteam.catalog import GOALS
 from eval.redteam.configs import CONFIG_NAMES, CONFIGS, RULE_OF_TWO
 from eval.redteam.suite import REPO
+from keystone.settings import ScannerSettings
 
 RESULTS = REPO / "eval" / "results"
 RESULTS_DOC = REPO / "docs" / "results.md"
@@ -161,6 +162,26 @@ def choose(files: Iterable[ResultFile]) -> list[ResultFile]:
     return sorted(best.values(), key=order)
 
 
+def earlier_runs(files: Iterable[ResultFile], chosen: Sequence[ResultFile]) -> list[ResultFile]:
+    """The whole files that `choose` did not take, of the kinds that it took one of: the earlier
+    runs of the same thing, oldest first."""
+    kinds = {f.key for f in chosen}
+    taken = {f.path for f in chosen}
+    found = [f for f in files if f.usable and f.complete and f.key in kinds and f.path not in taken]
+    return sorted(found, key=lambda f: (str(f.start.get("at")), f.path.name))
+
+
+def section_for(files: Iterable[ResultFile]) -> str:
+    """The section for a set of files: the one chosen for each kind, and the earlier runs."""
+    found = list(files)
+    chosen = choose(found)
+    return render_section(chosen, earlier_runs(found, chosen))
+
+
+def started(file: ResultFile) -> str:
+    return str(file.start.get("at", ""))
+
+
 def order(file: ResultFile) -> tuple[int, str, int, str]:
     agent_rank = 0 if file.agent == "naive" else 1
     config_rank = CONFIGS.index(file.config) if file.config in CONFIGS else len(CONFIGS)
@@ -259,6 +280,32 @@ def rules_that_asked(runs: Sequence[Run]) -> dict[str, dict[str, int]]:
                 slot = counts.setdefault(reason, {"approved": 0, "rejected": 0})
                 slot["approved" if decision["approved"] else "rejected"] += 1
     return dict(sorted(counts.items()))
+
+
+def scores_of(run: Run) -> list[tuple[str, float]] | None:
+    """The tool and score of every output the scanner scored in a run, or None without scores."""
+    scans = (run.get("session") or {}).get("scans")
+    if scans is None:
+        return None
+    return [(str(scan["tool"]), round(float(scan["score"]), 6)) for scan in scans]
+
+
+def compare_runs(newer: ResultFile, older: ResultFile) -> dict[str, int]:
+    """How two runs of the same kind differ, over the scenarios they share: in whether the attack
+    landed or the task was done, and in the scores the scanner gave."""
+    before = {(r["scenario"], r["seed"]): r for r in older.runs}
+    after = {(r["scenario"], r["seed"]): r for r in newer.runs}
+    shared = sorted(before.keys() & after.keys())
+    return {
+        "runs": len(shared),
+        "outcome": sum(
+            1
+            for key in shared
+            if (before[key]["attack_success"], before[key]["utility_success"])
+            != (after[key]["attack_success"], after[key]["utility_success"])
+        ),
+        "scores": sum(1 for key in shared if scores_of(before[key]) != scores_of(after[key])),
+    }
 
 
 def scan_peak(run: Run) -> float | None:
@@ -735,6 +782,74 @@ def landed_reading(files: Sequence[ResultFile]) -> list[str]:
     return [asks, "", *[f"- {line}" for line in lines]]
 
 
+def flagged_harmless(file: ResultFile) -> str:
+    """How many harmless runs of a file had an output flagged by the scanner, as `k of n`."""
+    cell = scanner_view(file.runs).get("no attack")
+    return f"{cell['flagged']} of {cell['runs']}" if cell else NOT
+
+
+def repeats_table(chosen: Sequence[ResultFile], earlier: Sequence[ResultFile]) -> list[str]:
+    """The runs of a kind that was run more than once, each compared with the newest."""
+    header = [
+        "Config",
+        "File",
+        "Commit",
+        "Runs that differ in outcome",
+        "Runs whose scanner scores differ",
+        "Harmless runs flagged",
+    ]
+    rows = []
+    for newest in chosen:
+        older = [f for f in earlier if f.key == newest.key]
+        if not older:
+            continue
+        for file in [newest, *reversed(older)]:
+            compared = compare_runs(newest, file) if file is not newest else None
+            rows.append(
+                [
+                    newest.label,
+                    f"`{short(file.path)}`" + (" (the one above)" if file is newest else ""),
+                    commit_text(file),
+                    "-" if compared is None else f"{compared['outcome']} of {compared['runs']}",
+                    "-" if compared is None else f"{compared['scores']} of {compared['runs']}",
+                    flagged_harmless(file),
+                ]
+            )
+    return [table(header, rows)] if rows else []
+
+
+def repeats_reading(chosen: Sequence[ResultFile], earlier: Sequence[ResultFile]) -> list[str]:
+    """What the repeat runs show, in words made from the same comparison."""
+    compared = [
+        compare_runs(newest, file)
+        for newest in chosen
+        for file in earlier
+        if file.key == newest.key
+    ]
+    if not compared:
+        return []
+    outcome = sum(c["outcome"] for c in compared)
+    scores = sum(c["scores"] for c in compared)
+    total = sum(c["runs"] for c in compared)
+    first = (
+        f"In {total} comparisons of a scenario with its repeat, the attack and the task came out "
+        "the same every time."
+        if outcome == 0
+        else f"{outcome} of {total} comparisons of a scenario with its repeat differ in whether "
+        "the attack landed or the task was done."
+    )
+    second = (
+        f"The scores of the scanner differ in {scores} of them. The scanner waits "
+        f"{ScannerSettings().classifier_timeout_ms} ms for the model and scores a document by the "
+        "rules alone if the model is late, so on a machine that has other work the same document "
+        "can score differently from one run to the next, and the audit record does not say which "
+        "scans had waited too long."
+        if scores
+        else "The scores of the scanner are the same in all of them."
+    )
+    return [first + " " + second]
+
+
 def provenance_table(files: Sequence[ResultFile]) -> list[str]:
     header = ["File", "Config", "Commit", "Started", "Runs", "Complete"]
     rows = [
@@ -766,8 +881,9 @@ def facts_of_suite(files: Sequence[ResultFile]) -> dict[str, int]:
     }
 
 
-def render_section(files: Sequence[ResultFile]) -> str:
-    """The section of docs/results.md for these files, as chosen by `choose`."""
+def render_section(files: Sequence[ResultFile], earlier: Sequence[ResultFile] = ()) -> str:
+    """The section of docs/results.md for these files, as chosen by `choose`, and the earlier
+    runs of the same kinds that `earlier_runs` found."""
     if not files:
         return (
             "## Red team\n\n"
@@ -862,13 +978,14 @@ def render_section(files: Sequence[ResultFile]) -> str:
         "",
         *landed_reading(judged),
         *([""] if any(landed_sessions(f.runs) for f in judged) else []),
+        *repeats_block(files, earlier),
         "### The LLM agent",
         "",
         *llm_text(files, llm_present),
         "",
         "### Where the numbers come from",
         "",
-        *provenance_table(files),
+        *provenance_table(sorted([*files, *earlier], key=lambda f: (*order(f), started(f)))),
     ]
     return "\n".join(out).rstrip() + "\n"
 
@@ -876,6 +993,20 @@ def render_section(files: Sequence[ResultFile]) -> str:
 def reading_block(files: Sequence[ResultFile], stats: Mapping[Path, dict[str, Any]]) -> list[str]:
     lines = reading(files, stats)
     return ["### What the numbers say", "", *lines, ""] if lines else []
+
+
+def repeats_block(chosen: Sequence[ResultFile], earlier: Sequence[ResultFile]) -> list[str]:
+    table_lines = repeats_table(chosen, earlier)
+    if not table_lines:
+        return []
+    return [
+        "### Repeat runs",
+        "",
+        *table_lines,
+        "",
+        *repeats_reading(chosen, earlier),
+        "",
+    ]
 
 
 def calls_text(counts: Mapping[str, int]) -> str:
@@ -1020,7 +1151,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     paths = args.files or find_files(args.results)
-    section = render_section(choose(read_results(path) for path in paths))
+    section = section_for(read_results(path) for path in paths)
     if args.check:
         text = args.doc.read_text(encoding="utf-8") if args.doc.is_file() else ""
         if section_in(text) == section.strip():
