@@ -17,27 +17,83 @@ from eval.detector.report import (
     END,
     NOT,
     START,
+    combination_record,
+    combination_sections,
     count_test_runs,
     dataset_facts,
     describe_configs,
     earlier_runs,
+    kinds_of_attack,
+    limits,
+    names_of,
     num,
     plural,
     rate,
     reading,
     recall_cell,
     render_section,
+    run_passes,
     scored_before,
+    skipped_note,
     small_groups,
     tuning_record,
     tuning_sentence,
     update_results,
 )
 from keystone.defense.classifier import FakeClassifier
+from keystone.settings import ScannerSettings
 
 pytestmark = pytest.mark.phase(7)
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def row(shape: str, name: str, recall: float, **params: float) -> dict[str, Any]:
+    return {
+        "shape": shape,
+        "aggregate": "max",
+        "combiner": {"name": name, "params": params},
+        "recall_at_fpr_5pct": recall,
+    }
+
+
+def share(rules: float, **by_shape: float) -> dict[str, Any]:
+    return {
+        "n": 100,
+        "rules_at_0.5": rules,
+        "model": {key: {"at_0.5": value, "at_0.95": value} for key, value in by_shape.items()},
+    }
+
+
+# What the sweep on dev leaves, made up: two shapes, and the join that was chosen.
+COMBINATION = {
+    "file": "combination-dev-2026-10-24.json",
+    "n": 919,
+    "injections": 463,
+    "candidates": 320,
+    "chosen": row("128/64", "rules_first", 0.67, floor=0.5, weight=0.7),
+    "rows": [
+        row("510/64", "rules", 0.52),
+        row("510/64", "model", 0.16),
+        row("510/64", "max", 0.16),
+        row("510/64", "rules_first", 0.55, floor=0.5, weight=0.7),
+        row("128/64", "rules", 0.52),
+        row("128/64", "model", 0.25),
+        row("128/64", "max", 0.25),
+        row("128/64", "rules_first", 0.67, floor=0.5, weight=0.7),
+    ],
+    "diagnosis": {
+        "documents with an attack": share(0.78, **{"510/64": 0.36, "128/64": 0.64}),
+        "harmless documents": share(0.0, **{"510/64": 0.09, "128/64": 0.09}),
+    },
+    "bootstrap": {
+        "resamples": 200,
+        "gain_over_reference": {
+            "chosen": {"mean": 0.15, "low": 0.1, "high": 0.2},
+            "phase 7": {"mean": -0.36, "low": -0.4, "high": -0.3},
+        },
+    },
+}
 
 
 @pytest.fixture
@@ -50,7 +106,7 @@ def document(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         ),
     )
     data = build(download=False)
-    result = run.run_split(data, "dev", ("rules", "classifier", "combined"), limit=80)
+    result = run_passes(data, "dev", ScannerSettings(), limit=80)
     return {
         "date": "2026-10-23",
         "commit": "0123456789abcdef0123456789abcdef01234567",
@@ -59,6 +115,7 @@ def document(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "model": {"id": report.MODEL, "revision": report.MODEL_REVISION, "classifier": "fake"},
         "dataset": report.dataset_facts(data),
         "test_runs": 2,
+        "combination": COMBINATION,
         "result": result,
     }
 
@@ -70,6 +127,7 @@ def test_the_section_has_a_table_for_each_thing_the_story_asks_for(
 
     assert section.startswith("## Detector")
     for heading in (
+        "### How the join and the windows were picked, on the dev split",
         "### How good the scores are",
         "### At the configured thresholds",
         "### False positives on hard negatives, on their own",
@@ -79,8 +137,14 @@ def test_the_section_has_a_table_for_each_thing_the_story_asks_for(
         "### What is and is not in these numbers",
     ):
         assert heading in section, heading
-    for name in ("Rules", "Model", "Rules and model"):
-        assert f"| {name} |" in section
+    for name in (
+        "Rules",
+        "Model, windows of 128",
+        "Model, windows of 510 (Phase 7)",
+        "Higher of the two, windows of 510 (Phase 7)",
+        "Rules first, then the model",
+    ):
+        assert f"| {name} |" in section, name
     assert "Recall at a false positive rate of 5% or less" in section
     # The date, the commit and the machine are stated.
     assert "Measured on 2026-10-23 at commit `0123456789ab`" in section
@@ -99,7 +163,7 @@ def test_a_dirty_tree_is_said_and_a_missing_part_is_said(document: dict[str, Any
 
 
 def test_nothing_is_filled_in_where_nothing_was_measured(document: dict[str, Any]) -> None:
-    for name in ("rules", "classifier", "combined"):
+    for name in ("rules", "classifier", "combined", "previous_classifier", "previous_combined"):
         latency = document["result"]["configs"][name]["latency"]
         latency["over 2000"] = {"n": 0, "p50_ms": None, "p95_ms": None}
         document["result"]["configs"][name]["roc_auc"] = None
@@ -333,51 +397,65 @@ def test_the_log_is_read_line_by_line_and_a_missing_log_is_empty(tmp_path: Path)
     assert [entry["n"] for entry in earlier_runs(log)] == [1, 2]
 
 
-def configs_with(
-    rules_recall: float, both_recall: float, auc: tuple[float, float, float]
-) -> dict[str, Any]:
-    def one(recall: float, area: float) -> dict[str, Any]:
-        return {
-            "roc_auc": area,
-            "recall_at_fpr_5pct": {"recall": recall},
-            "negatives_by_kind": {"negative": {"count": 11, "of": 197}},
-            "hard_negatives": {"flag": {"count": 18, "of": 66}},
-        }
+def configs_with(rules: float, older: float | None, now: float | None) -> dict[str, Any]:
+    def one(recall: float | None) -> dict[str, Any]:
+        point = None if recall is None else {"recall": recall}
+        return {"roc_auc": 0.9, "recall_at_fpr_5pct": point}
 
-    return {
-        "rules": one(rules_recall, auc[0]),
-        "classifier": one(0.3, auc[1]),
-        "combined": one(both_recall, auc[2]),
+    configs = {"rules": one(rules)}
+    if older is not None:
+        configs["previous_combined"] = one(older)
+    if now is not None:
+        configs["combined"] = one(now)
+    return configs
+
+
+NAMES = names_of(
+    {
+        "scanner": {"window_tokens": 128, "window_overlap": 64},
+        "previous_scanner": {"window_tokens": 510, "window_overlap": 64},
     }
+)
 
 
-def test_the_reading_says_when_the_best_ranking_is_not_the_best_at_a_low_false_positive_rate() -> (
-    None
-):
-    configs = configs_with(0.59, 0.35, (0.827, 0.833, 0.884))
+def test_the_names_of_the_rows_say_the_windows_each_one_reads_in() -> None:
+    assert NAMES["rules"] == "Rules"
+    assert NAMES["classifier"] == "Model, windows of 128"
+    assert NAMES["previous_classifier"] == "Model, windows of 510 (Phase 7)"
+    assert NAMES["previous_combined"] == "Higher of the two, windows of 510 (Phase 7)"
+    assert NAMES["combined"] == "Rules first, then the model"
+    assert NAMES["previous_combined_300ms"].endswith("300 ms wait")
 
-    lines = reading(configs, ["rules", "classifier", "combined"], 0.5)
+
+def test_the_reading_says_which_row_finds_most_and_how_the_older_join_did() -> None:
+    configs = configs_with(0.59, 0.35, 0.67)
+
+    lines = reading(configs, ["rules", "previous_combined", "combined"], NAMES)
 
     assert len(lines) == 2 and lines[1] == ""
-    assert "The best ROC AUC is that of Rules and model (0.884), but" in lines[0]
-    assert "the rules alone find more attacks (0.59 against 0.35)" in lines[0]
+    assert "the row that finds most is Rules first, then the model (0.67)" in lines[0]
+    assert "The rules alone find 0.59." in lines[0]
+    assert "found less than the rules alone (0.35 against 0.59)" in lines[0]
+    assert "keeps every false positive of the model" in lines[0]
+
+
+def test_the_reading_says_when_the_new_join_does_not_beat_the_rules() -> None:
+    configs = configs_with(0.59, 0.35, 0.50)
+
+    lines = reading(configs, ["rules", "previous_combined", "combined"], NAMES)
+
+    assert "the row that finds most is Rules (0.59)" in lines[0]
     assert (
-        "at 0.5 the model flags 11 of 197 harmless documents and 18 of 66 hard negatives"
-        in lines[0]
+        "Rules first, then the model, finds less than the rules alone (0.50 against 0.59)"
+        in (lines[0])
     )
 
 
-def test_the_reading_has_nothing_to_add_when_the_rows_agree() -> None:
-    better = configs_with(0.40, 0.55, (0.8, 0.8, 0.9))
-    rules_best = configs_with(0.59, 0.35, (0.95, 0.833, 0.884))
-
-    assert reading(better, ["rules", "classifier", "combined"], 0.5)[0] == (
-        "The best ROC AUC is that of Rules and model (0.900)."
+def test_the_reading_has_nothing_to_add_with_fewer_than_two_rows_to_compare() -> None:
+    assert reading(configs_with(0.59, None, None), ["rules"], NAMES) == []
+    assert reading(configs_with(0.59, None, 0.6), ["rules", "combined"], NAMES)[0].startswith(
+        "At a false positive rate of 5% or less the row that finds most is"
     )
-    assert reading(rules_best, ["rules", "classifier", "combined"], 0.5)[0] == (
-        "The best ROC AUC is that of Rules (0.950)."
-    )
-    assert reading(better, ["rules"], 0.5) == []
 
 
 def test_the_note_on_small_groups_gives_the_sizes_it_rests_on() -> None:
@@ -453,5 +531,157 @@ def test_the_row_for_the_wait_is_marked_as_a_weak_number(document: dict[str, Any
     threshold = document["result"]["configs"]["combined"]["recall_at_fpr_5pct"]["threshold"]
 
     assert "depends on the few harmless texts that score highest" in section
-    assert f"The threshold of the rules and model row sits at {threshold:.2f}" in section
+    assert f"The threshold of the rules first row sits at {threshold:.2f}" in section
     assert "not as a property of the detector" in section
+
+
+# -- the passes, the dev section and the limits
+
+
+def test_three_passes_of_the_scanner_make_the_configs_of_the_report(
+    document: dict[str, Any],
+) -> None:
+    result = document["result"]
+
+    assert set(result["configs"]) == {
+        "rules",
+        "combined",
+        "combined_300ms",
+        "classifier",
+        "previous_classifier",
+        "previous_combined",
+        "previous_combined_300ms",
+    }
+    assert result["scanner"]["join"] == "rules_first"
+    assert result["scanner"]["window_tokens"] == 128
+    assert result["previous_scanner"]["join"] == "max"
+    assert result["previous_scanner"]["window_tokens"] == 510
+
+
+def test_the_scanner_as_phase_7_shipped_it_is_the_higher_of_the_two_over_windows_of_510() -> None:
+    assert (
+        report.PREVIOUS.join,
+        report.PREVIOUS.window_tokens,
+        report.PREVIOUS.window_overlap,
+    ) == (
+        "max",
+        510,
+        64,
+    )
+
+
+def test_the_model_alone_is_measured_on_every_text_and_the_joined_score_on_every_text(
+    document: dict[str, Any],
+) -> None:
+    configs = document["result"]["configs"]
+    total = document["result"]["samples"]["n"]
+
+    for name in ("classifier", "combined", "previous_classifier", "previous_combined"):
+        flag = configs[name]["flag"]
+        assert flag["tp"] + flag["fp"] + flag["tn"] + flag["fn"] == total, name
+
+
+def test_the_dev_section_gives_the_table_the_diagnosis_and_the_choice() -> None:
+    lines = "\n".join(combination_sections(COMBINATION))
+
+    assert lines.startswith("### How the join and the windows were picked, on the dev split")
+    assert "`python -m eval.detector.combine` tried 320 candidates" in lines
+    assert "(the rules alone find 0.52, whatever the windows)" in lines
+    assert "| Windows of | Model alone | Higher of the two | Rules first, then" in lines
+    assert "the model (weight 0.7) |" in lines
+    assert "| 510 | 0.16 | 0.16 | 0.55 |" in lines
+    assert "| 128 | 0.25 | 0.25 | 0.67 |" in lines
+    assert "| documents with an attack | 100 | 78% | 36% | 64% |" in lines
+    assert "finds +0.15 (95% +0.10 to +0.20) of the injections more than the rules alone" in lines
+    assert "and the higher of the two over windows of 510 finds -0.36" in lines
+    assert "The windows of 128 tokens with an overlap of 64 and the model weight of 0.7" in lines
+    assert "(7 of the 463 injections)" in lines
+
+
+def test_without_a_record_of_the_sweep_the_report_does_not_tell_how_the_choice_was_made() -> None:
+    assert combination_sections(None) == []
+    assert combination_sections({}) == []
+
+
+def test_the_record_of_the_sweep_is_the_latest_dev_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(report, "RESULTS", tmp_path)
+    assert combination_record() is None
+    (tmp_path / "combination-dev-2026-10-22.json").write_text(json.dumps({"n": 1}))
+    (tmp_path / "combination-dev-2026-10-24.json").write_text(json.dumps({"n": 2}))
+
+    found = combination_record()
+
+    assert found is not None and found["n"] == 2
+    assert found["file"] == "combination-dev-2026-10-24.json"
+
+
+def test_the_note_on_skipped_texts_says_how_many_the_model_was_not_asked_about() -> None:
+    result = {"model_skipped": 301, "samples": {"n": 973}}
+
+    note = skipped_note(result)
+
+    assert "301 of the 973 texts of this run" in note[0] and note[1] == ""
+    assert skipped_note({"model_skipped": 0, "samples": {"n": 973}}) == []
+
+
+def test_the_kinds_of_attack_are_given_for_the_rules_the_older_join_and_the_new_one() -> None:
+    def cells(**by_kind: tuple[int, int]) -> dict[str, Any]:
+        return {
+            kind: {"count": c, "of": n, "rate": c / n, "ci95": [0.0, 1.0]}
+            for kind, (c, n) in by_kind.items()
+        }
+
+    def config(count: int) -> dict[str, Any]:
+        return {
+            "recall_by_family": cells(override=(count, 10)),
+            "recall_by_hidden": cells(none=(count, 10)),
+            "recall_by_template": cells(base64=(count, 10)),
+        }
+
+    configs = {"rules": config(1), "previous_combined": config(2), "combined": config(9)}
+
+    text = "\n".join(kinds_of_attack(configs, NAMES))
+
+    header = "| Family | Rules | Higher of the two, windows of 510 (Phase 7) | Rules first, then"
+    assert header in text
+    assert "| override | 0.10 (1 of 10, 95% 0.00 to 1.00) | 0.20 (2 of 10" in text
+    assert "| Hidden with |" in text and "| Template |" in text and "| base64 |" in text
+
+
+def test_the_limits_say_what_the_join_cannot_do_and_that_prompt_guard_was_not_run(
+    document: dict[str, Any],
+) -> None:
+    text = "\n".join(limits(document, ["rules"]))
+
+    assert "It reads in windows of 128 tokens that overlap by 64." in text
+    assert "the model alone can flag a text and cannot make an injection of it" in text
+    assert "picked on dev from 320 candidates" in text
+    assert "Prompt Guard 2 (`prompt-guard-2-86m`) was not measured" in text
+    assert "Images are not read by the scanner" in text
+
+
+def test_the_log_of_a_run_says_how_the_scanner_was_set(tmp_path: Path) -> None:
+    result = {
+        "thresholds": {"flag": 0.5, "taint": 0.85},
+        "limit": None,
+        "samples": {"n": 973},
+        "scanner": {"join": "rules_first", "model_weight": 0.7, "window_tokens": 128},
+        "previous_scanner": {"join": "max", "window_tokens": 510},
+        "configs": {
+            "rules": {
+                "recall_at_fpr_5pct": {"recall": 0.5},
+                "hard_negatives": {"flag": {"rate": 0.25}},
+            }
+        },
+    }
+    log = tmp_path / "runs.jsonl"
+
+    run.log_test_run(result, log)
+
+    [line] = [json.loads(entry) for entry in log.read_text().splitlines()]
+    assert line["scanner"]["join"] == "rules_first" and line["previous_scanner"]["join"] == "max"
+    assert describe_configs(["rules", "previous_combined", "combined", "classifier"]) == (
+        "the scanner as it is set now and as Phase 7 shipped it"
+    )

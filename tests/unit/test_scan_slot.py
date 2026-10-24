@@ -275,9 +275,9 @@ async def test_a_classifier_that_raises_falls_back_to_the_rules() -> None:
     store = InMemorySessionStore()
     ctx = await call_with(store, result_of(INJECTION))
 
-    await OutputScanInterceptor(guard(metrics, classifier=Falling()), store, metrics).after_call(
-        ctx
-    )
+    # `join: max` asks the model about every text, the flagged ones too (KS-792).
+    scanner = guard(metrics, classifier=Falling(), join="max")
+    await OutputScanInterceptor(scanner, store, metrics).after_call(ctx)
 
     # The rules still find the injection, and it still taints.
     assert ctx.scan is not None
@@ -306,7 +306,7 @@ async def test_cancellation_is_not_swallowed() -> None:
     store = InMemorySessionStore()
     ctx = await call_with(store, result_of(INJECTION))
     cancelled = anyio.get_cancelled_exc_class()
-    slot = OutputScanInterceptor(guard(classifier=Falling(cancelled())), store)
+    slot = OutputScanInterceptor(guard(classifier=Falling(cancelled()), join="max"), store)
 
     with pytest.raises(cancelled):
         await slot.after_call(ctx)

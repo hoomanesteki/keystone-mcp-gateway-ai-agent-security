@@ -290,7 +290,11 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_SCANNER__CLASSIFIER` | `protectai-deberta-v2` | The model behind the rules: `protectai-deberta-v2`, `prompt-guard-2-86m` or `none`. Needs the extra `keystone[scanner]`. |
 | `KEYSTONE_SCANNER_CLASSIFIER` | unset | The same setting under a shorter name (one underscore). It wins when both are set. `KEYSTONE_SCANNER_CLASSIFIER=none` turns the model off. |
 | `KEYSTONE_SCANNER__CLASSIFIER_TIMEOUT_MS` | `300` | How long a scan waits for the model. After that the scan goes on with the rules alone and its `model` says `timeout`. 1 to 10,000. |
-| `KEYSTONE_SCANNER__THRESHOLDS__SUSPICIOUS` | `0.5` | A score from here up is `suspicious`. |
+| `KEYSTONE_SCANNER__JOIN` | `rules_first` | How the rules' score and the model's make one: `rules_first` (a text the rules flag keeps their score and the model is not asked; any other text gets the model's score added at `MODEL_WEIGHT`) or `max` (the higher of the two, and the model reads every text, which Phase 7 shipped). |
+| `KEYSTONE_SCANNER__MODEL_WEIGHT` | `0.7` | How much of the model's score counts for a text the rules did not flag. Over 0 and up to 1. A weight under 0.85 means the model alone can flag a text and cannot taint a session. |
+| `KEYSTONE_SCANNER__WINDOW_TOKENS` | `128` | The model reads a long text in windows of this many tokens of the text (16 to 510). A short window keeps an attack from being lost in the document around it, and gives a long text more windows to read. |
+| `KEYSTONE_SCANNER__WINDOW_OVERLAP` | `64` | Tokens a window shares with the one before. Less than `WINDOW_TOKENS`. |
+| `KEYSTONE_SCANNER__THRESHOLDS__SUSPICIOUS` | `0.5` | A score from here up is `suspicious`. It is also the score at which the rules-first join stops asking the model. |
 | `KEYSTONE_SCANNER__THRESHOLDS__INJECTION` | `0.85` | A score from here up is an `injection`. Not below `SUSPICIOUS`. |
 | `KEYSTONE_SCANNER__ALLOWED_DOMAINS` | `[]` | JSON list of hosts a markdown image may point to without a mark against it. A name covers its subdomains. |
 | `KEYSTONE_SCANNER__MAX_SCAN_CHARS` | `200000` | The most text one scan reads. A longer text is read at both ends, half of this at each. |
@@ -1495,9 +1499,22 @@ one does not reach the agent.
 ### The classifier
 
 Behind the rules there is a model, `protectai/deberta-v3-base-prompt-injection-v2` by default
-(Apache-2.0, English only), which scores the same text between 0 and 1. The final score is the
-higher of the two. It is the optional extra `keystone[scanner]` (torch for the CPU and
-transformers), and the compose image has it:
+(Apache-2.0, English only), which scores the same text between 0 and 1. It is the optional extra
+`keystone[scanner]` (torch for the CPU and transformers), and the compose image has it. How its score
+and the rules' make one is `scanner.join` (ADR-0011):
+
+- `rules_first`, the default: a text whose rules score is at `thresholds.suspicious` (0.5) or more
+  keeps that score and is not given to the model (the scan's `model` says `skipped`). For any other
+  text the score is `1 - (1 - rules) * (1 - model_weight * model)`, with `model_weight` 0.7. The model
+  can raise a score and never lowers one. A sure model makes a text `suspicious` (at 0.714 sure or
+  more) and cannot make it an `injection`, so **only the rules taint a session**.
+- `max`, what Phase 7 shipped: the higher of the two, and the model reads every text.
+
+The model reads a long text in windows of `scanner.window_tokens` (128) tokens that overlap by
+`scanner.window_overlap` (64), and the score is the highest window. On the dev split the model alone
+flags 37 percent of the documents with an attack with windows of 510 tokens and 64 percent with
+windows of 128, which is why they are short. A text of N tokens costs N/64 windows, and a text of more
+than 32 windows is sampled across its length.
 
 ```bash
 uv sync --extra scanner                  # in a checkout; the first use downloads about 740 MB
@@ -1511,9 +1528,12 @@ Without the extra the gateway still starts and the scanner runs on its rules alo
 `scanner_classifier_unavailable` once at start, naming what is missing. A scan waits at most
 `scanner.classifier_timeout_ms` (300) for the model. A model that has not answered by then, or is
 still loading, leaves the rules' score, and the result says `model: "timeout"`. At 300 ms the model
-reads about 3,500 characters on a laptop, so raise the timeout for longer outputs and measure it
-(`scripts/bench_scanner.py --classifier`, `docs/spikes/scanner.md`). The image sets
-`HF_HUB_OFFLINE=1`: the model is in it, and the container never goes to the network for it.
+reads about 1,500 characters on a laptop with windows of 128 tokens (3,500 with windows of 510), so
+a longer output is judged by the rules alone. Raise the timeout to let the model read more, at that
+much more time on each such call, and measure it (`scripts/bench_scanner.py --classifier`,
+`docs/spikes/scanner.md`). On the test split 12 percent of the scans fell back to the rules at 300 ms.
+The image sets `HF_HUB_OFFLINE=1`: the model is in it, and the container never goes to the network
+for it.
 
 The gateway loads the model in the background when it starts (`scanner_classifier_ready` in the
 log when it is done, `scanner_classifier_not_ready` when it cannot), so only the first seconds of a
@@ -1542,6 +1562,8 @@ uv run python -m eval.detector.datasets build         # build the dataset and ch
 uv run python -m eval.detector.run --config rules --split dev --summary     # the rules: seconds
 uv run python -m eval.detector.run --config combined --split dev            # with the model
 uv run python -m eval.detector.tune --config combined --scores /tmp/dev.jsonl   # thresholds, on dev
+uv run python -m eval.detector.combine windows --shape 128/64    # the model's score of every window of dev
+uv run python -m eval.detector.combine sweep --out eval/results/combination-dev-<date>.json
 uv run python -m eval.detector.report --note "why"    # all of test; writes the report
 uv run python -m eval.detector.report --render eval/results/detector-<date>.json   # the words again
 ```
@@ -1565,9 +1587,16 @@ uv run python -m eval.detector.report --render eval/results/detector-<date>.json
   lines. Say why with `--note`.
 - **Run the report on a clean tree and a quiet machine.** It records the commit and whether the
   tree was clean, and it times one text at a time, so another job on the machine shows up in the
-  timings. It took 3 min 40 s and 4 min 42 s on a 10-CPU Mac with nothing else running; the model is
-  nearly all of it, and the two runs gave the same classification numbers and timings that differed
-  by 20 to 45 percent.
+  timings. It scores the test split in three passes of the scanner (as it is set, the model alone at
+  the same windows, and as Phase 7 shipped it) and took 16 minutes on a 10-CPU Mac with nothing else
+  running. Before KS-792 it was one pass and took 3 min 40 s and 4 min 42 s; the model is nearly all
+  of the time, and two runs gave the same classification numbers and timings that differed by 20 to
+  45 percent.
+- **The sweep on dev** (`eval/detector/combine.py`) is how a join or a window is tried. `windows` scores
+  every window of the dev split in one shape and keeps the scores in `eval/data/` (about 8 minutes for
+  each shape), and `sweep` tries every join on them in seconds and writes the record that the report
+  quotes. It refuses the test split, and a test holds the defaults of `scanner` equal to the candidate
+  the latest record chose.
 - **Nightly**, the workflow scores 200 texts of dev with the rules alone and no model. It fails when
   the data differs from the manifest or when the ROC AUC of that sample is under 0.7, which is a
   guard against a scanner that stopped working and not a result.

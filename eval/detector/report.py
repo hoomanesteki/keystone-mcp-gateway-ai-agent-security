@@ -13,12 +13,23 @@ Every run reads the test split, a sample too, and so every run is logged in
 `eval/results/test-runs.jsonl` (`run.log_test_run`). The report says how many runs there were
 before it, and what they were.
 
-It scores the test split once with the rules and the model, computes the metrics of the three
-configs (`rules`, `classifier`, `combined`), and writes two things: the file
-`eval/results/detector-<date>.json` with every number, and the detector section of
-`docs/results.md` with the ones a reader needs.
-Both say the date, the commit the code was at and whether the tree was clean, the revision of every
-public dataset, the thresholds and the machine, because a number without those is not a result.
+It scores the test split once with the rules and the model, in three passes of the scanner over the
+same texts, and computes the metrics of the configs they give:
+
+- `rules`, and `combined` with its 300 ms row: the scanner as it is set now (KS-792), which joins
+  the rules and the model rules first and reads in windows of 128 tokens;
+- `classifier`: the model alone, at the same windows, which needs a scanner that asks it about every
+  text (`join: max`);
+- `previous_classifier`, `previous_combined` and its 300 ms row: the scanner as Phase 7 shipped it,
+  the higher of the two scores over windows of 510 tokens, so that the change is measured and not
+  told.
+
+It writes two things: the file `eval/results/detector-<date>.json` with every number, and the
+detector section of `docs/results.md` with the ones a reader needs. Both say the date, the commit
+the code was at and whether the tree was clean, the revision of every public dataset, the
+thresholds and the machine, because a number without those is not a result. The section also
+tells how the join was picked on the dev split, from the record that `eval.detector.combine` left
+in `eval/results/combination-dev-<date>.json`.
 
 Nothing here invents a figure. A cell is filled from the JSON, and where the JSON has none (a bucket
 with no text in it, a config that was not run) the cell says "not measured".
@@ -30,7 +41,7 @@ import argparse
 import json
 import sys
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -43,12 +54,18 @@ from keystone.settings import ScannerSettings
 RESULTS_DOC = REPO / "docs" / "results.md"
 START = "<!-- detector:start -->"
 END = "<!-- detector:end -->"
-NAMES = {
-    "rules": "Rules",
-    "classifier": "Model",
-    "combined": "Rules and model",
-    "combined_300ms": "Rules and model, 300 ms wait",
-}
+# The kinds of text of the dev diagnosis, in the order the table gives them.
+KINDS_OF_TEXT = (
+    "documents with an attack",
+    "harmless documents",
+    "hard negatives",
+    "public injections",
+    "harmless public prompts",
+)
+# The order of the rows of a table, and the configs that make a row of their own.
+ORDER = ("rules", "previous_classifier", "previous_combined", "classifier", "combined")
+# What Phase 7 shipped: the higher of the two scores over windows of 512 tokens (510 of the text).
+PREVIOUS = ScannerSettings(join="max", window_tokens=510, window_overlap=64)
 MODEL = "protectai/deberta-v3-base-prompt-injection-v2"
 MODEL_REVISION = "90c9989b1a342275dd0d1a95aad283c04e075671"
 NOT = "not measured"
@@ -126,12 +143,14 @@ def tuning_sentence(tuning: Mapping[str, Any] | None, flag: float, taint: float)
 
 
 def describe_configs(configs: Sequence[str]) -> str:
-    """The configs of a logged run in words. The 300 ms row is derived and is not a config."""
-    base = sorted(c for c in configs if c != "combined_300ms")
+    """The configs of a logged run in words. A 300 ms row is derived and is not a config."""
+    base = sorted(c for c in configs if not c.endswith("combined_300ms"))
     if base == ["rules"]:
         return "rules only"
     if base == ["classifier", "combined", "rules"]:
         return "all three configs"
+    if "previous_combined" in base:
+        return "the scanner as it is set now and as Phase 7 shipped it"
     return ", ".join(base)
 
 
@@ -151,41 +170,72 @@ def scored_before(document: Mapping[str, Any]) -> str:
     return "\n".join([head, "", *lines]) if lines else head
 
 
-def reading(configs: Mapping[str, Any], shown: Sequence[str], flag: float) -> list[str]:
-    """What the first table shows when its rows pull apart, said once and from the numbers."""
-    ranked = [n for n in shown if configs[n]["roc_auc"] is not None]
+def names_of(result: Mapping[str, Any]) -> dict[str, str]:
+    """What each config is called in a table, with the windows it reads in, from the run's own
+    record of its settings."""
+    now = result.get("scanner") or {}
+    before = result.get("previous_scanner") or {}
+    windows = f"windows of {now['window_tokens']}" if now else "windows"
+    earlier = f"windows of {before['window_tokens']}" if before else "windows"
+    return {
+        "rules": "Rules",
+        "previous_classifier": f"Model, {earlier} (Phase 7)",
+        "previous_combined": f"Higher of the two, {earlier} (Phase 7)",
+        "previous_combined_300ms": f"Higher of the two, {earlier}, 300 ms wait",
+        "classifier": f"Model, {windows}",
+        "combined": "Rules first, then the model",
+        "combined_300ms": "Rules first, then the model, 300 ms wait",
+    }
+
+
+def recall_of(configs: Mapping[str, Any], name: str) -> float | None:
+    point = (configs.get(name) or {}).get("recall_at_fpr_5pct")
+    return None if not point else float(point["recall"])
+
+
+def reading(
+    configs: Mapping[str, Any], shown: Sequence[str], names: Mapping[str, str]
+) -> list[str]:
+    """What the first table shows, said once and from the numbers: which row finds most at a false
+    positive rate of 5% or less, and how the rows compare with the rules alone."""
+    ranked = [n for n in shown if recall_of(configs, n) is not None]
     if len(ranked) < 2:
         return []
-    top = max(ranked, key=lambda n: configs[n]["roc_auc"])
-    sentence = f"The best ROC AUC is that of {NAMES[top]} ({configs[top]['roc_auc']:.3f})."
-    if top != "rules" and {"rules", "classifier", "combined"} <= configs.keys():
-        at_rules = (configs["rules"]["recall_at_fpr_5pct"] or {}).get("recall")
-        at_both = (configs["combined"]["recall_at_fpr_5pct"] or {}).get("recall")
-        documents = configs["classifier"]["negatives_by_kind"]["negative"]
-        hard = configs["classifier"]["hard_negatives"]["flag"]
-        if at_rules is not None and at_both is not None and at_both < at_rules:
-            sentence = (
-                f"The best ROC AUC is that of {NAMES[top]} ({configs[top]['roc_auc']:.3f}), but "
-                f"at a false positive rate of 5% or less the rules alone find more attacks "
-                f"({at_rules:.2f} against {at_both:.2f}). The combined score is the higher of the "
-                "two scores, so every harmless text that the model flags is flagged by it too: "
-                f"at {flag} the model flags {documents['count']} of {documents['of']} harmless "
-                f"documents and {hard['count']} of {hard['of']} hard negatives."
+    top = max(ranked, key=lambda n: recall_of(configs, n) or 0.0)
+    rules = recall_of(configs, "rules")
+    sentence = (
+        f"At a false positive rate of 5% or less the row that finds most is {names[top]} "
+        f"({recall_of(configs, top):.2f})."
+    )
+    if rules is not None and top != "rules":
+        sentence += f" The rules alone find {rules:.2f}."
+    older = recall_of(configs, "previous_combined")
+    now = recall_of(configs, "combined")
+    if older is not None and now is not None and rules is not None:
+        if older < rules:
+            sentence += (
+                f" The higher of the two scores found less than the rules alone ({older:.2f} "
+                f"against {rules:.2f}), because it keeps every false positive of the model."
+            )
+        if now < rules:
+            sentence += (
+                f" Rules first, then the model, finds less than the rules alone ({now:.2f} "
+                f"against {rules:.2f}) on this split."
             )
     return [sentence, ""]
 
 
 def waiting_caution(configs: Mapping[str, Any]) -> list[str]:
-    """Why the row for the 300 ms wait is a weak number, from the threshold of the rows above."""
+    """Why the rows for the 300 ms wait are weak numbers, from the thresholds of the rows above."""
     point = (configs.get("combined") or {}).get("recall_at_fpr_5pct") or {}
     threshold = point.get("threshold")
     where = "near the top of its range" if threshold is None else f"at {threshold:.2f}"
     return [
         "Recall at a false positive rate of 5% depends on the few harmless texts that score "
-        f"highest. The threshold of the rules and model row sits {where}, set by the harmless "
-        "texts that the model gives a high score, so this row changes with which of those texts "
-        "happen to be among the scans that fell back to the rules. Read it as what the wait does "
-        "to this sample and not as a property of the detector.",
+        f"highest. The threshold of the rules first row sits {where}, set by the harmless texts "
+        "that score high, so a row for the wait changes with which of those texts happen to be "
+        "among the scans that fell back to the rules. Read it as what the wait does to this "
+        "sample and not as a property of the detector.",
         "",
     ]
 
@@ -205,11 +255,199 @@ def small_groups(configs: Mapping[str, Any], shown: Sequence[str]) -> list[str]:
     ]
 
 
+def percent(value: float | None) -> str:
+    return NOT if value is None else f"{100 * value:.0f}%"
+
+
+def combination_sections(record: Mapping[str, Any] | None) -> list[str]:
+    """How the join and the windows were picked on dev, from the record the sweep left."""
+    if not record:
+        return []
+    chosen = record["chosen"]
+    shape = chosen["shape"]
+    size, _, overlap = shape.partition("/")
+    weight = chosen["combiner"]["params"]["weight"]
+    rows = record["rows"]
+    shapes = sorted({r["shape"] for r in rows}, key=lambda key: -int(key.split("/")[0]))
+
+    def find(key: str, name: str, **params: float) -> Mapping[str, Any] | None:
+        for r in rows:
+            if (
+                r["shape"] == key
+                and r["aggregate"] == "max"
+                and r["combiner"]["name"] == name
+                and all(r["combiner"]["params"].get(k) == v for k, v in params.items())
+            ):
+                return r
+        return None
+
+    def recall(r: Mapping[str, Any] | None) -> str:
+        return NOT if r is None else f"{r['recall_at_fpr_5pct']:.2f}"
+
+    rules_row = find(shapes[0], "rules")
+    out = [
+        "### How the join and the windows were picked, on the dev split",
+        "",
+        f"Dev has {record['n']} texts and {record['injections']} injections. "
+        f"`python -m eval.detector.combine` tried {record['candidates']} candidates on it (a "
+        "shape of window, how the windows of a text are made one score, and a way to join that "
+        "with the rules' score) and the test split was not read. Recall at a false positive "
+        "rate of 5% or less on dev, by the windows the model reads in "
+        f"(the rules alone find {recall(rules_row)}, whatever the windows):",
+        "",
+        table(
+            [
+                "Windows of",
+                "Model alone",
+                "Higher of the two",
+                f"Rules first, then the model (weight {weight})",
+            ],
+            [
+                [
+                    key.split("/")[0],
+                    recall(find(key, "model")),
+                    recall(find(key, "max")),
+                    recall(find(key, "rules_first", floor=0.5, weight=weight)),
+                ]
+                for key in shapes
+            ],
+        ),
+        "",
+    ]
+    diagnosis = record.get("diagnosis") or {}
+    if diagnosis:
+        header = [
+            "Kind of text",
+            "Texts",
+            "Rules",
+            *(f"Model, windows of {k.split('/')[0]}" for k in shapes),
+        ]
+        body = []
+        for kind in [k for k in KINDS_OF_TEXT if k in diagnosis]:
+            info = diagnosis[kind]
+            body.append(
+                [
+                    kind,
+                    str(info["n"]),
+                    percent(info["rules_at_0.5"]),
+                    *(percent(info["model"][k]["at_0.5"]) for k in shapes),
+                ]
+            )
+        out += [
+            "Why the model was weak on documents: the share of each kind of text that scores "
+            "0.5 or more, from the model alone and from the rules. A long window holds an attack "
+            "and the document around it, and the model scores the whole.",
+            "",
+            table(header, body),
+            "",
+        ]
+    boot = record.get("bootstrap") or {}
+    gain = (boot.get("gain_over_reference") or {}).get("chosen")
+    older = (boot.get("gain_over_reference") or {}).get("phase 7")
+    if gain:
+        out += [
+            f"Resampling the carriers of dev {boot['resamples']} times, rules first with windows "
+            f"of {size} finds {gain['mean']:+.2f} (95% {gain['low']:+.2f} to "
+            f"{gain['high']:+.2f}) of the injections more than the rules alone at a false positive "
+            "rate of 5%"
+            + (
+                f", and the higher of the two over windows of 510 finds {older['mean']:+.2f} "
+                f"(95% {older['low']:+.2f} to {older['high']:+.2f})."
+                if older
+                else "."
+            ),
+            "",
+        ]
+    out += [
+        f"The windows of {size} tokens with an overlap of {overlap} and the model weight of "
+        f"{weight} were picked by a rule written before the numbers: of the joins the "
+        "gateway can run, the candidates within the noise of the best recall on dev (7 of the "
+        f"{record['injections']} injections) are tied, and of those the larger window wins. "
+        "The test split was scored once, with that choice.",
+        "",
+    ]
+    return out
+
+
+def skipped_note(result: Mapping[str, Any]) -> list[str]:
+    """Why the scans of rules first, then the model, are shorter: it does not ask the model about a
+    text the rules flag."""
+    skipped, total = result.get("model_skipped"), result["samples"]["n"]
+    if not skipped:
+        return []
+    return [
+        "Rules first, then the model, does not give the model a text that the rules flag "
+        f"({skipped} of the {total} texts of this run), so its scans are shorter than those of "
+        "the model alone. A scan with the model runs the rules too.",
+        "",
+    ]
+
+
+def kinds_of_attack(configs: Mapping[str, Any], names: Mapping[str, str]) -> list[str]:
+    """Recall by family, by how the attack was hidden and by template, for the rules, for what
+    Phase 7 shipped and for the scanner as it is set now."""
+    columns = [n for n in ("rules", "previous_combined", "combined") if n in configs]
+    out: list[str] = []
+    for title, key in (
+        ("Family", "recall_by_family"),
+        ("Hidden with", "recall_by_hidden"),
+        ("Template", "recall_by_template"),
+    ):
+        kinds = sorted({k for n in columns for k in configs[n][key]})
+        rows = [[k, *(rate(configs[n][key].get(k)) for n in columns)] for k in kinds]
+        out += [table([title, *(names[n] for n in columns)], rows), ""]
+    return out
+
+
+def limits(document: Mapping[str, Any], shown: Sequence[str]) -> list[str]:
+    """What the numbers do not say."""
+    result = document["result"]
+    configs = configs_of(document)
+    now = result.get("scanner") or {}
+    record = document.get("combination") or {}
+    out = [
+        f"- The model is `{MODEL}` at revision `{MODEL_REVISION[:7]}`. Its card says it is for "
+        "English and does not detect jailbreaks."
+        + (
+            f" It reads in windows of {now['window_tokens']} tokens that overlap by "
+            f"{now['window_overlap']}."
+            if now
+            else ""
+        )
+    ]
+    if now.get("join") == "rules_first":
+        out.append(
+            "- Rules first, then the model, lets the model add to a score that the rules left "
+            f"under the flag threshold, at a weight of {now['model_weight']}. So the model alone "
+            "can flag a text and cannot make an injection of it: only the rules can taint a "
+            "session (ADR-0011)."
+        )
+    if record:
+        out.append(
+            f"- The windows and the weight were picked on dev from {record['candidates']} "
+            "candidates, so the recall of the chosen one on dev is higher than a sample it was not "
+            "picked on would give. The test split is that sample, and it was scored once with the "
+            "choice."
+        )
+    out += [
+        *small_groups(configs, shown),
+        "- Prompt Guard 2 (`prompt-guard-2-86m`) was not measured: its files answer 401 without a "
+        "Hugging Face login and the acceptance of the Llama license, and ADR-0011 records the "
+        "check.",
+        "- Images are not read by the scanner, so there are none in the data.",
+        "- The numbers are for one machine and one day. The times in particular move with the load "
+        "of the machine (`docs/spikes/scanner.md` found five to seven times between a quiet "
+        "machine and a busy one).",
+    ]
+    return out
+
+
 def render_section(document: Mapping[str, Any]) -> str:
     """The detector section of docs/results.md, from a report document."""
     result = document["result"]
     configs = configs_of(document)
-    shown = [name for name in ("rules", "classifier", "combined") if name in configs]
+    names = names_of(result)
+    shown = [name for name in ORDER if name in configs]
     flag, taint = result["thresholds"]["flag"], result["thresholds"]["taint"]
     samples = result["samples"]
     commit = document["commit"][:12] + (" plus uncommitted changes" if document["dirty"] else "")
@@ -248,13 +486,14 @@ def render_section(document: Mapping[str, Any]) -> str:
     ]
     for note in document["dataset"]["notes"]:
         out += ["", f"**Not complete**: {note}."]
-    out += ["", "### How good the scores are", ""]
+    out += ["", *combination_sections(document.get("combination"))]
+    out += ["### How good the scores are", ""]
     rows = []
     for name in shown:
         c = configs[name]
         rows.append(
             [
-                NAMES[name],
+                names[name],
                 recall_cell(c["recall_at_fpr_5pct"]),
                 num(c["roc_auc"], 3),
                 num(c["average_precision"], 3),
@@ -274,7 +513,7 @@ def render_section(document: Mapping[str, Any]) -> str:
         "Recall at a fixed false positive rate does not depend on the thresholds, so it is the "
         "number to compare configs by. The interval is the Wilson 95% interval of the recall.",
         "",
-        *reading(configs, shown, flag),
+        *reading(configs, shown, names),
         "### At the configured thresholds",
         "",
     ]
@@ -284,7 +523,7 @@ def render_section(document: Mapping[str, Any]) -> str:
         for label, point in (("flag", c["flag"]), ("taint", c["taint"])):
             rows.append(
                 [
-                    NAMES[name],
+                    names[name],
                     f"{label} at {point['threshold']}",
                     num(point["precision"]),
                     num(point["recall"]),
@@ -304,7 +543,7 @@ def render_section(document: Mapping[str, Any]) -> str:
         kinds = c["negatives_by_kind"]
         rows.append(
             [
-                NAMES[name],
+                names[name],
                 rate(hard["flag"]),
                 rate(hard["taint"]),
                 rate(kinds["negative"]),
@@ -333,7 +572,7 @@ def render_section(document: Mapping[str, Any]) -> str:
         [family, *(rate(configs[n]["hard_negatives"]["by_family"].get(family)) for n in shown)]
         for family in families
     ]
-    out += [table(["Kind of hard negative", *(NAMES[n] for n in shown)], rows), ""]
+    out += [table(["Kind of hard negative", *(names[n] for n in shown)], rows), ""]
     out += ["### Public prompts and documents apart", ""]
     rows = []
     for name in shown:
@@ -341,7 +580,7 @@ def render_section(document: Mapping[str, Any]) -> str:
             sub = configs[name]["subsets"][part]
             rows.append(
                 [
-                    NAMES[name],
+                    names[name],
                     part,
                     f"{sub['n']} ({sub['injections']} injections)",
                     recall_cell(sub.get("recall_at_fpr_5pct")),
@@ -372,7 +611,7 @@ def render_section(document: Mapping[str, Any]) -> str:
             cell = latency[bucket]
             rows.append(
                 [
-                    NAMES[name],
+                    names[name],
                     bucket,
                     str(cell["n"]),
                     num(cell["p50_ms"], 1),
@@ -382,16 +621,15 @@ def render_section(document: Mapping[str, Any]) -> str:
     out += [
         table(["Config", "Tokens", "Texts", "p50 ms", "p95 ms"], rows),
         "",
-        "A scan with the model runs the rules too, so the last two rows are the same scans.",
-        "",
+        *skipped_note(result),
     ]
-    if "combined_300ms" in configs:
-        c = configs["combined_300ms"]
+    waiting = [n for n in ("previous_combined_300ms", "combined_300ms") if n in configs]
+    if waiting:
         out += [
             "### With the 300 ms wait of the gateway",
             "",
-            "The gateway waits 300 ms for the model and then goes on with the rules. This row is "
-            "computed from the measured time of each scan: a text whose scan took longer is "
+            "The gateway waits 300 ms for the model and then goes on with the rules. These rows "
+            "are computed from the measured time of each scan: a text whose scan took longer is "
             "scored by its rules alone.",
             "",
             table(
@@ -403,41 +641,24 @@ def render_section(document: Mapping[str, Any]) -> str:
                 ],
                 [
                     [
-                        NAMES["combined_300ms"],
-                        recall_cell(c["recall_at_fpr_5pct"]),
-                        rate(c["hard_negatives"]["flag"]),
-                        rate(c["fell_back_to_rules"]),
+                        names[name],
+                        recall_cell(configs[name]["recall_at_fpr_5pct"]),
+                        rate(configs[name]["hard_negatives"]["flag"]),
+                        rate(configs[name]["fell_back_to_rules"]),
                     ]
+                    for name in waiting
                 ],
             ),
             "",
             *waiting_caution(configs),
         ]
     if "combined" in configs:
-        out += ["### Recall by kind of attack (rules and model, flagged at " + str(flag) + ")", ""]
-        c = configs["combined"]
-        out += [
-            table(
-                ["Family", "Recall"],
-                [[family, rate(cell)] for family, cell in c["recall_by_family"].items()],
-            ),
-            "",
-            table(
-                ["Hidden with", "Recall"],
-                [[how, rate(cell)] for how, cell in c["recall_by_hidden"].items()],
-            ),
-            "",
-        ]
+        out += [f"### Recall by kind of attack (flagged at {flag})", ""]
+        out += kinds_of_attack(configs, names)
     out += [
         "### What is and is not in these numbers",
         "",
-        f"- The model is `{MODEL}` at revision `{MODEL_REVISION[:7]}`. Its card says it is for "
-        "English and does not detect jailbreaks.",
-        *small_groups(configs, shown),
-        "- Images are not read by the scanner, so there are none in the data.",
-        "- The numbers are for one machine and one day. The times in particular move with the load "
-        "of the machine (`docs/spikes/scanner.md` found five to seven times between a quiet "
-        "machine and a busy one).",
+        *limits(document, shown),
     ]
     return "\n".join(out) + "\n"
 
@@ -506,6 +727,57 @@ def dataset_facts(data: Dataset) -> dict[str, Any]:
     }
 
 
+def run_passes(
+    data: Dataset,
+    split: str,
+    base: ScannerSettings,
+    *,
+    limit: int | None = None,
+    progress: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    """Score a split in three passes of the scanner over the same texts and merge the configs
+    (see the top of this file): the scanner as set in `base`, the model alone at the same windows,
+    and the scanner as Phase 7 shipped it."""
+    current = run_split(
+        data, split, ("rules", "combined"), limit=limit, settings=base, progress=progress
+    )
+    alone = run_split(
+        data,
+        split,
+        ("classifier",),
+        limit=limit,
+        settings=base.model_copy(update={"join": "max"}),
+        progress=progress,
+    )
+    earlier = base.model_copy(
+        update=PREVIOUS.model_dump(include={"join", "window_tokens", "window_overlap"})
+    )
+    before = run_split(
+        data, split, ("classifier", "combined"), limit=limit, settings=earlier, progress=progress
+    )
+    result = dict(current)
+    result["configs"] = {
+        **current["configs"],
+        "classifier": alone["configs"]["classifier"],
+        **{f"previous_{name}": cell for name, cell in before["configs"].items() if name != "rules"},
+    }
+    result["previous_scanner"] = before["scanner"]
+    result["model_failures"] = (
+        current["model_failures"] + alone["model_failures"] + before["model_failures"]
+    )
+    return result
+
+
+def combination_record() -> dict[str, Any] | None:
+    """The latest record that `eval.detector.combine` left of the sweep on dev, or None."""
+    found = sorted(RESULTS.glob("combination-dev-*.json"))
+    if not found:
+        return None
+    record: dict[str, Any] = json.loads(found[-1].read_text(encoding="utf-8"))
+    record["file"] = found[-1].name
+    return record
+
+
 def build_document(
     data: Dataset, *, limit: int | None = None, settings: ScannerSettings | None = None
 ) -> dict[str, Any]:
@@ -516,14 +788,7 @@ def build_document(
         if done % 100 == 0 or done == total:
             print(f"  scored {done} of {total}", file=sys.stderr, flush=True)
 
-    result = run_split(
-        data,
-        "test",
-        ("rules", "classifier", "combined"),
-        limit=limit,
-        settings=base,
-        progress=progress,
-    )
+    result = run_passes(data, "test", base, limit=limit, progress=progress)
     state = git_state()
     return {
         "date": datetime.now(UTC).date().isoformat(),
@@ -534,6 +799,7 @@ def build_document(
         "test_runs": count_test_runs(),
         "earlier_runs": earlier_runs(),
         "tuning": tuning_record(),
+        "combination": combination_record(),
         "result": result,
     }
 
