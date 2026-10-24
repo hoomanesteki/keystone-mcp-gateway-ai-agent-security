@@ -76,7 +76,7 @@ ci-local: up-core ## the same steps as CI, run locally
 	docker run --rm keystone:ci version
 	$(MAKE) commits prose
 
-gate: up echo-image ## everything a phase gate runs: make gate PHASE=N
+gate: up echo-image ## everything a phase gate runs: make gate PHASE=N (9 runs phases 0 to 8 inside phase_9.sh)
 	@test -n "$(PHASE)" || { echo "usage: make gate PHASE=N" >&2; exit 2; }
 	@if [ $(PHASE) -ge 7 ]; then uv sync --locked --extra scanner --extra eval; fi
 	$(MAKE) lint type
@@ -85,6 +85,7 @@ gate: up echo-image ## everything a phase gate runs: make gate PHASE=N
 	@if [ $(PHASE) -ge 6 ]; then $(MAKE) console-check console-e2e; fi
 	@k=0; while [ $$k -le $(PHASE) ]; do \
 		f=scripts/smoke/phase_$$k.sh; \
+		if [ $$k -lt 9 ] && [ $(PHASE) -ge 9 ]; then k=$$((k+1)); continue; fi; \
 		if [ -f $$f ]; then echo "== smoke: phase $$k"; bash $$f || exit 1; fi; \
 		k=$$((k+1)); \
 	done
