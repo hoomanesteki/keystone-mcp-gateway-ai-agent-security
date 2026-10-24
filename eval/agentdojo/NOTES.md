@@ -78,10 +78,11 @@ uv run --with agentdojo==0.1.35 python -m agentdojo.scripts.benchmark -s $SUITE 
     --attack $ATTACK --defense transformers_pi_detector --benchmark-version v1.2.2
 ```
 
-`run.py` prints the utility, the attacks that succeeded and, for the Keystone run, how many tool
-results the scan saw and what it did with them. The logs of AgentDojo are in `runs/`. With no key
-it stops at once, with status 2 and a line that begins `no pipeline for <model>: OpenAIError:
-Missing credentials`.
+`run.py` prints the utility, the attacks that succeeded (AgentDojo calls it `security`, and a true in
+it means the attacker's goal was reached) and, for the Keystone run, how many tool results the scan
+saw and what it did with them. The logs of AgentDojo are in `runs/`. With no key it stops at once,
+with status 2 and a line that begins `no pipeline for <model>: OpenAIError: Missing credentials`.
+
 A full run of one suite is one call of the model for each step of each of its tasks (40 user tasks
 alone, and 560 pairs with the attack, in workspace), so set a spend limit on the provider's side
 before it starts.
