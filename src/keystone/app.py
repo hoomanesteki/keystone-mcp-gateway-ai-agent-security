@@ -147,6 +147,7 @@ def create_app(
         [t.id for t in settings.tenants],
         include_demo=settings.policy.include_demo,
         recorder=PolicyVersionRepo(sessions),
+        exclusions={t.id: t.exclude_default_policies for t in settings.tenants},
     )
     policies.start()
     # What holds a new tool whose description, or the description of a field of its schema, reads

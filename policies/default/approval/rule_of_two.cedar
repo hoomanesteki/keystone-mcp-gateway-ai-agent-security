@@ -18,3 +18,12 @@ when { resource.tags.contains("external_effect")
 @id("tainted-external-effect")
 permit (principal, action == Keystone::Action::"call_tool", resource)
 when { context.session_tainted && resource.tags.contains("external_effect") };
+
+// A session that has read untrusted text asks before any external effect, whatever else it read
+// (ADR-0018). The red team found that phishing a colleague or overwriting a file needs no
+// sensitive data, so the rule above never asked about the attacks that landed. A tenant that
+// accepts the cost lists this id under `exclude_default_policies` in its config.
+@id("untrusted-then-external-effect")
+permit (principal, action == Keystone::Action::"call_tool", resource)
+when { resource.tags.contains("external_effect")
+       && context.session_flags.contains("reads_untrusted") };

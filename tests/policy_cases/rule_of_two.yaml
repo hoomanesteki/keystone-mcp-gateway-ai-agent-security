@@ -25,15 +25,15 @@
   tool: *write
   session: {flags: [reads_untrusted, reads_sensitive], tainted: false}
   expect: require_approval
-  expect_reasons: [rule-of-two]
+  expect_reasons: [rule-of-two, untrusted-then-external-effect]
 
-- name: untrusted alone is not enough
+- name: untrusted alone asks as well, since KS-991
   tenant: acme
   principal: *olivia
   tool: *write
   session: {flags: [reads_untrusted], tainted: false}
-  expect: allow
-  expect_reasons: [operators-high]
+  expect: require_approval
+  expect_reasons: [untrusted-then-external-effect]
 
 - name: sensitive alone is not enough
   tenant: acme
@@ -65,7 +65,7 @@
   tool: {name: web__post, risk: low, tags: [external_effect]}
   session: {flags: [reads_untrusted, reads_sensitive], tainted: false}
   expect: require_approval
-  expect_reasons: [rule-of-two]
+  expect_reasons: [rule-of-two, untrusted-then-external-effect]
 
 - name: a tainted session asks before an external effect, flags or none
   tenant: acme
@@ -81,7 +81,7 @@
   tool: *write
   session: {flags: [reads_untrusted, reads_sensitive], tainted: true}
   expect: require_approval
-  expect_reasons: [rule-of-two, tainted-external-effect]
+  expect_reasons: [rule-of-two, tainted-external-effect, untrusted-then-external-effect]
 
 - name: taint alone does not stop a high risk tool that has no external effect
   tenant: acme
@@ -160,7 +160,7 @@
   arguments: {to: colleague@acme.test, subject: Q3, body: The numbers are in}
   session: {flags: [reads_untrusted, reads_sensitive], tainted: false}
   expect: require_approval
-  expect_reasons: [rule-of-two]
+  expect_reasons: [rule-of-two, untrusted-then-external-effect]
 
 - name: the poisoned email of the demo is asked about for all three reasons
   tenant: acme
@@ -169,4 +169,49 @@
   arguments: {to: attacker@evil.test, subject: Invoice 4471, body: Payment details are unchanged}
   session: {flags: [reads_untrusted, reads_sensitive], tainted: true}
   expect: require_approval
-  expect_reasons: [external-email-needs-approval, rule-of-two, tainted-external-effect]
+  expect_reasons:
+    [external-email-needs-approval, rule-of-two, tainted-external-effect, untrusted-then-external-effect]
+
+# KS-991 (ADR-0018): reading untrusted text is enough to be asked before an external effect.
+- name: a page read and nothing sensitive still asks before a file is written
+  tenant: acme
+  principal: *olivia
+  tool: *write
+  session: {flags: [reads_untrusted], tainted: false}
+  arguments: {path: config/settings.txt}
+  expect: require_approval
+  expect_reasons: [untrusted-then-external-effect]
+
+- name: phishing a colleague after reading a page asks, with a mail to the own domain
+  tenant: acme
+  principal: *olivia
+  tool: *send
+  arguments: {to: sam.okafor@acme.test, subject: Please confirm, body: Your password}
+  session: {flags: [reads_untrusted], tainted: false}
+  expect: require_approval
+  expect_reasons: [untrusted-then-external-effect]
+
+- name: reading sensitive data and sending is not asked about without untrusted input
+  tenant: acme
+  principal: *olivia
+  tool: *send
+  arguments: {to: sam.okafor@acme.test, subject: Q3, body: The numbers are in}
+  session: {flags: [reads_sensitive], tainted: false}
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: reading untrusted text does not ask before a tool with no external effect
+  tenant: acme
+  principal: *olivia
+  tool: {name: files__read_private, risk: high, tags: [reads_sensitive]}
+  session: {flags: [reads_untrusted], tainted: false}
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: the rule is every tenant's
+  tenant: globex
+  principal: {user: gina, groups: [operators], agent: ops-agent, trust: high}
+  tool: {name: files_globex__write_file, risk: high, tags: [external_effect], tenant: globex}
+  session: {flags: [reads_untrusted], tainted: false}
+  expect: require_approval
+  expect_reasons: [untrusted-then-external-effect]

@@ -160,5 +160,5 @@ def test_c1_is_the_policies_without_the_rule_of_two_and_nothing_else(tmp_path: P
     c1 = {p.id for p in load_policies(copy, ("acme",), include_demo=True).policies}
 
     assert full >= RULE_OF_TWO and not RULE_OF_TWO & c1
-    assert full - c1 == RULE_OF_TWO  # nothing else was lost
+    assert full - c1 == RULE_OF_TWO | {"untrusted-then-external-effect"}  # nothing else was lost
     assert c1 >= {"external-email-needs-approval", "approve-transfer-over-500"}

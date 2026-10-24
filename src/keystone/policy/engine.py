@@ -195,12 +195,12 @@ class CedarPolicyEngine:
 
         approval = _ask("approval", tenant.approval, snapshot.schema, entities, request)
         if approval.decision == "allow":
-            return _Outcome(
-                Effect.REQUIRE_APPROVAL,
-                approval.reasons,
-                access=access.reasons,
-                approval=approval.reasons,
-            )
+            # A rule the tenant turned off (ADR-0017) is not a reason. The set holds permits only,
+            # so with no reason left no rule asks.
+            asking = tuple(r for r in approval.reasons if r not in tenant.excluded)
+            if not asking:
+                return _Outcome(Effect.ALLOW, access.reasons, access=access.reasons)
+            return _Outcome(Effect.REQUIRE_APPROVAL, asking, access=access.reasons, approval=asking)
         if approval.decision == "deny" and not approval.reasons:
             # No approval permit matched. A deny that names a policy would be a forbid in the
             # approval set, which the loader refuses; it is not read as "no approval needed".
