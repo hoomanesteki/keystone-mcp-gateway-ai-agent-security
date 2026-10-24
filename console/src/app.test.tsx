@@ -35,7 +35,7 @@ test("shows every page to an admin", async () => {
   const links = within(menu())
     .getAllByRole("link")
     .map((link) => link.textContent);
-  expect(links).toEqual(["Approvals", "Audit", "Tools"]);
+  expect(links).toEqual(["Approvals", "Audit", "Tools", "Budgets", "Sessions"]);
 });
 
 test("tells a person with no role to ask for one", async () => {

@@ -13,6 +13,8 @@ const ICONS: Record<(typeof PAGES)[number]["page"], IconName> = {
   approvals: "approvals",
   audit: "audit",
   tools: "tools",
+  budgets: "budgets",
+  sessions: "sessions",
 };
 
 /** How many requests wait, beside the menu entry: an approver sees it from any page. */

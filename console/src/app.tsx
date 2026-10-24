@@ -15,8 +15,10 @@ import { ToastProvider } from "./components/ToastProvider";
 import { config } from "./config";
 import { Approvals } from "./pages/Approvals";
 import { Audit } from "./pages/Audit";
+import { Budgets } from "./pages/Budgets";
 import { Home } from "./pages/Home";
 import { NotFound } from "./pages/NotFound";
+import { Sessions } from "./pages/Sessions";
 import { Tools } from "./pages/Tools";
 
 export interface AppProps {
@@ -103,6 +105,22 @@ export function App({ auth, fetch: fetchImpl, queries: given }: AppProps) {
                     element={
                       <Guard page="tools">
                         <Tools />
+                      </Guard>
+                    }
+                  />
+                  <Route
+                    path="budgets"
+                    element={
+                      <Guard page="budgets">
+                        <Budgets />
+                      </Guard>
+                    }
+                  />
+                  <Route
+                    path="sessions"
+                    element={
+                      <Guard page="sessions">
+                        <Sessions />
                       </Guard>
                     }
                   />
