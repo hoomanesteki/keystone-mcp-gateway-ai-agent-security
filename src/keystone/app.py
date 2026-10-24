@@ -422,6 +422,7 @@ def create_app(
             else None,
             approvals=approvals,
             budgets=budgets,
+            scanner=scanner,
         )
     )
     app.mount(PREFIX, admin_api)

@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
+from keystone.core.types import ScanResult
+
 Effect = Literal["allow", "deny", "require_approval"]
 Outcome = Literal["ok", "rejected", "error"]
 ToolState = Literal["active", "quarantined", "disabled"]
@@ -225,3 +227,34 @@ class ErrorBody(BaseModel):
     status: str | None = Field(
         default=None, description="With a 409: what the request is now (approved, expired, ...)."
     )
+
+
+# The longest text the scan route takes. The scanner reads at most `scanner.max_scan_chars` of it
+# (200,000 by default) and says so when it cut; this is the most a request may carry.
+MAX_SCAN_TEXT = 1_000_000
+
+
+class ScanBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(
+        max_length=MAX_SCAN_TEXT,
+        description="The text to scan, as the output of a tool: what an agent would be given.",
+    )
+    risk: Literal["low", "medium", "high", "critical"] = Field(
+        default="medium",
+        description="The risk of the tool the text came from. It picks the action for a text "
+        "that scores as an injection: `scanner.actions` has one for each risk.",
+    )
+
+
+class ScanOutcome(BaseModel):
+    """What the scanner makes of a text, and what an agent would be given in its place."""
+
+    scan: ScanResult = Field(description="The score, the label, the rules that hit and the action.")
+    content: list[dict[str, Any]] = Field(
+        description="The content blocks after the action: the text as it came for `pass`, with a "
+        "warning for `annotate`, with invisible characters and leaking links cut out for "
+        "`redact`, and the refusal that stands in for the output for `block`."
+    )
+    is_error: bool = Field(description="The content is a refusal (`block`).")

@@ -40,6 +40,8 @@ from keystone.admin.schemas import (
     Outcome,
     PolicyEntry,
     PolicySummary,
+    ScanBody,
+    ScanOutcome,
     SessionInfo,
     ToolDetail,
     ToolDiff,
@@ -59,9 +61,11 @@ from keystone.approvals.service import (
 )
 from keystone.audit.redact import is_masked
 from keystone.audit.verify import export_record, verify_chain
-from keystone.core.types import Principal, SessionState
+from keystone.core.ids import new_id
+from keystone.core.types import Principal, Risk, SessionState, ToolRef, ToolResult
 from keystone.db.models import AuditEvent, Tool, Upstream
 from keystone.defense.description_check import Screener
+from keystone.defense.scanner import OutputScanner
 from keystone.gateway.sessions import SessionDirectory
 from keystone.metering.budgets import BudgetService
 from keystone.policy.store import PolicyStore
@@ -95,10 +99,16 @@ class AdminDeps:
     # What reads the descriptions of a tool for the screening a reviewer is shown (KS-706). The
     # default is the first check alone, which is what the gateway does with the scanner off.
     screener: Screener = field(default_factory=Screener)
+    # What scans the outputs of tools, for the scan route (KS-904). None when the scanner is off.
+    scanner: OutputScanner | None = None
 
 
 class ApprovalsUnavailable(Exception):
     """There is no approval service: Keystone has no master keys."""
+
+
+class ScannerUnavailable(Exception):
+    """There is no scanner: it is off, or the profile builds none."""
 
 
 class NotFound(Exception):
@@ -132,6 +142,10 @@ async def _no_longer_pending(_request: Request, exc: Exception) -> Response:
 
 async def _unavailable(_request: Request, _exc: Exception) -> Response:
     return _error(503, "unavailable", "approvals need KEYSTONE_MASTER_KEYS, and Keystone has none")
+
+
+async def _scanner_off(_request: Request, _exc: Exception) -> Response:
+    return _error(503, "unavailable", "the scanner is off, so there is nothing to scan with")
 
 
 def _summary(row: Tool) -> ToolSummary:
@@ -238,6 +252,7 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
     app.add_exception_handler(OwnRequest, _forbidden)
     app.add_exception_handler(NotPending, _no_longer_pending)
     app.add_exception_handler(ApprovalsUnavailable, _unavailable)
+    app.add_exception_handler(ScannerUnavailable, _scanner_off)
     # Only the console's origin may call this API from a browser. A request from anywhere else
     # gets no CORS headers, and a preflight from it is refused.
     app.add_middleware(
@@ -485,6 +500,40 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
         record = await approval_service().decide(approval_id, principal, body.approve, body.note)
         [item] = await present([record], principal)
         return item
+
+    # -- scan
+
+    @app.post(
+        "/scan",
+        tags=["scan"],
+        summary="Scan a text as the output of a tool, and say what an agent would be given",
+        responses={503: {"model": ErrorBody, "description": "The scanner is off."}},
+    )
+    async def scan_text(principal: admin, body: ScanBody) -> ScanOutcome:
+        """The same scan and the same action as the output of a call gets, for a text that did
+        not come from one: the rules, the model if there is one, and the action for the risk.
+        It changes nothing, records nothing in the audit log and taints no session. A test of a
+        defense against another benchmark's attacks uses it (`eval/agentdojo`)."""
+        if deps.scanner is None:
+            raise ScannerUnavailable
+        tool = ToolRef(
+            name="scan__text",
+            upstream_id="scan",
+            upstream_tool_name="text",
+            tenant_id=principal.tenant_id,
+            description="A text sent to the scan route.",
+            input_schema={},
+            risk=Risk(body.risk),
+            description_hash="-",
+            schema_hash="-",
+        )
+        result = ToolResult(content=[{"type": "text", "text": body.text}])
+        inspection = await deps.scanner.inspect(result, tool, new_id())
+        return ScanOutcome(
+            scan=inspection.scan,
+            content=list(inspection.result.content),
+            is_error=inspection.result.is_error,
+        )
 
     # -- upstreams, sessions, policies
 

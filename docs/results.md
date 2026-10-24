@@ -500,3 +500,21 @@ The calls that failed, by what Keystone answered, where in the run they were, an
 
 The host is idle when little else runs on it: the table says how idle it was in the two seconds before the target was measured, the CPU the container used while the calls were made (400% is the 4 CPUs it was limited to), and how busy the busiest process of the generator was (100% is one CPU).
 <!-- perf:end -->
+
+## AgentDojo
+
+not run: needs an API key. The adapter is built and tested without a model (`eval/agentdojo/`, `tests/unit/test_agentdojo_adapter.py`, `tests/integration/test_admin_scan.py`), and it was run once inside AgentDojo 0.1.35 with a scripted model in place of a real one: the benchmark's own tools executor made the tool message, a poisoned result was replaced by Keystone's refusal before the model was asked again, and a harmless result came through unchanged. That shows the pieces fit and says nothing of how a model behaves, so it is not a row of the table.
+
+What would be measured is the scan alone, at the place where AgentDojo puts its own detectors, with the benchmark `v1.2.2` (4 suites, 97 user tasks, 949 pairs of a user task and an injection task, counted from the installed package). The policies, the approvals and the Rule of Two do not take part, because AgentDojo's tools carry no tags and no principal.
+
+| Suite | Model | Attack | Defense | Utility, no attack | Utility, attacked | Attacks that succeeded |
+|---|---|---|---|---|---|---|
+| workspace | | important_instructions | none | not run: needs an API key | not run: needs an API key | not run: needs an API key |
+| workspace | | important_instructions | Keystone scan | not run: needs an API key | not run: needs an API key | not run: needs an API key |
+| workspace | | important_instructions | transformers_pi_detector | not run: needs an API key | not run: needs an API key | not run: needs an API key |
+
+The command for the second row, with the stack up (`make up`) and the key of the model's provider in the environment (the other rows and the version are in `eval/agentdojo/NOTES.md`):
+
+```
+uv run --with agentdojo==0.1.35 python -m eval.agentdojo.run --suite workspace --model gpt-4o-2024-05-13 --attack important_instructions
+```
