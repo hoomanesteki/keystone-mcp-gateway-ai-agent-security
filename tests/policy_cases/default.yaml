@@ -130,6 +130,39 @@
   expect: allow
   expect_reasons: [same-tenant-low-medium]
 
+# The sandbox (KS-802): run_python and run_shell are high risk with the tag code_exec, so the access
+# set that already decides high risk decides them. Nothing here is specific to the sandbox.
+
+- name: support cannot run code
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: &run_python {name: sandbox__run_python, risk: high, tags: [code_exec]}
+  expect: deny
+  expect_reasons: [default-deny]
+
+- name: support does not see the code tools
+  tenant: acme
+  principal: {user: alice, groups: [support], agent: support-agent, trust: standard}
+  tool: *run_python
+  action: list_tool
+  expect: deny
+  expect_reasons: [default-deny]
+
+- name: operators can run code
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: *run_python
+  expect: allow
+  expect_reasons: [operators-high]
+
+- name: a tainted operator session can still run code, which has no network to send anything over
+  tenant: acme
+  principal: {user: olivia, groups: [operators], agent: ops-agent, trust: high}
+  tool: {name: sandbox__run_shell, risk: high, tags: [code_exec]}
+  session: {flags: [reads_untrusted, reads_sensitive], tainted: true}
+  expect: allow
+  expect_reasons: [operators-high]
+
 # The base pack does not read the agent's trust, the session or the hour. Phase 7 adds rules that
 # read the session; these cases keep the base pack honest until then.
 

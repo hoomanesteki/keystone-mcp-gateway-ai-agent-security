@@ -92,3 +92,8 @@ upstreams:
     tenant: acme
     transport: stdio
     command: [python, -m, examples.upstreams.echo_server, --transport, stdio]
+  # The sandbox (KS-802): code an agent writes runs in a container that Keystone starts, with no
+  # network (ADR-0012). Both tools are high risk with the tag code_exec, so by the default access
+  # policy only operators may call them, and a user in support does not see them. The Docker socket
+  # that this needs is mounted by docker-compose.yml. KEYSTONE_SANDBOX_ENABLED=false leaves it out.
+  - {id: sandbox, tenant: acme, transport: builtin}
