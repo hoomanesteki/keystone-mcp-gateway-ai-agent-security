@@ -46,7 +46,8 @@ upstreams:
     transport: http
     url: "http://localhost:8103/mcp"
     tools:
-      get_balance: {risk: medium, tags: [reads_sensitive]}
+      # A price makes a call count against the budgets at the end of this file.
+      get_balance: {risk: medium, tags: [reads_sensitive], cost_per_call_usd: 0.002}
       # The amount in cents: `int` would cut 500.99 down to 500 and let it past a limit of 500.
       transfer: {risk: high, tags: [external_effect], extract: {amount: "$.amount | cents"}}
   - {id: echo, tenant: acme, transport: http, url: "http://localhost:8104/mcp"}
@@ -181,3 +182,13 @@ rate_limits:
   per_user: {capacity: 60, refill_per_s: 1}
   per_agent: {capacity: 120, refill_per_s: 2}
   per_tool: {capacity: 30, refill_per_s: 0.5}
+
+# Spending limits (KS-805, ADR-0014). A call that would take the spend over one is refused before it
+# runs, with KS_BUDGET_EXCEEDED, and the upstream sees nothing. A tool's price is its
+# `cost_per_call_usd` under `upstreams[].tools`. `scope_id` is a user id (the token's `sub`) or an
+# agent id (`azp`); a budget for the tenant leaves it out. Days and months are counted in UTC. The
+# file is the only source: a budget that is not in it any more is removed at the next start.
+budgets:
+  - {tenant: acme, scope: tenant, window: day, limit_usd: 25}
+  - {tenant: acme, scope: user, scope_id: olivia, window: day, limit_usd: 5}
+  - {tenant: acme, scope: agent, scope_id: ops-agent, window: month, limit_usd: 200}

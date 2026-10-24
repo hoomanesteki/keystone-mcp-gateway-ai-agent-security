@@ -300,7 +300,7 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_SANDBOX__MAX_CONCURRENT` | `4` | Containers running at once. A call over that waits for one to end. |
 | `KEYSTONE_RATE_LIMITS__<SCOPE>__CAPACITY` and `KEYSTONE_RATE_LIMITS__<SCOPE>__REFILL_PER_S` | unset (no limit) | A token bucket for one scope: how many calls at once (1 or more) and how many more each second (above 0). `<SCOPE>` is `PER_TENANT`, `PER_USER`, `PER_AGENT` or `PER_TOOL`. Also `rate_limits.per_user: {capacity: 60, refill_per_s: 1}` in the YAML, and an environment variable changes one field of what the file sets. See Rate limits. |
 
-Three sections come from the YAML file only: `tenants`, `upstreams` and `agents` (see `keystone.example.yaml`).
+Four sections come from the YAML file only: `tenants`, `upstreams`, `agents` and `budgets` (see `keystone.example.yaml`).
 
 ## Credentials
 
@@ -390,7 +390,7 @@ and every secret registered with the log scrubber are replaced with `[redacted]`
 the result and in its structured content. The log line `upstream_result_redacted` names the
 upstream and the tool, so an operator can see which server does it. Only a value that comes back as
 it was sent is caught: an upstream that reverses, splits or encodes the key first is not, and a
-server you do not trust belongs behind the sandbox of Phase 8.
+server you do not trust belongs in a container (see Containerized stdio upstreams).
 
 Header names are letters, digits and dashes. `Host`, `Content-Type`, `Mcp-Session-Id` and the
 other headers the HTTP layer owns are refused. Values are printable ASCII on one line, up to 4096
@@ -807,10 +807,12 @@ ends the connection, not the request. The scripted agent waits up to 330 seconds
 - **Spare an approval that a later slot refuses.** The approval is used before the credential slot
   and the dispatcher run. A call refused there, for a per-user credential that is missing or an
   upstream that is marked down, has spent its approval, and a person decides again.
-- **Limit.** Nothing caps the requests one user or session leaves pending, merges identical ones (an
-  approver who approves two lets the call run twice) or counts the callers waiting at once; every
-  waiter holds a Redis connection and polls the table. The rate limits and budgets of Phase 8 are
-  where that belongs. The queue API shows the oldest 200 requests.
+- **Limit.** A call that asks for approval is a call, so a rate limit (KS-804) caps how fast a user,
+  an agent or a tenant can make requests, and the request that would pass it is refused before it is
+  a row. Nothing caps how many requests one user or session leaves pending at a pace under the limit,
+  merges identical ones (an approver who approves two lets the call run twice) or counts the callers
+  waiting at once; every waiter holds a Redis connection and polls the table. The queue API shows
+  the oldest 200 requests.
 - **Put the approvals table in the audit chain.** The table is not part of the tamper-evident
   chain, and the role Keystone connects as can change it. The audit record of a call that ran on
   an approval names it, which ties the two together without protecting the table.
@@ -1162,6 +1164,75 @@ burst and puts back.
 Two limits to know about. A call to a tool that does not exist is refused before it enters the
 pipeline and is not counted, so it is not limited either (it is audited). And the proxy for model
 calls (KS-806) is not rate limited: a budget caps it.
+
+## Budgets
+
+A runaway agent should be stopped by a number, before the money is spent (KS-805, ADR-0014). A
+budget is a limit in dollars for one tenant, one user or one agent over a day or a month:
+
+```yaml
+upstreams:
+  - id: crm
+    # ...
+    tools:
+      lookup: {cost_per_call_usd: 0.002}      # the price of one call
+budgets:
+  - {tenant: acme, scope: tenant, window: day,   limit_usd: 25}
+  - {tenant: acme, scope: user,   scope_id: olivia, window: day, limit_usd: 5}
+  - {tenant: acme, scope: agent,  scope_id: ops-agent, window: month, limit_usd: 200}
+```
+
+`scope_id` is a user's id (the token's `sub`) or an agent's (`azp`); a budget for the tenant leaves it
+out. A day runs from 00:00 UTC to the next, a month from the first at 00:00 UTC. The file is the only
+source: Keystone stores the budgets at each start, changes a limit that changed and removes a budget
+that left the file (and logs it). A budget for a tenant that is not under `tenants` stops the start.
+
+**The pre-check** is the budget slot, the third in the pipeline (`gateway/interceptors/budget.py`,
+which calls `BudgetService.check` in `metering/budgets.py`). It adds the price of the tool to what
+each budget that applies to the caller has spent in its window, and refuses the call if any sum is
+over a limit. `projected = spent + cost_per_call_usd`, so a limit of $0.03 allows three calls of a
+cent and refuses the fourth. It runs before the dispatch, so the upstream sees no request, and again
+after a wait for approval. The budgets are checked tenant, user, agent, and a day before a month, and
+the first to fail is reported. A tool with no price is never held, and neither are Keystone's own.
+
+```
+[keystone:KS_BUDGET_EXCEEDED] call 01J... over budget: the user's budget of $0.03 a day would be passed by this call ($0.03 spent); it resets at 2026-10-24T00:00:00Z
+```
+
+`scope`, `window`, `limit_usd`, `spent_usd` and `resets_at` are in the metadata of the text block,
+and as `keystone/...` in the metadata of the result. The audit record says deny from the source
+`budget`, with the reason `budget:<scope>:<window>`, and the call is not dispatched.
+
+**The metering slot** is the last, and it runs after the upstream answers (`gateway/interceptors/
+metering.py`). A call that was dispatched and came back with a result, an error result included, is
+charged the price of its tool: `ctx.cost_usd` (the audit record's `cost_usd`), a row in `spend_ledger`,
+the counters of the budgets that apply, and the session's `spent_usd` (`keystone__whoami` shows it).
+A call that never reached the upstream is not charged. The row is written once for a call id.
+
+**Where the numbers live.** `spend_ledger` (Postgres) is the record: `ts` (the moment the call began,
+which decides its window), the tenant, user and agent, `kind` (`tool` or `llm`), `ref` (the call id or
+the id of a model request), and for a model `model`, `input_tokens` and `output_tokens`, then
+`cost_usd`. The application's role may add rows and read them and nothing else. The counters are
+Redis strings, `ks:spend:{tenant}:{scope}:{id}:{window}:{start}` (a colon in an id is written `%3A`),
+that expire a day after their window. They are a cache of the ledger: they are set from it at each
+start, and one that is missing when a check needs it is read from the ledger then. A Redis that
+is restarted or flushed, with Keystone running or not, does not give anyone their spend back.
+
+```
+docker compose -f deploy/docker-compose.yml exec postgres psql -U keystone -c \
+  "SELECT ts, user_id, kind, ref, cost_usd FROM spend_ledger ORDER BY ts DESC LIMIT 10"
+docker compose -f deploy/docker-compose.yml exec redis redis-cli --scan --pattern 'ks:spend:*'
+```
+
+**What it does not do.** The check is not a reservation: calls checked together see the same spend,
+and a cap is overshot by at most the price of the calls in flight at once. A charge goes to the
+window its call began in. There is no refund and no way to change a budget without the file. A
+priced call that cannot be recorded (Postgres is away) has its output withheld, since the slot
+fails after the dispatch, and the audit record shows the price it should have had.
+
+`GET /admin/api/v1/budgets` lists the tenant's budgets with `limit_usd`, `spent_usd` (what the check
+reads), `window_start` and `resets_at`, and the console's Budgets page draws them. The local stack
+prices `echostd__echo` at a cent, and gives lena three cents a day and acme $25 a day.
 
 ## Sessions
 
@@ -1518,9 +1589,10 @@ whatever name the caller made up.
 `keystone_approvals_pending{tenant}` counts the approval requests waiting for a decision. The
 approval service sets it when it starts and after each request, decision and sweep.
 
-The metrics of Phase 8 are declared and nothing sets them yet, so the last row of the dashboard
-shows "no data" for those panels until then: `keystone_rate_limited_total`,
-`keystone_budget_spent_usd` and `keystone_llm_tokens_total`.
+`keystone_rate_limited_total{tenant,scope}` counts the calls a rate limit refused (KS-804), and
+`keystone_budget_spent_usd{tenant,scope}` is the highest spend in the current window among the
+budgets of one scope (KS-805). `keystone_llm_tokens_total` is set by the proxy for model calls
+(KS-806), and its panel shows "no data" until the proxy has served a request.
 
 The dashboard has five rows: Traffic (calls per second by effect, outcome and tool, rejections by
 code), Latency (p50 and p95 of the total, p95 by stage, policy evaluation), Upstreams (errors,
