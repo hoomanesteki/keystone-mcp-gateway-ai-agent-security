@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 import time
 from collections import Counter
@@ -35,10 +36,12 @@ from typing import Any
 
 import anyio
 import httpx2
+import mcp_types as types
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
 from eval.perf.stats import summarize
+from examples.agents.scripted_agent import _code
 
 # A paragraph of plain English, repeated to the size asked for. It holds no instruction, so the
 # scanner has nothing to find in it, and its words are ordinary ones, so that a byte costs the
@@ -89,6 +92,27 @@ async def keep_fresh(bearer: Bearer, user: str, client: str) -> None:
         bearer.token = await anyio.to_thread.run_sync(fetch_token, user, client)
 
 
+TAG = re.compile(r"^\[keystone:(KS_[A-Z_]+)\]\s*(.*)", re.DOTALL)
+# The id Keystone puts in a message ("call 01M5... denied: ..."), which differs in every one.
+CALL_ID = re.compile(r"\bcall [0-9A-Z]{26}\s*")
+
+
+def error_kind(result: types.CallToolResult) -> str:
+    """What a failed call is counted as: Keystone's code and the start of its message, such as
+    `tool error KS_DENIED: session state is unavailable`. The messages of the gateway are a short
+    fixed set, so the kinds stay few; a message that varies is cut at 60 characters."""
+    code = _code(result) or ""
+    text = ""
+    for block in result.content:
+        text = str(getattr(block, "text", "") or "")
+        if text:
+            break
+    found = TAG.match(text)
+    message = CALL_ID.sub("", (found.group(2) if found else text)).strip().replace("\n", " ")[:60]
+    kind = f"tool error {code}" if code else "tool error"
+    return f"{kind}: {message}" if message else kind
+
+
 def payload(size: int) -> str:
     """`size` bytes of the paragraph, repeated and cut. It is ASCII, so a character is a byte."""
     if size < 1:
@@ -122,7 +146,9 @@ class Spec:
 class Collected:
     """What a process measured."""
 
+    # The calls that succeeded, and the ones that failed, apart: see `summarize`.
     latencies_ms: list[float] = field(default_factory=list)
+    failed_ms: list[float] = field(default_factory=list)
     errors: Counter[str] = field(default_factory=Counter)
     opened: int = 0
     wall_s: float = 0.0
@@ -132,6 +158,7 @@ class Collected:
     def as_dict(self) -> dict[str, Any]:
         return {
             "latencies_ms": self.latencies_ms,
+            "failed_ms": self.failed_ms,
             "errors": dict(self.errors),
             "opened": self.opened,
             "wall_s": self.wall_s,
@@ -182,12 +209,15 @@ async def one_session(
                 with anyio.fail_after(CALL_TIMEOUT_S):
                     result = await client.call_tool(spec.tool, arguments)
                 if result.is_error:
-                    failed = "tool error"
+                    failed = error_kind(result)
             except Exception as error:
                 failed = type(error).__name__
-            collected.latencies_ms.append(round((time.perf_counter_ns() - began) / 1e6, 3))
+            took = round((time.perf_counter_ns() - began) / 1e6, 3)
             if failed:
                 collected.errors[failed] += 1
+                collected.failed_ms.append(took)
+            else:
+                collected.latencies_ms.append(took)
 
 
 async def run_worker(
@@ -288,6 +318,7 @@ async def run_children(
     return [
         Collected(
             latencies_ms=answer["latencies_ms"],
+            failed_ms=answer["failed_ms"],
             errors=Counter(answer["errors"]),
             opened=answer["opened"],
             wall_s=answer["wall_s"],
@@ -316,6 +347,7 @@ async def run_load(
         ]
         parts = await run_children(spec, shares, on_go)
     latencies = [value for part in parts for value in part.latencies_ms]
+    failed = [value for part in parts for value in part.failed_ms]
     errors: Counter[str] = Counter()
     for part in parts:
         errors.update(part.errors)
@@ -332,12 +364,13 @@ async def run_load(
             "max_s": spec.max_s,
             "processes": processes,
         },
-        "summary": summarize(latencies, wall, failed_calls) if latencies else None,
+        "summary": summarize(latencies, wall, failed_calls) if latencies or failed_calls else None,
         "errors": dict(errors),
         "opened": sum(part.opened for part in parts),
         "stopped_early": any(part.stopped_early for part in parts),
         "generator": [{"wall_s": p.wall_s, "cpu_s": p.cpu_s} for p in parts],
         "latencies_ms": latencies,
+        "failed_ms": failed,
     }
 
 

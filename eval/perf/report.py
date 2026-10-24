@@ -89,11 +89,12 @@ def generator_busy(run: Mapping[str, Any]) -> float:
 
 
 def ms(value: float | None) -> str:
-    return NOT if value is None else f"{value:.1f}"
+    """Milliseconds, or a dash where no call succeeded to take a percentile of."""
+    return "-" if value is None else f"{value:.1f}"
 
 
 def signed(value: float | None) -> str:
-    return NOT if value is None else f"{value:+.1f}"
+    return "-" if value is None else f"{value:+.1f}"
 
 
 def table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
@@ -165,6 +166,36 @@ def stage_table(document: Mapping[str, Any], sequential: bool = False) -> list[s
     return [table(header, rows)] if rows else []
 
 
+def failures_table(document: Mapping[str, Any]) -> list[str]:
+    """What failed in the runs that had a failure: the kinds of the calls that failed, and the
+    events the gateway logged at warning level or above while they were made."""
+    rows = []
+    for key in ORDER:
+        entry = document["targets"].get(key)
+        if not entry:
+            continue
+        for size, run in runs_of(document, key).items():
+            kinds = {**run.get("errors", {})}
+            events = run.get("log_events") or {}
+            if not kinds and not events:
+                continue
+            made = len(run["latencies_ms"])
+            rows.append(
+                [
+                    entry["label"],
+                    kb(size),
+                    "; ".join(
+                        f"{n} {kind}" for kind, n in sorted(kinds.items(), key=lambda i: -i[1])
+                    )
+                    or "none",
+                    f"{sum(kinds.values()) / made * 100:.1f}%" if made else NOT,
+                    "; ".join(f"{n} {event}" for event, n in list(events.items())[:4]) or "none",
+                ]
+            )
+    header = ["Target", "Payload", "Calls that failed", "Share", "Logged at warning or above"]
+    return [table(header, rows)] if rows else []
+
+
 def conditions_table(document: Mapping[str, Any]) -> str:
     header = [
         "Target",
@@ -180,9 +211,9 @@ def conditions_table(document: Mapping[str, Any]) -> str:
         entry = document["targets"].get(key)
         if not entry:
             continue
-        idle = (entry.get("conditions") or {}).get("idle_percent")
         for size, run in runs_of(document, key).items():
             box = run.get("container") or {}
+            idle = (run.get("conditions") or entry.get("conditions") or {}).get("idle_percent")
             rows.append(
                 [
                     entry["label"],
@@ -197,6 +228,14 @@ def conditions_table(document: Mapping[str, Any]) -> str:
     return table(header, rows)
 
 
+def failed_share(document: Mapping[str, Any], key: str, size: int) -> str:
+    """` (2.2% of the calls failed)` when some did, for the run of a target at a size."""
+    run = runs_of(document, key).get(size)
+    if not run or not run["summary"] or not run["summary"]["errors"]:
+        return ""
+    return f" ({run['summary']['error_rate'] * 100:.1f}% of the calls failed)"
+
+
 def verdicts(document: Mapping[str, Any]) -> list[str]:
     """M5 and M6 against their targets, with the values this run measured."""
     rows: list[list[str]] = []
@@ -208,8 +247,13 @@ def verdicts(document: Mapping[str, Any]) -> list[str]:
         extra = added(document, "scanner-off", size)
         if extra is None:
             continue
+        if extra["p50_ms"] is None or extra["p95_ms"] is None:
+            shown.append(f"{kb(size)}: no call succeeded")
+            passed.append(False)
+            continue
         shown.append(
             f"{kb(size)}: p50 {signed(extra['p50_ms'])} ms, p95 {signed(extra['p95_ms'])} ms"
+            + failed_share(document, "scanner-off", size)
         )
         passed.append(extra["p50_ms"] <= M5_P50_MS and extra["p95_ms"] <= M5_P95_MS)
     rows.append(
@@ -228,8 +272,14 @@ def verdicts(document: Mapping[str, Any]) -> list[str]:
         extra = added(document, "classifier", size)
         if extra is None:
             continue
+        label = f"{kb(size)} ({tokens_of(document, size)} tokens)"
+        if extra["p95_ms"] is None:
+            shown.append(f"{label}: no call succeeded")
+            passed.append(False)
+            continue
         shown.append(
-            f"{kb(size)} ({tokens_of(document, size)} tokens): p95 {signed(extra['p95_ms'])} ms"
+            f"{label}: p95 {signed(extra['p95_ms'])} ms"
+            + failed_share(document, "classifier", size)
         )
         passed.append(extra["p95_ms"] <= M6_P95_MS)
     rows.append(
@@ -245,6 +295,14 @@ def verdicts(document: Mapping[str, Any]) -> list[str]:
     return [table(["Metric", "What", "Target", "Measured", "Verdict"], rows)]
 
 
+def served(run: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The summary of a run, or None if no call of it succeeded."""
+    if not run or not run["summary"]:
+        return None
+    summary = summary_of(run)
+    return summary if summary["p50_ms"] is not None else None
+
+
 def reading(document: Mapping[str, Any]) -> list[str]:
     """What the numbers say, each sentence made from them."""
     out: list[str] = []
@@ -253,13 +311,23 @@ def reading(document: Mapping[str, Any]) -> list[str]:
     first = sizes[0]
     off = runs_of(document, "scanner-off").get(first)
     direct = runs_of(document, "direct").get(first)
-    if off and direct and off["summary"] and direct["summary"]:
-        mine, base = summary_of(off), summary_of(direct)
+    mine, base = served(off), served(direct)
+    if off and mine and base:
         out.append(
-            f"At {sessions} sessions the echo upstream alone answers at a median of "
-            f"{base['p50_ms']:.1f} ms ({base['throughput']:.0f} calls a second), and Keystone with "
-            f"the scanner off at {mine['p50_ms']:.1f} ms ({mine['throughput']:.0f} calls a second)."
+            f"At {sessions} sessions the echo upstream alone serves {base['throughput']:.0f} calls "
+            f"a second at a median of {base['p50_ms']:.1f} ms, and Keystone with the scanner off "
+            f"{mine['throughput']:.0f} calls a second at {mine['p50_ms']:.1f} ms."
         )
+        box = off.get("container") or {}
+        allowed = (document["settings"].get("container") or {}).get("cpus")
+        if box.get("samples"):
+            mean_cpu = box["cpu_percent_mean"]
+            out.append(
+                f"While those calls were made the keystone container used {mean_cpu:.0f}% of CPU "
+                "on average"
+                + (f", of the {allowed * 100:.0f}% it was allowed" if allowed else "")
+                + ". One event loop on one core can use about 100%."
+            )
         stages = off.get("stages") or {}
         if "total" in stages:
             total = stages["total"]["mean_ms"]
@@ -281,7 +349,12 @@ def reading(document: Mapping[str, Any]) -> list[str]:
             )
     seq_extra = added(document, "scanner-off", first, sequential=True)
     off_extra = added(document, "scanner-off", first)
-    if seq_extra and off_extra:
+    if (
+        seq_extra
+        and off_extra
+        and seq_extra["p50_ms"] is not None
+        and off_extra["p50_ms"] is not None
+    ):
         out.append(
             "With one session and no queue the scanner-off gateway adds p50 "
             f"{seq_extra['p50_ms']:.1f} ms and p95 {seq_extra['p95_ms']:.1f} ms at {kb(first)}; "
@@ -298,6 +371,7 @@ def reading(document: Mapping[str, Any]) -> list[str]:
             + (f" and {rules_scan:.1f} ms with the rules alone" if rules_scan is not None else "")
             + f" at {kb(first)}."
         )
+    out += failure_lines(document)
     stopped = [
         f"{document['targets'][key]['label']} at {kb(size)}"
         for key in ORDER
@@ -312,14 +386,48 @@ def reading(document: Mapping[str, Any]) -> list[str]:
             + ". Their figures are of the calls that were made."
         )
     unquiet = [
-        document["targets"][key]["label"]
+        f"{document['targets'][key]['label']} at {kb(size)}"
         for key in ORDER
-        if key in document["targets"]
-        and (document["targets"][key].get("conditions") or {}).get("quiet") is False
+        for size, run in runs_of(document, key).items()
+        if (
+            (run.get("conditions") or document["targets"][key].get("conditions") or {}).get("quiet")
+        )
+        is False
     ]
     if unquiet:
         out.append("The host was not idle enough before: " + ", ".join(unquiet) + ".")
     return [f"- {line}" for line in out]
+
+
+def failure_lines(document: Mapping[str, Any]) -> list[str]:
+    """One sentence about the calls that failed at many sessions, if some did: how many, and the
+    event the gateway logged most often while they were made."""
+    shares = []
+    events: dict[str, int] = {}
+    for key in ORDER:
+        if key == "direct":
+            continue
+        for run in runs_of(document, key).values():
+            summary = run.get("summary")
+            if not summary or not summary["errors"]:
+                continue
+            shares.append(summary["error_rate"])
+            for event, n in (run.get("log_events") or {}).items():
+                events[event] = events.get(event, 0) + n
+    if not shares:
+        return []
+    top = max(events, key=lambda event: events[event], default=None)
+    return [
+        f"At {document['settings']['sessions']} sessions {min(shares) * 100:.1f}% to "
+        f"{max(shares) * 100:.1f}% of the calls through Keystone failed, in "
+        f"{len(shares)} of its runs, and none of the calls to the upstream alone"
+        + (
+            f". The log of the gateway names `{top}` most often, {events[top]:,} times"
+            if top
+            else ""
+        )
+        + "."
+    ]
 
 
 def incomplete_text(document: Mapping[str, Any]) -> list[str]:
@@ -428,6 +536,17 @@ def render_section(document: Mapping[str, Any], source: Path | None = None) -> s
             "With one session and no queue, the same counters are the work each stage does:",
             "",
             *alone,
+            "",
+        ]
+    failed = failures_table(document)
+    if failed:
+        out += [
+            "### What failed",
+            "",
+            "The calls that failed, by what Keystone answered, and what the gateway logged while "
+            "they were made. A call that failed is in the percentiles above, timed like the rest.",
+            "",
+            *failed,
             "",
         ]
     out += [

@@ -1738,14 +1738,20 @@ host never was).
 
 N sessions (200) open at once and each makes M calls (20) of the echo tool one after the other with
 a payload of S bytes (1 KB and 8 KB) of plain English. After three calls a session that are not
-counted, the timed calls start together. A call is timed from the request to the whole answer.
+counted, the timed calls start together. A call is timed from the request to the whole answer. A
+call that fails is counted in the error rate, by what Keystone answered, and left out of the
+percentiles: a gateway that refuses a call quickly would otherwise look faster the more it failed.
 `eval/perf/load.py` shares the sessions out over four processes, because one process that runs
 200 clients is itself slow and puts its own time into every latency, and it records how busy each
 process was. A token of the local realm lives five minutes, so each process gets its own and a new
 one every two minutes. A run that lasts ten minutes stops making calls and says so.
 
 For each target and payload there is a second run with one session making 200 calls, so that
-nothing waits for another call. The difference between the two is the queue.
+nothing waits for another call. The difference between the two is the queue. The gateway is
+restarted for each payload, and the run with one session comes first and warms it, so that what one
+run did to the process (a pool used up, a session lost) is not in the next. While a run is made the
+matrix also reads the log of the container, and counts the events logged at warning level or above
+by name and error, which is how a failure is traced to its cause.
 
 The gateway counts the time every call spends in each stage of its pipeline
 (`keystone_tool_call_duration_seconds{stage}`: `total`, `upstream`, and each of the nine slots). The

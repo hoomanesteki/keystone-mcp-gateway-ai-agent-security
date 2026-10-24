@@ -244,7 +244,14 @@ def test_the_section_has_the_targets_the_tables_and_the_reading() -> None:
     assert "### Where the time goes" in section and "### The conditions of the runs" in section
     # The stage table: the mean time in each stage, per target.
     assert "| Keystone full, scanner off | 1 KB | 18.0 | 8.0 | 3.0 |" in section
-    assert "- At 10 sessions the echo upstream alone answers at a median of 10.0 ms" in section
+    assert (
+        "- At 10 sessions the echo upstream alone serves 100 calls a second at a median of 10.0 ms"
+        in section
+    )
+    assert (
+        "the keystone container used 95% of CPU on average, of the 400% it was allowed. One event "
+        "loop on one core can use about 100%." in section
+    )
     assert "the largest of them `pinning` at 1.0 ms" in section
     assert "With one session and no queue the scanner-off gateway adds p50 6.0 ms" in section
     assert (
@@ -267,7 +274,7 @@ def test_the_conditions_say_how_idle_the_host_was_and_how_busy_the_container_and
 def test_a_run_that_was_cut_short_and_a_host_that_was_not_quiet_are_said() -> None:
     doc = document()
     doc["targets"]["classifier"]["runs"][1]["stopped_early"] = True
-    doc["targets"]["rules-only"]["conditions"]["quiet"] = False
+    doc["targets"]["rules-only"]["runs"][1]["conditions"] = {"idle_percent": 40.0, "quiet": False}
 
     section = render_section(doc)
 
@@ -275,7 +282,7 @@ def test_a_run_that_was_cut_short_and_a_host_that_was_not_quiet_are_said() -> No
         "A run stops making calls after 600 seconds. These did: Keystone full, classifier at 8 KB."
         in section
     )
-    assert "The host was not idle enough before: Keystone full, rules only." in section
+    assert "The host was not idle enough before: Keystone full, rules only at 8 KB." in section
 
 
 def test_a_target_that_was_not_run_is_left_out_and_not_filled_in() -> None:
@@ -381,3 +388,20 @@ def test_the_committed_document_is_what_the_report_renders_from_the_committed_fi
     newest = files[-1]
     rendered = render_section(load(newest), Path(report.short(newest)))
     assert section_in(text) == rendered.strip()
+
+
+def test_what_failed_is_listed_with_the_events_the_gateway_logged() -> None:
+    doc = document()
+    run_ = doc["targets"]["scanner-off"]["runs"][0]
+    run_["errors"] = {"tool error KS_DENIED: session state is unavailable": 6, "ReadTimeout": 4}
+    run_["log_events"] = {"session_store_failed": 6, "upstream_call_failed": 4}
+
+    section = render_section(doc)
+
+    assert "### What failed" in section
+    assert (
+        "| Keystone full, scanner off | 1 KB | 6 tool error KS_DENIED: session state is "
+        "unavailable; 4 ReadTimeout | 10.0% | 6 session_store_failed; 4 upstream_call_failed |"
+    ) in section
+    # No failure, no section.
+    assert "### What failed" not in render_section(document())

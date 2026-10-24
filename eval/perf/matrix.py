@@ -348,6 +348,41 @@ class Sampler:
         }
 
 
+# -- what the gateway logged while the calls were made
+
+
+def count_log_events(text: str) -> dict[str, int]:
+    """How often each event was logged at warning level or above, from the JSON lines the gateway
+    writes. A line that is not JSON (uvicorn's own) is left out."""
+    counts: dict[str, int] = {}
+    for line in text.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("level") not in (
+            "warning",
+            "error",
+            "critical",
+        ):
+            continue
+        event = str(entry.get("event", "?"))
+        if isinstance(entry.get("error"), str):
+            event = f"{event} ({entry['error']})"
+        counts[event] = counts.get(event, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def log_events(name: str, since: datetime) -> dict[str, int]:
+    done = subprocess.run(  # noqa: S603 - fixed arguments, no shell
+        ["docker", "logs", "--since", since.isoformat(timespec="seconds"), name],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return count_log_events(done.stdout + done.stderr)
+
+
 # -- one run
 
 
@@ -374,7 +409,9 @@ async def measure(
             async with httpx.AsyncClient(timeout=30) as http:
                 counted["before"] = stage_totals((await http.get(f"{KEYSTONE}/metrics")).text)
 
-    watched = Sampler(container()) if sample and not target.direct else None
+    began = datetime.now(UTC)
+    name = None if target.direct else container()
+    watched = Sampler(name) if sample and name else None
     if watched:
         watched.__enter__()
     try:
@@ -397,8 +434,10 @@ async def measure(
         "stopped_early": result["stopped_early"],
         "generator": result["generator"],
         "stages": stages,
+        "log_events": log_events(name, began) if name else None,
         "container": watched.summary() if watched else None,
         "latencies_ms": result["latencies_ms"],
+        "failed_ms": result["failed_ms"],
     }
 
 
@@ -473,30 +512,33 @@ async def matrix(
 
     try:
         for target in targets:
-            gateway = configure(target) if restart and not target.direct else None
-            conditions = wait_until_quiet() if quiet else None
             entry: dict[str, Any] = {
                 "label": target.label,
-                "gateway": gateway,
-                "conditions": conditions,
+                "gateway": None,
                 "runs": [],
                 "sequential": [],
             }
             document["targets"][target.key] = entry
             for size in sizes:
-                print(f"== {target.key}, {size} bytes, {sessions} x {calls}", file=sys.stderr)
-                entry["runs"].append(
-                    await measure(target, size, sessions, calls, processes, sample)
-                )
-                show(target.key, entry["runs"][-1])
-                save()
+                # A fresh gateway for each payload, so that what one run did to the process (a
+                # session lost, a queue grown) is not in the next. The run with one session comes
+                # first, and warms the process for the one with many.
+                if restart and not target.direct:
+                    entry["gateway"] = configure(target)
                 if sequential:
                     print(f"== {target.key}, {size} bytes, 1 x {sequential}", file=sys.stderr)
-                    entry["sequential"].append(
-                        await measure(target, size, 1, sequential, 1, sample=False)
-                    )
-                    show(target.key, entry["sequential"][-1])
+                    alone = await measure(target, size, 1, sequential, 1, sample=False)
+                    alone["conditions"] = wait_until_quiet() if quiet else None
+                    entry["sequential"].append(alone)
+                    show(target.key, alone)
                     save()
+                print(f"== {target.key}, {size} bytes, {sessions} x {calls}", file=sys.stderr)
+                conditions = wait_until_quiet() if quiet else None
+                run_ = await measure(target, size, sessions, calls, processes, sample)
+                run_["conditions"] = conditions
+                entry["runs"].append(run_)
+                show(target.key, run_)
+                save()
     except BaseException as error:
         document["error"] = f"{type(error).__name__}: {error}"
         save()

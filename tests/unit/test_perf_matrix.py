@@ -269,7 +269,9 @@ async def test_the_matrix_writes_what_it_has_after_every_run_and_says_when_it_is
     # Four runs of 200 sessions and four of one session, one write after each, then the last.
     assert len(written) == 9
     assert all(w["complete"] is False for w in written[:-1]) and written[-1]["complete"] is True
-    assert (written[0]["runs"], written[0]["sequential"]) == (1, 0)
+    # The run with one session comes first for each payload, then the one with many.
+    assert (written[0]["runs"], written[0]["sequential"]) == (0, 1)
+    assert (written[1]["runs"], written[1]["sequential"]) == (1, 1)
     assert document["complete"] is True and "error" not in document
     assert document["settings"]["payload_tokens"] == {"1024": 204, "8192": 1638}
     assert document["settings"]["container"] == {"cpus": 4.0, "memory_bytes": 4}
@@ -319,3 +321,31 @@ def test_a_run_is_shown_on_one_line_as_soon_as_it_is_made(
     assert out[0].startswith("scanner-off") and "p50     12.5" in out[0]
     assert "99.5/s  errors 0  (stopped early)" in out[0]
     assert "no call was timed: {'open: ConnectError': 200}" in out[1]
+
+
+def test_the_events_a_gateway_logged_at_warning_or_above_are_counted() -> None:
+    lines = "\n".join(
+        [
+            "INFO:     Uvicorn running on http://0.0.0.0:8080",
+            json.dumps({"event": "session_store_failed", "level": "error", "error": "Timeout"}),
+            json.dumps({"event": "session_store_failed", "level": "error"}),
+            json.dumps({"event": "upstream_call_failed", "level": "warning"}),
+            json.dumps({"event": "startup_sync", "level": "info"}),
+            json.dumps({"event": "audit_flush_failed", "level": "critical"}),
+            json.dumps(["not", "an", "object"]),
+            "",
+        ]
+    )
+
+    counts = matrix.count_log_events(lines)
+
+    # An event that names its error is counted with it, so that the cause is in the count.
+    assert counts == {
+        "audit_flush_failed": 1,
+        "session_store_failed": 1,
+        "session_store_failed (Timeout)": 1,
+        "upstream_call_failed": 1,
+    }
+    repeated = "\n".join([json.dumps({"event": "a", "level": "error"})] * 3 + [lines])
+    assert next(iter(matrix.count_log_events(repeated))) == "a"  # the commonest first
+    assert matrix.count_log_events("") == {}

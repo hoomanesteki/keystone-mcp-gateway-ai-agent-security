@@ -27,19 +27,34 @@ def test_percentiles() -> None:
     assert (one["p50_ms"], one["p95_ms"], one["p99_ms"]) == (7.5, 7.5, 7.5)
 
 
-def test_errors_are_counted_as_a_share_of_the_calls() -> None:
+def test_errors_are_counted_as_a_share_of_the_calls_and_left_out_of_the_percentiles() -> None:
+    # Four calls succeeded and one failed. The percentiles are of the four, so a refusal that came
+    # back quickly does not make the gateway look faster the more it fails.
     summary = summarize([1.0, 2.0, 3.0, 4.0], wall_s=1.0, errors=1)
 
-    assert summary["errors"] == 1 and summary["error_rate"] == 0.25
+    assert summary["calls"] == 5 and summary["errors"] == 1 and summary["error_rate"] == 0.2
+    assert summary["p50_ms"] == 2.0 and summary["throughput"] == 4.0
+
+
+def test_a_run_in_which_nothing_succeeded_has_no_percentiles_and_no_throughput() -> None:
+    summary = summarize([], wall_s=2.0, errors=10)
+
+    assert summary["calls"] == 10 and summary["error_rate"] == 1.0
+    assert (summary["p50_ms"], summary["p95_ms"], summary["mean_ms"], summary["max_ms"]) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    assert summary["throughput"] == 0.0
 
 
 @pytest.mark.parametrize(
     ("latencies", "wall", "errors", "message"),
     [
-        ([], 1.0, 0, "no latencies"),
+        ([], 1.0, 0, "no calls"),
         ([1.0], 0.0, 0, "no time"),
-        ([1.0], 1.0, 2, "more errors than calls"),
-        ([1.0], 1.0, -1, "more errors than calls"),
+        ([1.0], 1.0, -1, "negative"),
     ],
 )
 def test_a_summary_that_would_mean_nothing_is_refused(
@@ -56,6 +71,9 @@ def test_the_overhead_is_the_difference_at_each_percentile() -> None:
     assert overhead(through, direct) == {"p50_ms": 105.0, "p95_ms": 195.0, "p99_ms": 203.0}
     # Where the two lists overlap it can be negative: it is the difference of two percentiles.
     assert overhead(direct, through)["p50_ms"] == -105.0
+    # A run in which nothing succeeded adds nothing that can be said.
+    nothing = summarize([], wall_s=1.0, errors=5)
+    assert overhead(nothing, direct) == {"p50_ms": None, "p95_ms": None, "p99_ms": None}
 
 
 @pytest.mark.parametrize("size", [1, 100, 1024, 8192, 100_000])
@@ -107,3 +125,28 @@ async def test_the_token_of_the_open_sessions_can_be_replaced_while_they_run() -
         await client.get("/b")
 
     assert seen == ["Bearer first", "Bearer second"]
+
+
+def test_a_failed_call_is_counted_by_the_code_and_the_start_of_the_message() -> None:
+    import mcp_types as types
+
+    from eval.perf.load import error_kind
+
+    def failed(text: str) -> types.CallToolResult:
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=text)], is_error=True
+        )
+
+    refused = failed("[keystone:KS_DENIED] session state is unavailable. Call id 01ABC.")
+    assert (
+        error_kind(refused) == "tool error KS_DENIED: session state is unavailable. Call id 01ABC."
+    )
+    # A message that varies is cut at 60 characters, so that the kinds stay few.
+    long = failed("[keystone:KS_UPSTREAM_ERROR] " + "x" * 200)
+    assert error_kind(long) == "tool error KS_UPSTREAM_ERROR: " + "x" * 60
+    # The id of the call differs in every message and is not part of the kind.
+    ided = failed("[keystone:KS_DENIED] call 01M5PT8AN0MV4DCC6M2Y9DNKNK denied: no decision")
+    assert error_kind(ided) == "tool error KS_DENIED: denied: no decision"
+    # An error that Keystone did not write is still counted, by what it said.
+    assert error_kind(failed("the upstream broke")) == "tool error: the upstream broke"
+    assert error_kind(types.CallToolResult(content=[], is_error=True)) == "tool error"
