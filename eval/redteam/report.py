@@ -1064,9 +1064,11 @@ def reading(files: Sequence[ResultFile], stats: Mapping[Path, dict[str, Any]]) -
         peaks = [peak for r in landed if (peak := scan_peak(r)) is not None]
         if peaks:
             where_taint = "under" if max(peaks) < TAINT_SCORE else "at or over"
+            flagged = sum(1 for peak in peaks if peak >= FLAG_SCORE)
             facts.append(
                 f"The highest score of an output in them was {max(peaks):.2f}, {where_taint} the "
-                f"{TAINT_SCORE} at which a session is tainted"
+                f"{TAINT_SCORE} at which a session is tainted, and {flagged} of the {len(peaks)} "
+                f"were flagged ({FLAG_SCORE} or more) and annotated"
             )
         out.append(". ".join(["The " + facts[0], *facts[1:]]) + ".")
     for file in files:

@@ -204,10 +204,12 @@ the rules that asked and the flags of the session at that moment, the error code
 the tokens and the cost from the ledger, and the flags and taint of the session at the end.
 
 A result file is never written over: the runner opens it for creation and refuses if it exists, so
-move the first file if a config is run twice in a day. The files are
+rename the first file (add `-repeat1`, say) if a config is run twice in a day. The files are
 `eval/results/redteam-<agent>-<config>-<date>.jsonl`, they are committed, and the report reads
-them and nothing else. It leaves out a file that was made with `--only` or `--limit`, a file of a
-stand-in model (`fake-*`) and a file that a newer, whole one replaces.
+them and nothing else. It leaves out a file that was made with `--only` or `--limit` and a file of
+a stand-in model (`fake-*`). Of the whole files of one kind it takes the newest for its figures, and
+it lists the others in a table of repeat runs that says in how many scenarios they differ in
+outcome and in the scores of the scanner, so a run that does not repeat shows.
 
 To run the config of an earlier release against the code of this one (to see what a change to the
 config did), give the ref: `scripts/redteam.sh naive --configs C2 --config-ref v0.8.0`. The file

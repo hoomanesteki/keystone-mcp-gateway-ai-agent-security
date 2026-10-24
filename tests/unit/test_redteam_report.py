@@ -605,7 +605,10 @@ def test_the_reading_is_made_from_the_files_and_says_the_figures(tmp_path: Path)
     assert (
         "No session among them was tainted, and the flags at the end were reads_untrusted" in text
     )
-    assert "The highest score of an output in them was 0.62, under the 0.85" in text
+    assert (
+        "The highest score of an output in them was 0.62, under the 0.85 at which a session is "
+        "tainted, and 1 of the 2 were flagged (0.5 or more) and annotated" in text
+    )
     assert "With the old tags, 2 of 6 attacks landed in C2, 0 more than with this one." in text
     assert "The note of that run: no tags on files." in text
     assert "All 4 harmless tasks were done" not in text  # one of the four failed in the fixture
