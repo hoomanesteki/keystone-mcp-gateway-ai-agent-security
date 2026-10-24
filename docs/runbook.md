@@ -1749,7 +1749,7 @@ found (404), so the answer does not say it exists. The OpenAPI schema is at
 
 | Route | What it does |
 |---|---|
-| `GET /audit` | Search the audit log, newest first. Filters: `user`, `agent`, `tool`, `effect`, `outcome`, `since`, `until`, `call_id`. Pages by `cursor` (a `seq`) and `limit` (1 to 200, 50 by default); `next_cursor` is null on the last page. A page never repeats a record, even while calls are being made |
+| `GET /audit` | Search the audit log, newest first. Filters: `user`, `agent`, `tool`, `effect`, `outcome`, `since`, `until`, `call_id`, `session` (an MCP session id; there is no index on it, so the search reads the tenant's records newest first until it has a page). Pages by `cursor` (a `seq`) and `limit` (1 to 200, 50 by default); `next_cursor` is null on the last page. A page never repeats a record, even while calls are being made |
 | `GET /audit/{seq}` | One record |
 | `GET /audit/verify?last=10000` | Check the hash chain of the newest records (up to 100,000; `keystone audit verify` checks the whole log). The chain runs through every tenant, so the result is about the whole log |
 | `GET /tools`, `GET /tools/{name}` | The tenant's tools, each with its risk, tags, status and `cost_per_call_usd` (a decimal string); a tool's detail with its pending definition, its fingerprint and a diff |
@@ -1782,8 +1782,8 @@ takes a bearer token.
 ## Console
 
 The console is a React app in `console/` (Vite, TypeScript in strict mode, Tailwind, React Router and
-TanStack Query). It is for people: approvers decide requests, and admins read the audit log and
-review changed tools. Agents never use it. It runs on Vite's dev server at
+TanStack Query). It is for people: approvers decide requests, and admins read the audit log,
+review changed tools and watch spend and live sessions. Agents never use it. It runs on Vite's dev server at
 `http://localhost:5173`; there is no production image of it yet. Why React and not a server-rendered
 page is in ADR-0013.
 
@@ -1797,7 +1797,7 @@ pnpm dev                 # http://localhost:5173
 
 Open `http://localhost:5173` (the realm allows that address and not `127.0.0.1`) and the console
 sends you to Keycloak. Sign in as `lena` (approver) to see the Approvals page only, or as `root`
-(admin) to see Approvals, Audit and Tools. A user with neither role gets a page that says to ask
+(admin) to see Approvals, Audit, Tools, Budgets and Sessions. A user with neither role gets a page that says to ask
 for one. The menu only hides what the API would refuse (the
 approvals routes take an approver or an admin, every other route an admin); the API makes the real
 decision.
@@ -1805,7 +1805,7 @@ decision.
 | Role | Pages |
 |---|---|
 | `approver` | Approvals |
-| `admin` | Approvals, Audit, Tools |
+| `admin` | Approvals, Audit, Tools, Budgets, Sessions |
 
 ### Sign-in
 
@@ -1868,8 +1868,9 @@ because the API would refuse them (403). The link in the webhook and Slack messa
 
 ### The audit page
 
-`/audit` is for admins. It filters by user, agent, tool, decision (allowed, denied, needs approval),
-result (ok, rejected, error) and a time range (local time, sent to the API as absolute times).
+`/audit` is for admins. It filters by user, agent, tool, session (the id of an MCP session, which the
+Sessions page links to), decision (allowed, denied, needs approval), result (ok, rejected, error) and
+a time range (local time, sent to the API as absolute times).
 Text fields send their filter when the person pauses for 0.3 seconds, and the filters are kept in
 the address (`/audit?tool=bank__transfer&effect=deny`), so a filtered view can be sent to someone.
 Records come 25 to a page, newest first. The API pages toward older records by cursor, so the page
@@ -1898,10 +1899,33 @@ fingerprint of the definition that was read, so one that changed again after the
 is refused (409) and not approved unseen. "Disable" and "Enable" switch an active tool and one an
 operator disabled; the API refuses the rest and the console shows what it said.
 
+### The budgets page
+
+`/budgets` is for admins. It draws one bar for each budget of the tenant (`GET /budgets`), in groups:
+the tenant's, then each user's, then each agent's, and in each the day before the month. A bar says
+what is spent against the limit in dollars (`$0.03 of $0.03`, with the cents kept as far as there are
+any: a model request costs `$0.000192`), the share as a percent, and when the window resets, as a
+time from now and in UTC (`Oct 25, 00:00 UTC`), because days and months are counted in UTC. The
+standing is a word in a badge before it is a color: "within limit", "near limit" (from 80%), "at
+limit" and "over limit" (the check is not a reservation, so calls in flight together can pass a
+limit by what they cost). A bar is a `progressbar` with its own text value. When any budget is at its
+limit, a notice above the list says so. With no budgets the page says where they are set (the config
+file); a failed read shows the error with "Try again". The page asks again every 15 seconds.
+
+### The sessions page
+
+`/sessions` is for admins. It lists the tenant's live sessions from Redis (`GET /sessions`, newest
+first) with the user and the agent, when it started, its flags, a red "tainted" badge or a green
+"clean" one (the word is in the badge), its count of calls and its spend, which includes the cost of
+model requests that name the session. A session lives 24 hours from its last use. The user's name is
+a link to `/audit?session=<id>`, which opens the audit page filtered to that session's calls; the
+whole row is the link's target. The page asks for the newest 100 sessions and says so when it has that many, because
+there may be more. It asks again every 10 seconds. With no session it says so.
+
 ### The browser test
 
-`make console-e2e` runs `console/e2e/approval.spec.ts` in headless chromium (Playwright, chromium
-only). It runs at every phase gate from phase 6 (`make gate PHASE=6`) and in the nightly workflow.
+`make console-e2e` runs `console/e2e/approval.spec.ts` and `console/e2e/budgets.spec.ts` in headless
+chromium (Playwright, chromium only). It runs at every phase gate from phase 6 (`make gate PHASE=6`) and in the nightly workflow.
 It needs the compose stack and starts it (`docker compose up --build --wait`) when Keystone,
 Keycloak and the bank are not answering; a warm run takes about 14 seconds, and one that has to
 start the stack takes about 75.
@@ -1923,6 +1947,11 @@ start the stack takes about 75.
    (`console/test-results/approval-agent.txt`): the transfer succeeded, after
    `answered KS_APPROVAL_PENDING; waited for approval <the card's id>`, with the status
    `completed`. Then it reads `/_state` of the bank: one transfer, 900 from CHK-001 to SAV-002.
+
+`budgets.spec.ts` signs in as root, checks that the menu holds all five pages, and opens Budgets (lena's
+bar and the tenant's, their values and their reset times) and Sessions (at least the session of the
+agent that the run started), each with axe-core in the light and the dark theme. A click on a session
+lands on the audit page with the session in its filter.
 
 The run asks the browser for reduced motion, which the console honors, so that colors are at rest
 when axe reads them. A stopped stack, a missing `uv` or a bank that does not reset stops the run
