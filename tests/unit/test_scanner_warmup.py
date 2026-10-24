@@ -37,6 +37,22 @@ async def test_a_model_is_loaded_and_the_log_says_so() -> None:
     assert logs[0]["classifier"] == "warmable"
 
 
+async def test_the_gateway_is_told_the_name_of_the_model_once_it_has_loaded() -> None:
+    told: list[str] = []
+
+    await warm_up(Warmable(), told.append)
+
+    assert told == ["warmable"]
+
+
+async def test_a_model_that_cannot_be_loaded_is_never_announced() -> None:
+    told: list[str] = []
+
+    await warm_up(Warmable(ClassifierUnavailable("needs the scanner extra")), told.append)
+
+    assert told == []
+
+
 async def test_a_classifier_with_nothing_to_load_is_left_alone() -> None:
     with structlog.testing.capture_logs() as logs:
         await warm_up(FakeClassifier(lambda text: 0.0))

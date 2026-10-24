@@ -447,11 +447,12 @@ def load_classifier(cfg: ScannerSettings) -> Classifier | None:
     )
 
 
-async def warm_up(classifier: Classifier) -> None:
+async def warm_up(classifier: Classifier, on_ready: Callable[[str], None] | None = None) -> None:
     """Load the model in the background when the gateway starts, so that the first scans of a
     call do not find it still loading and fall back to the rules (ADR-0011). A classifier with no
     `warm` has nothing to load. A model that cannot be loaded is logged once and never stops the
-    gateway: each scan then reports `model: "error"` and the rules decide."""
+    gateway: each scan then reports `model: "error"` and the rules decide. `on_ready` is called
+    with the name of the model once it has loaded, so that the gateway can say so."""
     warm = getattr(classifier, "warm", None)
     if warm is None:
         return
@@ -463,6 +464,8 @@ async def warm_up(classifier: Classifier) -> None:
         )
         return
     log.info("scanner_classifier_ready", classifier=classifier.name)
+    if on_ready is not None:
+        on_ready(classifier.name)
 
 
 def fetch_model(spec: ClassifierSpec) -> str:

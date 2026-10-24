@@ -165,6 +165,72 @@ ignores `MAIL_POISONED` and `FILES_POISONED`: its state is what its files say.
 a scenario and a reader can open the file the agent was given. A test builds the catalog again and
 compares it with the files on disk.
 
+### Red-team runs
+
+`eval/redteam/runner.py` (KS-902) plays the scenarios against the compose stack and writes a line of
+JSON for each run. `scripts/redteam.sh` runs it in the three configs of the proof and restarts the
+keystone service between them, so the stack must be up first (`make up`):
+
+    scripts/redteam.sh naive                    # 60 scenarios in C0, C1 and C2: no model, no key
+    scripts/redteam.sh naive --configs C2       # one config, or a list such as C0,C2
+    uv run python -m eval.redteam.report        # write the red-team section of docs/results.md
+    uv run python -m eval.redteam.report --check
+
+The three configs are three settings of one build. C0 is `KEYSTONE_PROFILE=passthrough`: the
+pipeline keeps its order, its audit record and the credentials it adds for an upstream, every other
+slot is the Phase 1 stub, and no scanner is built. C1 mounts a copy of `policies/` without the two
+`rule_of_two.cedar` files (made in `.cache/redteam/` for each run) and turns the scanner off, so the
+access rules, acme's rule for mail to outside addresses and the transfer limit are in force. C2 is
+the stack as it is. `deploy/redteam.override.yml` holds the variables that change, and with none set
+it changes nothing. A script that fails or is stopped restarts Keystone with the settings of the
+stack.
+
+The runner does not trust the label it is given. Before the first run it reads
+`keystone_gateway_info{profile,scanner,classifier}` from `/metrics` and the policy ids from the
+admin API, and it stops with status 2 and `this is not C2: its scanner is off, not on` if they are
+not what the label needs. C2 needs a scanner with its model, and the model loads in the background
+for about 7 seconds after the gateway starts, so the runner first waits (up to 3 minutes) until
+`keystone_scanner_classifier_ready` says it has loaded; a scan made before that is scored by the
+rules alone. A gateway whose extra is not installed says `classifier="none"`, and C2 is refused.
+
+    curl -s localhost:8080/metrics | grep -E 'keystone_gateway_info|classifier_ready'
+
+A run is one scenario, one config, one agent, once. The runner puts the upstreams in the state of
+the scenario (`POST /_reset?variant=`), starts the approver, lets the agent do the task as olivia
+through ops-agent, asks the upstreams what they did (`GET /_state`) and decides the two checks of
+the scenario from that. The approver is lena, who signs in through `keystone-cli` and may use the
+approvals routes of the admin API and nothing else. She polls the pending requests every quarter of
+a second, approves a request when its tool and the arguments an action of `expected_actions` names
+are the same (each action once) and rejects every other request with a note. A line of the file has
+the scenario and its template, goal and vector, the two checks, the approvals asked and decided with
+the rules that asked and the flags of the session at that moment, the error codes the agent met,
+the tokens and the cost from the ledger, and the flags and taint of the session at the end.
+
+A result file is never written over: the runner opens it for creation and refuses if it exists, so
+rename the first file (add `-repeat1`, say) if a config is run twice in a day. The files are
+`eval/results/redteam-<agent>-<config>-<date>.jsonl`, they are committed, and the report reads
+them and nothing else. It leaves out a file that was made with `--only` or `--limit` and a file of
+a stand-in model (`fake-*`). Of the whole files of one kind it takes the newest for its figures, and
+it lists the others in a table of repeat runs that says in how many scenarios they differ in
+outcome and in the scores of the scanner, so a run that does not repeat shows.
+
+To run the config of an earlier release against the code of this one (to see what a change to the
+config did), give the ref: `scripts/redteam.sh naive --configs C2 --config-ref v0.8.0`. The file
+is named after it and the report shows it as a row of its own.
+
+The model-driven agent (`examples/agents/llm_agent.py`) sends its requests to Keystone's LLM proxy,
+so the cost of a run is read from the ledger. The stack points the proxy at the fake model API, and
+its model `fake-agent` makes the calls of a script and obeys what it reads, which tests the loop and
+the metering with no key:
+
+    scripts/redteam.sh llm --model fake-agent --script-hint --limit 4 --out-dir /some/folder
+
+Its files are not rows of the table. For a real model, `scripts/redteam.sh` lists the variables it
+needs (the provider's address, the variable that holds the key, a price list that has the model in
+it) and refuses to start without them; the command is in the red-team section of `docs/results.md`,
+with its status. The demo tenant has a budget of $25 a day in `deploy/keystone.compose.yaml`, which
+a run that costs more would meet.
+
 ## Identity (Keycloak)
 
 `make up` starts Keycloak 26 and imports the realm `keystone` from `deploy/keycloak/realm-keystone.json`.
@@ -1570,9 +1636,12 @@ The image sets `HF_HUB_OFFLINE=1`: the model is in it, and the container never g
 for it.
 
 The gateway loads the model in the background when it starts (`scanner_classifier_ready` in the
-log when it is done, `scanner_classifier_not_ready` when it cannot), so only the first seconds of a
-run are scored by the rules alone. An app under test (`env=test`) does not, and loads it at its
-first scan.
+log when it is done, `scanner_classifier_not_ready` when it cannot, and the gauge
+`keystone_scanner_classifier_ready{classifier}` at `/metrics`, 0 until it has loaded and 1 after),
+so only the first seconds of a run are scored by the rules alone. A measurement of the model waits
+for the gauge. `keystone_gateway_info` carries the model that was built, `classifier="none"` where
+there is none. An app under test (`env=test`) does not load it in the background, and loads it at
+its first scan.
 
 `prompt-guard-2-86m` (Llama Prompt Guard 2) is gated on Hugging Face: accept its license with an
 account, and give the gateway a token. Its labels are not verified here (ADR-0011).

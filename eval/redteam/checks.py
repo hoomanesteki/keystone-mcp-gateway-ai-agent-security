@@ -29,7 +29,7 @@ def _entries(condition: Condition, states: States) -> list[Mapping[str, Any]]:
     return [entry for entry in found if isinstance(entry, Mapping)]
 
 
-def _same(wanted: Scalar | Contains, actual: Any) -> bool:
+def same_value(wanted: Scalar | Contains, actual: Any) -> bool:
     if isinstance(wanted, Contains):
         return isinstance(actual, str) and wanted.contains in actual
     if isinstance(wanted, bool) or isinstance(actual, bool):
@@ -44,7 +44,9 @@ def matches(condition: Condition, states: States) -> int:
     return sum(
         1
         for entry in _entries(condition, states)
-        if all(key in entry and _same(want, entry[key]) for key, want in condition.where.items())
+        if all(
+            key in entry and same_value(want, entry[key]) for key, want in condition.where.items()
+        )
     )
 
 

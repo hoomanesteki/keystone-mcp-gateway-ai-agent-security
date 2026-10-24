@@ -1,0 +1,33 @@
+# What scripts/redteam.sh changes in the compose stack between the red-team configs (KS-902).
+# It is read after docker-compose.yml:
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/redteam.override.yml up -d keystone
+#
+# Every setting has the default of the stack, so with no variable set this file changes nothing.
+# The script sets the variables for one config and restarts Keystone:
+#
+#   C0 passthrough   REDTEAM_PROFILE=passthrough REDTEAM_SCANNER=false
+#   C1 policy        REDTEAM_SCANNER=false REDTEAM_POLICIES=<policies/ without the Rule of Two>
+#   C2 full          none
+#
+# The model-driven agent needs a real provider's address, the variable that holds its key, and a
+# price list that has the model in it (deploy/pricing.compose.yaml has only the fake prices):
+#
+#   REDTEAM_LLM_BASE_URL  REDTEAM_LLM_KEY_ENV  ANTHROPIC_API_KEY  REDTEAM_PRICING
+#
+# REDTEAM_CONFIG puts another keystone.compose.yaml in place of this checkout's, for a run against
+# the config of an earlier release.
+services:
+  keystone:
+    environment:
+      KEYSTONE_PROFILE: "${REDTEAM_PROFILE:-full}"
+      KEYSTONE_SCANNER__ENABLED: "${REDTEAM_SCANNER:-true}"
+      KEYSTONE_LLM_PROXY__ANTHROPIC__BASE_URL: "${REDTEAM_LLM_BASE_URL:-http://fake-llm:8199}"
+      KEYSTONE_LLM_PROXY__ANTHROPIC__API_KEY_ENV: "${REDTEAM_LLM_KEY_ENV:-FAKE_LLM_API_KEY}"
+      # Empty unless a run with a real model sets it. The proxy reads the key from the variable
+      # that REDTEAM_LLM_KEY_ENV names, and puts it in the vault.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+    volumes:
+      - ${REDTEAM_CONFIG:-./keystone.compose.yaml}:/etc/keystone/keystone.yaml:ro
+      - ${REDTEAM_POLICIES:-../policies}:/etc/keystone/policies:ro
+      - ${REDTEAM_PRICING:-./pricing.compose.yaml}:/etc/keystone/pricing.yaml:ro

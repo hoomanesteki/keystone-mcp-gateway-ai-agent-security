@@ -165,3 +165,95 @@ async def test_the_flags_slot_is_the_real_interceptor_with_or_without_a_store(
 
     assert isinstance(without.interceptors[slot], SessionFlagsInterceptor)
     assert isinstance(with_store.interceptors[slot], SessionFlagsInterceptor)
+
+
+# -- the passthrough profile (KS-902)
+
+
+@pytest.mark.phase(9)
+def test_the_profile_is_full_unless_it_is_set() -> None:
+    assert Settings().profile == "full"
+    assert Settings(profile="passthrough").profile == "passthrough"
+    with pytest.raises(ValueError, match="profile"):
+        Settings.model_validate({"profile": "off"})
+
+
+@pytest.mark.phase(9)
+@pytest.mark.parametrize("env", ["dev", "test"])
+def test_the_passthrough_profile_is_allowed_where_the_baseline_is_measured(env: str) -> None:
+    assert Settings(env=env, profile="passthrough").profile == "passthrough"  # type: ignore[arg-type]
+
+
+@pytest.mark.phase(9)
+def test_the_passthrough_profile_is_refused_in_production() -> None:
+    # A stray variable must not be able to turn every defense off in a deployment.
+    with pytest.raises(ValueError, match="defends nothing"):
+        Settings(env="prod", profile="passthrough")
+    assert Settings(env="prod", profile="full").profile == "full"
+
+
+@pytest.mark.phase(9)
+def test_the_passthrough_pipeline_keeps_its_order_and_only_the_credentials_are_real(
+    settings: Settings,
+) -> None:
+    from keystone.gateway import stubs
+    from keystone.gateway.interceptors.credentials import CredentialInterceptor
+
+    pipeline = build_pipeline(settings.model_copy(update={"profile": "passthrough"}), deps())
+
+    assert [i.name for i in pipeline.interceptors] == list(INTERCEPTOR_ORDER)
+    for slot in pipeline.interceptors:
+        if slot.name == "credential":
+            # What Keystone sends an upstream to be let in is not a defense, and a baseline that
+            # lost it could not reach the demo servers.
+            assert isinstance(slot, CredentialInterceptor)
+        elif slot.name == "output_scan":
+            # The slot with no scanner, so that the audit record has no scan to report.
+            assert isinstance(slot, OutputScanInterceptor) and slot._guard is None
+        else:
+            assert type(slot).__module__ == stubs.__name__, slot.name
+
+
+@pytest.mark.phase(9)
+def test_the_passthrough_profile_ignores_what_a_full_pipeline_would_be_given(
+    settings: Settings,
+) -> None:
+    from keystone.defense.scanner import build_scanner_guard
+
+    given = PipelineDeps(
+        dispatcher=Echoing(),
+        audit=InMemoryAuditSink(),
+        scanner=build_scanner_guard(ScannerSettings(classifier="none")),
+        sessions=InMemorySessionStore(),
+    )
+    scan = INTERCEPTOR_ORDER.index("output_scan")
+    flags = INTERCEPTOR_ORDER.index("session_flags")
+
+    full = build_pipeline(settings.model_copy(update={"profile": "full"}), given)
+    baseline = build_pipeline(settings.model_copy(update={"profile": "passthrough"}), given)
+
+    scanning = full.interceptors[scan]
+    assert isinstance(scanning, OutputScanInterceptor) and scanning._guard is not None
+    assert isinstance(full.interceptors[flags], SessionFlagsInterceptor)
+    silent = baseline.interceptors[scan]
+    assert isinstance(silent, OutputScanInterceptor) and silent._guard is None
+    assert not isinstance(baseline.interceptors[flags], SessionFlagsInterceptor)
+
+
+@pytest.mark.phase(9)
+async def test_a_passthrough_call_reaches_the_upstream_and_leaves_its_audit_record(
+    settings: Settings,
+) -> None:
+    audit = InMemoryAuditSink()
+    pipeline = build_pipeline(
+        settings.model_copy(update={"profile": "passthrough"}),
+        PipelineDeps(dispatcher=Echoing(), audit=audit),
+    )
+    ctx = make_ctx({"text": "hi"})
+
+    result = await pipeline.run(ctx)
+
+    assert result.content == [{"type": "text", "text": "hi"}]
+    assert ctx.scan is None  # nothing was scanned, and the record does not say it was
+    # The audit record is the pipeline's, not a slot's, so the baseline has one for each call.
+    assert len(audit.records) == 1

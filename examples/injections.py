@@ -90,6 +90,27 @@ def find_markers(text: str) -> list[Call]:
     return found
 
 
+def readable(text: str) -> str:
+    """What a reader of a tool result sees of `text`: the text itself and, when it is JSON, the
+    strings in it. A tool that returns an object sends JSON, where a quote or a line break inside a
+    string is written with a backslash and a marker would not match as it stands."""
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return text
+    return "\n".join([text, *_strings(parsed)])
+
+
+def _strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for key, item in value.items() for s in (key, *_strings(item))]
+    if isinstance(value, list):
+        return [s for item in value for s in _strings(item)]
+    return []
+
+
 def strip_markers(text: str) -> str:
     """`text` without any marker, which is the form a detector is measured on."""
     return MARKER.sub("", text)

@@ -301,3 +301,44 @@ def test_the_pending_gauge_is_set_for_every_known_tenant_and_returns_to_zero() -
     metrics.approvals_changed({"made-up-1": 1, "made-up-2": 2})
     assert pending("other") == 3
     assert pending("made-up-1") is None
+
+
+@pytest.mark.phase(9)
+def test_the_gateway_says_its_profile_whether_it_scans_and_with_what_model() -> None:
+    metrics = Metrics()
+
+    metrics.set_info("full", True, "protectai-deberta-v2")
+
+    labels = {"profile": "full", "scanner": "on", "classifier": "protectai-deberta-v2"}
+    assert metrics.registry.get_sample_value("keystone_gateway_info", labels) == 1
+    # A model that is built has not loaded until the gateway says so.
+    ready = {"classifier": "protectai-deberta-v2"}
+    assert metrics.registry.get_sample_value("keystone_scanner_classifier_ready", ready) == 0
+    metrics.classifier_loaded("protectai-deberta-v2")
+    assert metrics.registry.get_sample_value("keystone_scanner_classifier_ready", ready) == 1
+
+
+@pytest.mark.phase(9)
+def test_a_gateway_with_no_model_has_none_to_wait_for() -> None:
+    metrics = Metrics()
+
+    metrics.set_info("passthrough", False)
+
+    labels = {"profile": "passthrough", "scanner": "off", "classifier": "none"}
+    assert metrics.registry.get_sample_value("keystone_gateway_info", labels) == 1
+    assert "keystone_scanner_classifier_ready{" not in metrics.render().decode()
+
+
+@pytest.mark.phase(9)
+def test_the_names_of_models_a_metric_can_carry_are_the_ones_the_settings_allow() -> None:
+    from typing import get_args
+
+    from keystone.settings import Classifier
+    from keystone.telemetry.metrics import CLASSIFIERS
+
+    # A name the settings do not know is not a label of its own: the set stays bounded.
+    assert sorted(CLASSIFIERS) == sorted(get_args(Classifier))
+    metrics = Metrics()
+    metrics.set_info("full", True, "a-model-somebody-made-up")
+    other = {"profile": "full", "scanner": "on", "classifier": "other"}
+    assert metrics.registry.get_sample_value("keystone_gateway_info", other) == 1
