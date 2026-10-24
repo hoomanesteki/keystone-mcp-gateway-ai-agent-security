@@ -19,13 +19,16 @@ from eval.detector.run import (
     evaluate,
     log_test_run,
     pick_subset,
+    plan,
     read_scores,
     run_split,
     score_rules,
+    score_split,
     score_with_model,
     write_scores,
 )
 from keystone.defense.classifier import FakeClassifier
+from keystone.defense.scanner import SKIPPED
 from keystone.settings import ScannerSettings
 
 pytestmark = pytest.mark.phase(7)
@@ -213,18 +216,77 @@ def test_the_model_path_runs_with_a_fake_classifier(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(run, "load_classifier", lambda cfg: fake)
     data = build(download=False)
     samples = pick_subset(data.split("dev"), 60)
+    # The model alone has a score for every text only when it is asked about every text.
+    asks_all = ScannerSettings(join="max", classifier_timeout_ms=10_000)
 
-    found = asyncio.run(score_with_model(samples, ScannerSettings(classifier_timeout_ms=10_000)))
+    found = asyncio.run(score_with_model(samples, asks_all))
 
     assert len(found) == 60
     assert all(i.classifier is not None and i.scan_ms is not None for i in found)
     assert all(i.combined == max(i.rules, i.classifier or 0.0) for i in found)
     assert {i.model for i in found} == {"fake"}
-    result = assemble(
-        data, "dev", ("rules", "classifier", "combined"), found, ScannerSettings(), 60, 10_000
-    )
+    result = assemble(data, "dev", ("rules", "classifier", "combined"), found, asks_all, 60, 10_000)
     assert set(result["configs"]) == {"rules", "classifier", "combined", "combined_300ms"}
     assert result["model_failures"] == 0 and result["timeout_ms"] == 10_000
+    assert result["scanner"]["join"] == "max" and result["model_skipped"] == 0
+
+
+def test_with_the_rules_first_join_a_text_the_rules_flag_is_not_given_to_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = Slow()
+    monkeypatch.setattr(run, "load_classifier", lambda cfg: fake)
+    data = build(download=False)
+    samples = pick_subset(data.split("dev"), 60)
+    settings = ScannerSettings(classifier_timeout_ms=10_000)
+
+    found = asyncio.run(score_with_model(samples, settings))
+
+    flagged = [i for i in found if i.rules >= 0.5]
+    assert flagged and len(flagged) < len(found)
+    assert all(i.model == SKIPPED and i.classifier is None for i in flagged)
+    assert all(i.combined == i.rules for i in flagged)
+    others = [i for i in found if i.rules < 0.5]
+    assert all(i.classifier is not None and i.model == "fake" for i in others)
+    # The model was asked about the texts the rules did not flag, and about no other.
+    assert all(i.sample.text not in fake.asked for i in flagged if i.sample.text.isascii())
+    assert len(fake.asked) >= len(others)
+    # The joined score is measured on every text, the skipped ones too.
+    result = assemble(data, "dev", ("rules", "combined"), found, settings, 60, 10_000)
+    assert set(result["configs"]) == {"rules", "combined", "combined_300ms"}
+    assert sum(result["configs"]["combined"]["flag"][k] for k in ("tp", "fp", "tn", "fn")) == 60
+    assert result["model_skipped"] == len(flagged) and result["scanner"]["join"] == "rules_first"
+
+
+def test_the_model_alone_is_not_measured_in_a_run_that_does_not_ask_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(run, "load_classifier", lambda cfg: Slow())
+    data = build(download=False)
+
+    with pytest.raises(ValueError, match="join: max"):
+        score_split(data, "dev", ("rules", "classifier"), limit=10, settings=ScannerSettings())
+
+
+def test_the_name_of_a_config_picks_the_configs_and_the_join_to_measure_it_with() -> None:
+    settings = ScannerSettings()
+
+    assert plan("rules", settings) == (("rules",), settings)
+    assert plan("combined", settings) == (("rules", "combined"), settings)
+    configs, alone = plan("classifier", settings)
+    assert configs == ("rules", "classifier") and alone.join == "max"
+    assert settings.join == "rules_first"  # the settings that were given are not changed
+
+
+def test_a_prefix_names_a_second_run_of_the_scanner_beside_the_first() -> None:
+    result = evaluate(MADE_UP, ("rules", "classifier", "combined"), FLAG, TAINT, prefix="previous_")
+
+    assert set(result) == {
+        "previous_rules",
+        "previous_classifier",
+        "previous_combined",
+        "previous_combined_300ms",
+    }
 
 
 def test_a_model_config_without_the_extra_says_what_to_install(

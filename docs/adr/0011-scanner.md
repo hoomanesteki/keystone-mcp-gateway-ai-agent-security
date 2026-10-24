@@ -18,9 +18,11 @@ has to stand behind it.
 ## Decision
 
 **Rules first, a classifier behind them.** `defense/rules.py` is seven rules with weights, as a
-reviewer can read them. `defense/classifier.py` (KS-702) is a model that scores the same text. The
-final score is the larger of the two (KS-703). The demo does not depend on the model: the poisoned
-email of the headline scores 0.88 from the rules alone.
+reviewer can read them. `defense/classifier.py` (KS-702) is a model that scores the same text. Up to
+Phase 8 the final score was the larger of the two (KS-703). Since KS-792 (below) a text the rules
+flag keeps the rules' score and is not given to the model, and for any other text the model adds to
+the rules' score at a weight. The demo does not depend on the model: the poisoned email of the
+headline scores 0.88 from the rules alone, and no join can give a text less than the rules gave it.
 
 **A score is the chance that at least one hit is real.** Each rule has a weight, and a text that
 breaks several gets `1 - (1 - w1) * (1 - w2) * ...`. One weak rule is not enough: `tool_directive`
@@ -91,9 +93,10 @@ its config on 2026-10-23.
   not verified: the table says `LABEL_0` is benign and `LABEL_1` is malicious, from memory, and the
   check above is what stops a wrong guess from running. That option is not tested.
 
-*How it runs.* A text goes through the tokenizer and is cut into windows of 512 tokens (510 of the
-text and the two special tokens) that overlap by 64. The score is the highest window. A window that
-is 0.99 sure ends the scan, and a text of more than 32 windows is sampled across its length with the
+*How it runs.* A text goes through the tokenizer and is cut into windows that overlap (since KS-792
+128 tokens of the text and the two special tokens, overlapping by 64; 510 and 64 up to Phase 8,
+`scanner.window_tokens` and `window_overlap`). The score is the highest window. A window that is
+0.99 sure ends the scan, and a text of more than 32 windows is sampled across its length with the
 first and the last kept. The model reads the text as the phrase rules do, invisible characters
 removed and NFKC applied, with Unicode tag characters written out as the ASCII they stand for, so
 that the message the `hidden_unicode` template hides is the message the model reads.
@@ -105,9 +108,11 @@ cannot stop its thread by force. The thread looks between batches whether it was
 place it held in the semaphore comes back when the thread leaves and not when the caller gave up,
 so abandoned scans cannot pile up when every scan times out.
 
-*Combining.* The final score is the higher of the rules' and the model's. A model that gives no
-answer in time leaves the rules' score, and `model` says `timeout`. `ScanDetails` carries both
-scores, so the evaluation can read each.
+*Combining.* In Phase 7 the final score was the higher of the rules' and the model's; that is still
+`scanner.join: max`. The default is `rules_first` (KS-792, below). A model that gives no answer in
+time leaves the rules' score, and `model` says `timeout`; a text the rules flagged is not given to
+the model, and `model` says `skipped`. `ScanDetails` carries both scores, so the evaluation can read
+each.
 
 *Packaging.* `keystone[scanner]` is torch and transformers. Linux gets the CPU build of torch, so
 the lock holds no CUDA library. CI never installs the extra and never downloads a model, and its
@@ -266,6 +271,120 @@ sources and licenses. Where I read the story narrowly or widely:
 - **The attacks of the documents are the templates of KS-708**, written alongside the rules, so the
   rules' recall on them says less than it seems to. The public prompts are the independent check,
   and the report gives the two apart.
+
+**The join and the windows (KS-792).** The report of Phase 7 missed target M4, a recall of 0.90 at a
+false positive rate of 5 percent or less: on test the rules found 0.59, the model 0.32 and the
+higher of the two 0.35. I looked for the reasons and for a better join on the dev split, where the
+test split never entered (`eval/detector/combine.py`, and the record it left in
+`eval/results/combination-dev-2026-10-24.json`).
+
+*Why the higher of the two is worse than the rules.* The model is sure about harmless text. On dev,
+42 of the 456 harmless texts scored 0.95 or more with the windows of Phase 7: 30 of the 84 hard
+negatives (20 security articles that quote attacks, 6 business mails, 4 how-to guides), 10 long CSV
+reports and one email among the harmless documents, and one public prompt. A false positive rate of
+5 percent allows 22 of them. A maximum keeps every one, so the threshold that stays inside the
+allowance is 0.9975, and above it the sweep finds 0.17 of the injections where the rules alone find
+0.52.
+
+*Why the model is weak on documents.* An attack planted in a document is a small part of a window of
+512 tokens, and the model scores the whole window. The model alone, with 0.5 as the line, flags 37
+percent of the 326 attacked documents of dev with windows of 510 tokens, 43 percent with windows of
+256, 64 percent with windows of 128 and 87 percent with windows of 64. The share of harmless documents
+it flags hardly moves (9, 8, 9 and 12 percent) and the share of hard negatives goes from 36 to 37 to
+46 percent. The model was trained on prompts, and it reads a window of the size of a prompt better.
+A shorter window alone does not repair the maximum (0.25 of the injections found with windows of
+128, 0.39 with windows of 64), because the confident mistakes still outrank the rules.
+
+*What I tried.* 424 candidates, all on dev: four shapes of window (510, 256, 128 and 64 tokens, the
+first three overlapping by 64 and the last by 32), two ways to make one model score of the windows of
+a text (the highest, and the mean of the two highest), and joins of the rules' score and the model's:
+the higher of the two, the model scaled down, a noisy-or with a weight, a weighted sum, the model
+counted only for a text no rule hit, and the rules first with the model skipped from a floor of 0.4,
+0.5, 0.6 or 0.85 and a weight from 0.5 to 1.0. Recall at a false positive rate of 5 percent or less
+on dev, by the window and the join (the rules alone find 0.52):
+
+| Windows of | Model alone | Higher of the two | Rules first, weight 0.7 |
+|---|---|---|---|
+| 510 | 0.17 | 0.17 | 0.61 |
+| 256 | 0.19 | 0.19 | 0.63 |
+| 128 | 0.25 | 0.25 | 0.67 |
+| 64 | 0.39 | 0.39 | 0.68 |
+
+The mean of the two highest windows was worse than the highest in 31 of the 32 pairs of the
+rules-first join (0.61 against 0.67 at 128). Asking the model only about a text no rule hit (`when_silent`) found 0.63 at 128. Joins that can
+give a text less than the rules gave it (the weighted sum) were measured for the table and are not
+eligible: the rules alone taint the session of the headline demo, and a join that let the model
+overrule them would make the demo depend on the classifier.
+
+*The join.* `rules_first` in `defense/scanner.py`. A text whose rules score is at the flag threshold
+(0.5) or more keeps that score, and the model is not asked, which is 31 percent of the texts of dev.
+Any other text gets `1 - (1 - rules) * (1 - weight * model)`: the model is a second witness that is
+right `weight` of the time it is sure, the way the rules' own hits add up. The weight is 0.7. Three
+things follow from it, and the unit tests hold each.
+
+- The model never lowers a score. Rules that flag are the rules' business, and the rules alone give
+  the demo its score.
+- With a weight under 0.85 the model alone cannot make an `injection` of a text, so it cannot taint a
+  session. It can make a text `suspicious` when it is at least 0.714 sure. A taint lasts the session
+  and the model is wrong too often, on text that explains an attack or lists numbers, for that. With
+  the maximum no threshold reached a precision of 0.95 for tainting; with this join the configured
+  0.85 does.
+- A sure model ranks between the rules' weak hits and their strong ones. A weight of 0.7 puts a model
+  that is 0.95 or more sure at 0.665 to 0.7, above the rules' lone `instruction_override` (0.6) and
+  not above `role_spoof` with `tool_directive` (0.7). Recall on dev is the same for 0.65 and 0.7
+  (0.672 with windows of 128), and lower on both sides: 0.52 at 0.6 and 0.55 at 0.75. I took the
+  weight in the middle of the plateau, which the rule below also asks for.
+
+*The choice.* I wrote the rule before I looked at the table. Of the candidates the gateway can run
+(the rules-first join with its floor at the flag threshold, so that the weight is the only number to
+set), those whose recall on dev is within 7 of the 463 injections of the best are tied. Of the tied
+the larger window wins, because it gives the model fewer windows to be wrong in and flags fewer
+hard negatives (37 percent at 128 against 46 at 64), then the highest window over the mean of two,
+then the weight with the highest recall averaged with its two neighbours. The best eligible
+candidate was windows of 64 with weight 0.65 or 0.7 (0.676), the next windows of 128 (0.672), and
+256 was out (0.633). The rule picked windows of 128 tokens overlapping by 64, the highest window and
+weight 0.7. The defaults of `ScannerSettings` are these values, and a test reads the record of the
+sweep and holds the two equal. A candidate with another floor (windows of 64, floor 0.6, 0.685) did
+better by 1 point; it needs a second number to set, and it is inside the noise.
+
+*The thresholds stay at 0.5 and 0.85.* I ran the sweep of KS-707 again on dev for this join
+(`eval/results/tuning-2026-10-24-combined.json`). The best F0.5 is at 0.45 (0.857) against 0.855 at
+0.5, and the only texts between the two are model-only scores, so the difference is noise. The
+lowest threshold from there up with a precision of 0.95 is 0.80 (precision 0.961, recall 0.32);
+0.85 has 0.974 and recall 0.24. Both reach the floor, which the maximum never did. I kept the
+configured values. The first is the line that the rules' lone `role_spoof` and `secrecy` (0.5) sit
+on. The second decides how often the Rule of Two asks a person, which is a question about friction
+and not a fit to dev, so moving it is for the owner of a deployment (`scanner.thresholds`). At 0.5
+the join flags 0.78 of the injections of dev at a false positive rate of 0.112 (hard negatives
+0.39), where the rules alone flag 0.57 at 0.057 (hard negatives 0.29): the extra attacks are paid
+for with extra warnings.
+
+*How much of it is luck.* The metric is jumpy: it is the recall at the best threshold that keeps 5
+percent of the harmless texts, and 5 percent of dev is 22 texts. I resampled the carriers of dev 200
+times. The chosen join finds on average 0.65 of the injections (95% range 0.39 to 0.71) and the rules
+alone 0.52 (0.44 to 0.60). The gain is +0.12, with a range from -0.08 to +0.21, and the join of
+Phase 7 is -0.33 (-0.43 to -0.21). The bottom of the range is a resample that repeats a few hard
+negatives: the threshold cannot stay under them, and between the model's range (up to 0.7) and the
+rules' next cluster (0.76) there is nothing to stop at. So the dev number (0.67) is an upper estimate
+of what a sample the join was not picked on will give, and the test split is that sample.
+
+*What the test split decides, written down before it was read.* I read the test split once, with the
+chosen join. If its recall at a false positive rate of 5 percent is not at least 1.5 points above the
+recall of the rules alone on the same texts (the noise of 463 injections), nothing beat the rules,
+and the default becomes `scanner.classifier: none` with the model left as an option behind the
+extra. Either way the outcome is below under "KS-792 result".
+
+*What it does not do.* The model reads a table of numbers as an instruction: of the 112 windows of 128
+tokens of each of the 10 long CSV reports of dev, 92 to 105 score 0.5 or more, and the highest is
+0.97 to 0.98. At a weight of 0.7 that is 0.68 to 0.69, so a long CSV report is `suspicious` and, from a
+tool of high risk, is redacted. I did not add a guard for tables. As an experiment, not a result, I
+set the model's score of the harmless CSV reports of dev to zero: the recall stays 0.672, and only the
+drop at larger weights goes away. Prompt Guard 2 was not measured: on 2026-10-23 the files of `meta-llama/Llama-Prompt-Guard-2-86M`
+answered 401 ("Access to model meta-llama/Llama-Prompt-Guard-2-86M is restricted. You must have
+access to it and be authenticated"). The model card is public and says `license: other`, the Llama 4
+Community License, behind a form that asks for a full legal name, a date of birth and an organization.
+That cannot be accepted without a login and a person's name, so I did not accept it. The entry in
+`SPECS` stays as it was, and its labels stay unverified.
 
 **A contract changes.** `ScanResult.action` (plan section 3.6) gains `"error"` beside `pass`,
 `annotate`, `redact` and `block`, so that the audit record can say `scan_action="error"`. Nothing

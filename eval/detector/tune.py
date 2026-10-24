@@ -36,7 +36,7 @@ from typing import Any
 
 from eval.detector.datasets import build
 from eval.detector.metrics import confusion
-from eval.detector.run import RESULTS, Scored, read_scores, score_split, write_scores
+from eval.detector.run import RESULTS, Scored, plan, read_scores, score_split, write_scores
 from keystone.settings import ScannerSettings
 
 GRID = [round(0.05 * step, 2) for step in range(4, 20)]  # 0.20 to 0.95
@@ -52,7 +52,14 @@ def sweep(scored: Sequence[Scored], config: str) -> list[dict[str, Any]]:
             config, item.combined
         )
 
-    items = [i for i in scored if config == "rules" or i.classifier is not None]
+    # The model alone counts the texts it scored. The joined score counts the texts of a run with a
+    # model, and that includes the texts the rules flagged and the model was not asked about.
+    if config == "rules":
+        items = list(scored)
+    elif config == "classifier":
+        items = [i for i in scored if i.classifier is not None]
+    else:
+        items = [i for i in scored if i.model is not None]
     scores = [pick(i) for i in items]
     labels = [i.sample.label for i in items]
     hard = [pick(i) for i in items if i.sample.kind == "hard_negative"]
@@ -127,11 +134,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     data = build(download=not args.offline)
-    configs = ("rules",) if args.config == "rules" else ("rules", "classifier", "combined")
+    configs, settings = plan(args.config, ScannerSettings())
     if args.scores and args.scores.is_file():
         scored = read_scores(args.scores, data)
     else:
-        scored = score_split(data, "dev", configs, settings=ScannerSettings())
+        scored = score_split(data, "dev", configs, settings=settings)
         if args.scores:
             write_scores(scored, args.scores)
     rows = sweep(scored, args.config)
