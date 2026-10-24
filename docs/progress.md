@@ -175,3 +175,23 @@ rate limit of KS-804 does not count it, and each one writes an audit row. An age
 names in a loop is audited and not limited. KS-804 limits the calls the pipeline runs and leaves
 this for a story of its own: the fix is to charge the principal's scopes (not the tool's) in
 `reject`.
+
+The Phase 8 gate ran three times, and the first two stopped at `scripts/smoke/phase_2.sh`, which
+asserts that a call to a stopped upstream is refused in under 50 ms: 147.9 ms inside
+`tests/e2e/test_phase2.py` and 70.5 ms in the smoke stage. The third run passed (26.6 ms) with
+nothing changed, and on an idle stack eight runs of the script took 26.8 to 97.6 ms and two failed.
+The call is the first one a restarted Keystone serves for that tool. Keystone's own stages add up
+to 20 to 28 ms for it (`keystone_tool_call_duration_seconds`; the rate limit is 1.0 to 1.2 ms of
+that, the only stage of Phase 8 that does I/O on this path), the probe measures 44 to 58 ms for the
+same call, and a refusal made when the caches are warm has a median of 20.4 ms and a 99th
+percentile of 59 ms over 100 calls. The bound dates from Phase 2, when the path had three stages
+and took 23.3 ms, and it now sits on the edge of what the path costs on this machine. The test is
+unchanged. Its bound is the owner's to move, or the script could take the median of several calls.
+
+The health check of the sandbox delays the event loop a little. With the sandbox on and a probe
+every 2 s, which is what the Phase 2 smoke sets, 21 of 1,331 requests to `/healthz` took over
+15 ms and the slowest took 364 ms; with the sandbox off none of 1,479 did. At the default of 30 s,
+14 of 1,329 did and the slowest took 33 ms. One check takes 25 to 76 ms (median 34) in
+`docker info` and `images.get`, and held the loop for 11 ms at most when it was timed alone, so
+the rest is probably the daemon and the container's share of the CPU. Keeping the answer for 30 s,
+and asking the daemon for less (a ping and an inspect of the image), would cut it. Not done.
