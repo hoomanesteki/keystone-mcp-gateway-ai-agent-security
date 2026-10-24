@@ -144,6 +144,22 @@ the "Found" list at the end.
 | KS-907 | Docs, results and fresh-clone check | 3 | todo | | |
 | KS-908 | Release v1.0.0 | 2 | todo | | |
 
+Gate of the proof half (KS-792 and KS-901 to KS-904, with `scripts/smoke/phase_9.sh`). `make gate
+PHASE=9` on dev at 2eb7a11 passed in 27 minutes: ruff and mypy (397 files), 62 policy cases, 3,170
+tests of the unit, integration, invariant and end-to-end suites (18 minutes; one warning, the
+deprecation of `torch.jit.script` in the test of the real model), the console (180 unit tests and 2
+end-to-end tests) and `scripts/smoke/phase_9.sh`, which ran the smokes of phases 0 to 8 in order
+against the one stack (about 3 minutes; the second took 74 s). CI of the same commit: 9 of 9 jobs
+green. The second run adds KS-905 (Terraform), KS-906 (hardening), KS-907 (the results document and its
+check) and KS-908 (the release), and the gate cannot check them yet: `scripts/check_story_tests.py
+--phase 9` lists exactly 5 tests as missing, `test_terraform_files.py` (KS-905), `test_fuzz.py`
+(3 tests, KS-906) and `test_results_doc.py` (KS-907). Against the targets of the plan (numbers in
+`docs/results.md`): M1 not met (the naive agent landed 100.0%, 75.0% and 16.7% of 48 attacks in C0,
+C1 and C2); M2 not run: needs an API key; M3 met (12 of 12 harmless tasks done in every config);
+M4 not met (recall 0.71 at a false positive rate of 0.05, against 0.90); M5 and M6 not met at 200
+sessions (the queue for one event loop and a Redis pool of 100 connections, see Found). The
+AgentDojo rows are blank for the same reason as M2.
+
 ## Deferred
 
 Everything here needs a signed-in GitHub CLI, which this machine does not have. The scripts are
