@@ -299,6 +299,7 @@ The Rule of Two (from Meta's 2025 agent security guidance) says an agent session
 
 - Session has A and B, and the tool has C: **require approval**.
 - Session is tainted, and the tool has C: **require approval**.
+- Session has A (it read untrusted input, whatever else it read), and the tool has C: **require approval** (`untrusted-then-external-effect`, added at the Phase 9 checkpoint after the red team found attacks that need no sensitive data; ADR-0018).
 - Session is tainted, and the tool is critical risk: **deny**.
 
 Policy-as-code keeps one decision mechanism. Security reviewers can read the rule, and tenants can tighten it.

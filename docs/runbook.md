@@ -127,8 +127,8 @@ taken over, so a gateway that stops it does not depend on how a model behaves. A
 server between runs: `curl -s -X POST localhost:8101/_reset`.
 
 Through Keystone the agent still reads the poisoned email and still tries to forward the invoice.
-The forward is held for a person (`rule-of-two`, `tainted-external-effect` and acme's
-`external-email-needs-approval` are its reasons), and nobody approves it. `make demo-attack` runs
+The forward is held for a person (`rule-of-two`, `tainted-external-effect`,
+`untrusted-then-external-effect` and acme's `external-email-needs-approval` are its reasons), and nobody approves it. `make demo-attack` runs
 both scenarios and prints them side by side, with `examples/agents/auto_reject.py` standing in for
 the person: lena through the admin API, rejecting whatever reaches the queue. It prints one line of
 JSON for each request, with what a person would see on the card (tool, reasons, taint, flags,
@@ -600,9 +600,10 @@ decision can be read back from the log (see Audit).
 | `acme/approval/mail.cedar` | `external-email-needs-approval` | A message to anyone outside `acme.test`, or to a recipient that is not one plain address, needs approval |
 | `default/access/rule_of_two.cedar` | `deny-critical-when-tainted` | A session that read an injection never calls a critical tool |
 | `default/approval/rule_of_two.cedar` | `rule-of-two` | A session that has read untrusted and sensitive data asks before it calls a tool with an external effect |
+| | `untrusted-then-external-effect` | A session that has read untrusted text asks before it calls a tool with an external effect, whatever else it read (ADR-0018). A tenant turns it off with `exclude_default_policies` in its entry under `tenants` |
 | | `tainted-external-effect` | A tainted session asks before it calls a tool with an external effect |
 
-The Rule of Two (plan section 3.5) is the last three rows. A session should not combine all of
+The Rule of Two (plan section 3.5) is the last four rows. A session should not combine all of
 these without a person: it processes untrusted input, it has access to sensitive data, and it
 changes state or sends data out. The first two are the session's flags (`reads_untrusted` and
 `reads_sensitive`, from the tags of the tools it called) and the third is the tag `external_effect`

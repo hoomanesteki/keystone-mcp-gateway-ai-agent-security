@@ -7,6 +7,9 @@ log_level: info
 tenants:
   - id: acme
     name: Acme Corp
+    # Default approval rules this tenant turns off (ADR-0018). The default asks before any external
+    # effect once a session has read untrusted text; a tenant that wants only the Rule of Two lists:
+    # exclude_default_policies: [untrusted-then-external-effect]
   - id: globex
     name: Globex Inc
 

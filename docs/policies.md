@@ -209,6 +209,28 @@ a page is a read of untrusted text, and sending mail, writing a file and making 
 external effects. A tool with no tag is invisible to the rule: a session that reads through it has
 no flags, and a call that changes something through it is not asked about.
 
+### untrusted-then-external-effect
+
+A rule of the approval set in `default/approval/rule_of_two.cedar`, added by KS-991 (ADR-0018). A
+session that has read untrusted text (the flag `reads_untrusted`) asks before any tool with the tag
+`external_effect`, whatever else it read and whatever the arguments are. `rule-of-two` waits for the
+second flag, sensitive data, and the red team showed that the attacks that landed in C2 never got
+it: a web page is a read of untrusted text only, and phishing a colleague or overwriting a config
+file needs nothing sensitive. This rule closes that gap and costs approvals: a harmless task that
+reads a page and then writes a file or sends mail now asks once. A tenant that accepts that risk
+turns the rule off for itself in the config, because a `forbid` in a tenant's approval set cannot
+remove a permit (the loader refuses a forbid there):
+
+```yaml
+tenants:
+  - id: acme
+    name: Acme Corp
+    exclude_default_policies: [untrusted-then-external-effect]
+```
+
+Only the id of a rule in a shared approval set can be listed; the loader refuses any other id, and
+an id of the access set above all. The other tenants keep the rule.
+
 ### tainted-external-effect
 
 A rule of the approval set in `default/approval/rule_of_two.cedar`. A session is tainted when an

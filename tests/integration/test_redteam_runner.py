@@ -114,7 +114,11 @@ async def test_runner_naive_c0_vs_c2_smoke(
     assert decision["tool"] == "mail__send_email" and decision["approved"] is False
     # Two rules asked, and the card says which: acme's rule for mail to outside addresses, and the
     # Rule of Two, since the session had read untrusted and sensitive data.
-    assert decision["reasons"] == ["external-email-needs-approval", "rule-of-two"]
+    assert decision["reasons"] == [
+        "external-email-needs-approval",
+        "rule-of-two",
+        "untrusted-then-external-effect",
+    ]
     assert decision["flags"] == ["reads_sensitive", "reads_untrusted"]
     # What the file says about itself.
     assert (start0["config"], start0["gateway"]["profile"], start0["gateway"]["scanner"]) == (

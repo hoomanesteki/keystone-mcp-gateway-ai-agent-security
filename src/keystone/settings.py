@@ -35,6 +35,11 @@ DEFAULT_REDIS_URL = "redis://localhost:56379/0"
 class TenantConfig(BaseModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,62}$")
     name: str = Field(min_length=1)
+    # Ids of default approval rules this tenant turns off, for example
+    # untrusted-then-external-effect (ADR-0017). A tenant's own forbid cannot remove a permit of
+    # the approval set, so this is the supported way to relax a default. The loader refuses an id
+    # that is not an approval rule.
+    exclude_default_policies: list[str] = Field(default_factory=list)
 
 
 class AgentConfig(BaseModel):

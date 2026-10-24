@@ -103,6 +103,9 @@ class TenantPolicies:
     access: CompiledPolicies
     approval: CompiledPolicies
     policies: tuple[PolicyInfo, ...]
+    # Approval rules of the shared directories that this tenant has turned off (KS-991, ADR-0017).
+    # The engine drops them from the reasons of the approval pass.
+    excluded: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -245,9 +248,44 @@ def _duplicates(sources: Sequence[_Source], problems: list[str]) -> None:
             problems.append(f'policy id "{identifier}" is used more than once: {", ".join(paths)}')
 
 
-def load_policies(root: Path, tenants: Collection[str], *, include_demo: bool = False) -> PolicySet:
+def _check_exclusions(
+    exclusions: Mapping[str, Collection[str]],
+    tenant_ids: Sequence[str],
+    shared: Sequence[_Source],
+    problems: list[str],
+) -> None:
+    approval = {m.id for s in shared if s.kind == "approval" for m in s.metas if m.id}
+    access = {m.id for s in shared if s.kind == "access" for m in s.metas if m.id}
+    for tenant, ids in sorted(exclusions.items()):
+        if tenant not in tenant_ids:
+            problems.append(f"exclusions: {tenant!r} is not a configured tenant")
+            continue
+        for identifier in sorted(set(ids)):
+            if identifier in approval:
+                continue
+            if identifier in access:
+                problems.append(
+                    f'exclusions: "{identifier}" is a rule of the access set; only a rule of the '
+                    "approval set can be excluded, because a forbid or a permit of access is "
+                    "what keeps a tenant's data apart"
+                )
+            else:
+                problems.append(
+                    f'exclusions: "{identifier}" is not a policy of the default approval set '
+                    f"(tenant {tenant})"
+                )
+
+
+def load_policies(
+    root: Path,
+    tenants: Collection[str],
+    *,
+    include_demo: bool = False,
+    exclusions: Mapping[str, Collection[str]] | None = None,
+) -> PolicySet:
     """Read, check and compile every policy under `root`. Raises PolicyLoadError, naming every
-    problem, if anything is wrong; it never returns a partial set."""
+    problem, if anything is wrong; it never returns a partial set. `exclusions` maps a tenant to
+    the ids of shared approval rules that tenant turns off."""
     problems: list[str] = []
     tenant_ids = sorted(set(tenants))
     for tenant in tenant_ids:
@@ -299,6 +337,7 @@ def load_policies(root: Path, tenants: Collection[str], *, include_demo: bool = 
         _check_source(source, problems)
 
     shared = [s for s in sources if s.group in SHARED_DIRS]
+    _check_exclusions(exclusions or {}, tenant_ids, shared, problems)
     compiled: dict[str, TenantPolicies] = {}
     for tenant in tenant_ids or [""]:
         own = [s for s in sources if s.group == tenant] if tenant else []
@@ -311,13 +350,14 @@ def load_policies(root: Path, tenants: Collection[str], *, include_demo: bool = 
             "approval", [s for s in mine if s.kind == "approval"], schema, problems
         )
         if tenant and access is not None and approval is not None:
+            excluded = frozenset((exclusions or {}).get(tenant, ()))
             infos = tuple(
                 PolicyInfo(meta.id, meta.effect, s.kind, s.path)
                 for s in mine
                 for meta in s.metas
-                if meta.id is not None
+                if meta.id is not None and meta.id not in excluded
             )
-            compiled[tenant] = TenantPolicies(tenant, access, approval, infos)
+            compiled[tenant] = TenantPolicies(tenant, access, approval, infos, excluded)
 
     if problems or schema is None:
         raise PolicyLoadError(list(dict.fromkeys(problems)))
@@ -358,10 +398,12 @@ class PolicyStore:
         *,
         include_demo: bool = False,
         recorder: VersionRecorder | None = None,
+        exclusions: Mapping[str, Collection[str]] | None = None,
     ) -> None:
         self.root = root
         self.tenants = tuple(sorted(set(tenants)))
         self.include_demo = include_demo
+        self.exclusions = dict(exclusions or {})
         self._recorder = recorder
         self._current: PolicySet | None = None
         self._lock = anyio.Lock()
@@ -369,7 +411,12 @@ class PolicyStore:
     def load(self, root: Path | None = None) -> PolicySet:
         """Read and check the policies under `root` (the store's own by default) without
         changing what is in force."""
-        return load_policies(root or self.root, self.tenants, include_demo=self.include_demo)
+        return load_policies(
+            root or self.root,
+            self.tenants,
+            include_demo=self.include_demo,
+            exclusions=self.exclusions,
+        )
 
     def start(self) -> PolicySet:
         """The first load. Raises PolicyLoadError: with nothing in force yet there is no earlier

@@ -79,6 +79,7 @@ def test_loads_default_and_tenant_policies(tmp_path: Path) -> None:
         "deny-critical-when-tainted",
         "rule-of-two",
         "tainted-external-effect",
+        "untrusted-then-external-effect",  # KS-991
     }
     assert acme == shared | {"acme-asks-for-mail"}
     assert globex == shared | {"globex-no-writes"}

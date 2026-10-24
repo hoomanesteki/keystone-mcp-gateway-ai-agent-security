@@ -26,6 +26,7 @@ def test_default_pack_validates() -> None:
         ("deny-critical-when-tainted", "access"),
         ("rule-of-two", "approval"),
         ("tainted-external-effect", "approval"),
+        ("untrusted-then-external-effect", "approval"),  # KS-991
     }
     assert acme == base | {
         ("approve-transfer-over-500", "approval"),
