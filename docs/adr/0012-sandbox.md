@@ -71,6 +71,33 @@ laptop and for one host that runs nothing else you care about, and it is why the
 (owned by root on Docker Desktop) does not let in; compose adds the socket's group
 (`DOCKER_SOCKET_GID`, default 0).
 
+**The sandbox is an upstream.** `sandbox` has transport `builtin` and a row in `upstreams`, and its
+two tools, `run_python(code, stdin)` and `run_shell(command)`, are synced into the registry and
+pinned by the hash of their description and schema like any tool (`sandbox/builtin_upstream.py`).
+A call goes through the whole pipeline, so the policy, the rate limit, the budget, the output scan
+and the audit record apply with no code of their own. Both tools are high risk with the tag
+`code_exec`, which by the default access policy means operators may call them and a user in
+support is denied and does not see them. A setting for a tool in the config (a price, say)
+replaces the default for that field only. The result is one text block of JSON with the exit code,
+both outputs and the flags for a run that timed out and one that was cut at 64 KB, and an error
+result when the program failed. The output is untrusted like any other: a script that prints an
+instruction is scanned, redacted as a high risk tool's output is, and taints the session. The
+input schema refuses a NUL character, because an argument ends there where the kernel reads it.
+The audit record and the container share the call id (the `keystone.call_id` label).
+
+A release that words a description differently holds the tool until a person has read the change,
+which is what pinning is for; it also means the sandbox's descriptions state its limits, and a
+change to a limit changes a description.
+
+**Third-party stdio servers run in containers too.** `transport: container_stdio` with `image`,
+`command`, `env` and `network` runs `docker run --rm -i` with the flags above (no capabilities, a
+read-only root, 256 MB, 64 processes, user 10001) and, unless the config says `bridge`, no
+network, and talks MCP over the pipe. The image must be built on the host already (`--pull
+never`), and the environment goes in by name so that no value is on a command line. Keystone's own
+environment never reaches the `docker` process but for `DOCKER_HOST`. This is the same boundary as
+the sandbox and has the same limits; it needs the `docker` binary, which the Keystone image copies
+from the official CLI image.
+
 **Where the sandbox is not available.** A Fargate task has no Docker daemon. There
 `KEYSTONE_SANDBOX_ENABLED=false`, and the `sandbox` upstream is not registered, so no tool is
 listed and nothing talks to Docker. The AWS deployment in Phase 9 sets it.

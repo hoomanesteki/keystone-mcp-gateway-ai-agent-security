@@ -29,6 +29,18 @@ upstreams:
       read_email: {risk: low, tags: [reads_untrusted, reads_sensitive]}
       send_email: {risk: high, tags: [external_effect], extract: {recipient_domain: "$.to | domain"}}
   - {id: files, tenant: acme, transport: http, url: "http://localhost:8102/mcp"}
+  # The sandbox (ADR-0012): run_python and run_shell in a container with no network. It needs the
+  # Docker socket and `make sandbox-image`, and `sandbox.enabled: false` leaves it out. Both tools
+  # are high risk, so only operators may call them.
+  - {id: sandbox, tenant: acme, transport: builtin}
+  # A stdio server that you do not trust, run in a container with no network. The image must be
+  # built already.
+  # - id: crm
+  #   tenant: acme
+  #   transport: container_stdio
+  #   image: crm-mcp:1.4
+  #   command: [crm-server, --stdio]
+  #   network: none   # or bridge
   - id: bank
     tenant: acme
     transport: http

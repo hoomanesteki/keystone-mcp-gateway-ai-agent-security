@@ -29,9 +29,9 @@ model again.
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit log (read through the admin API) does not hold one new record for each call |
 | `bash scripts/smoke/phase_6.sh` | Three agents run as olivia and lena decides through the admin API: a transfer of 900 is held, approved and completed (a second decision is 409 and olivia's own is 403); one of 700 is rejected with a note that the agent gets; one of 600 times out as `KS_APPROVAL_PENDING`, is approved late and is awaited. Then the audit log and `keystone_approvals_pending` are checked. About 20 seconds: the third request waits out the 10 s hold. |
 | `bash scripts/smoke/phase_5.sh` | Runs the demo, finds a Jaeger trace of more than 9 spans with no user or argument in it, reads `keystone_tool_calls_total` from `/metrics` and from Prometheus, finds the dashboard in Grafana, verifies the audit chain, edits a record as the Postgres superuser and checks that `keystone audit verify` exits 2 and names the seq, then puts the record back. About 15 seconds. |
-| `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 15 tools (13 of acme's and Keystone's 2); olivia's transfer of 900 is held for approval, lena rejects it through the admin API and olivia is told `KS_APPROVAL_REJECTED`, the audit shows `require_approval` / `approve-transfer-over-500` and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 30 seconds. |
-| `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), olivia's 17 tools, bob's 3 globex tools and Keystone's 2, and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
-| `bash scripts/smoke/phase_2.sh` | Lists the 17 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
+| `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 16 tools (14 of acme's and Keystone's 2); olivia's transfer of 900 is held for approval, lena rejects it through the admin API and olivia is told `KS_APPROVAL_REJECTED`, the audit shows `require_approval` / `approve-transfer-over-500` and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 30 seconds. |
+| `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), olivia's 20 tools, bob's 3 globex tools and Keystone's 2, and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
+| `bash scripts/smoke/phase_2.sh` | Lists the 20 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
 
 ## Host ports
 
@@ -410,7 +410,7 @@ tenant that is not under `tenants` in the config gets 403 `unknown_tenant`.
 | | acme | globex |
 |---|---|---|
 | Users | alice, olivia, lena, root | bob |
-| Upstreams | mail, files, bank, echo, echostd (15 tools) | files_globex (3 tools) |
+| Upstreams | mail, files, bank, echo, web, echostd, sandbox (18 tools) | files_globex (3 tools) |
 
 An upstream id is unique across tenants, so globex's drive is `files_globex` (its tools are
 `files_globex__read_file` and so on) and not a second `files`.
@@ -504,8 +504,8 @@ nothing is sent or moved until one approves it. `scripts/smoke/phase_4.sh` runs 
 ### The tool list
 
 `tools/list` shows a caller only the tools whose `list_tool` the policy allows. In the local stack
-support sees 13 of acme's 15 tools and operators see all 15, because `mail__send_email` and
-`bank__transfer` are high risk and only operators may use them. Every caller is also offered the
+support sees 14 of acme's 18 tools and operators see all 18, because `mail__send_email`,
+`bank__transfer` and the two tools of the sandbox are high risk and only operators may use them. Every caller is also offered the
 two tools that Keystone serves itself (see Approvals), which the policy does not decide. The list
 is only a convenience. Every call is decided again when it is
 made, so a tool that is not listed is still refused if it is called by name. A listing that cannot
@@ -869,8 +869,36 @@ and not for secrets. `env` can only be set in the YAML; an upstream added with t
 
 A stdio upstream runs as the Keystone user, with no sandbox. Whoever can write a `command` into the
 `upstreams` table or run `keystone upstream add` can run a program inside the Keystone container,
-so treat both as operator rights and keep the database closed. Phase 8 adds containerized stdio
-upstreams for servers you do not trust.
+so treat both as operator rights and keep the database closed. For a server you do not trust, use
+a containerized one.
+
+### Containerized stdio upstreams
+
+`transport: container_stdio` runs a stdio server in a container (KS-803, ADR-0012):
+
+```yaml
+  - id: crm
+    tenant: acme
+    transport: container_stdio
+    image: crm-mcp:1.4        # built on the host already; Keystone never pulls
+    command: [crm-server, --stdio]   # optional; the image's own command if left out
+    env: {CRM_REGION: eu}     # plain settings, as for stdio; passed by name, never on a command line
+    network: none             # none (the default) or bridge
+```
+
+Keystone starts it with `docker run --rm -i --pull never --network none --read-only --cap-drop ALL
+--security-opt no-new-privileges --memory 256m --memory-swap 256m --pids-limit 64 --user 10001`,
+labelled `keystone.container_stdio=1`, when the first call or sync needs it, and again after it
+dies, with the backoff of a stdio upstream. Closing the connection ends the container (`--rm`
+removes it). `bridge` lets the server reach the network: that is a decision about a third party,
+so it is written in the config and nowhere else. A name in `env` that starts with `DOCKER_` is
+refused, since the `docker` command reads those too. The `docker` binary is in the Keystone image.
+With the CLI: `keystone upstream add crm --transport container_stdio --image crm-mcp:1.4 -- crm-server
+--stdio` (always with no network).
+
+`examples/upstreams/Dockerfile.echo` builds the demo echo and probe servers as such an image
+(`make echo-image`, tag `keystone-echo-stdio:dev`); the tests of this transport use it. An image
+that is not built is an upstream whose sync failed, with `last_error` set, and not a crash.
 
 ### Tool lists and syncing
 
@@ -1005,8 +1033,8 @@ several.
 ## Sandbox
 
 Code an agent writes runs in a container that Keystone starts for that call and removes after it
-(ADR-0012, KS-801). The runner is `src/keystone/sandbox/runner.py`; the tools that use it arrive
-with KS-802.
+(ADR-0012, KS-801). The runner is `src/keystone/sandbox/runner.py`, and the tools that use it are
+the upstream `sandbox` (KS-802).
 
 What a container has: no network (a loopback and no route), a read-only root, a tmpfs of 64 MB on
 `/tmp` (nothing in it can be run) and on `/workspace`, 512 MB of memory with no swap, one CPU, 128
@@ -1026,6 +1054,46 @@ Look at what the sandbox has started with `docker ps -a --filter label=keystone.
 label `keystone.call_id` names the call. A container older than 10 minutes is removed by the
 reaper, which looks once a minute. `docker ps` should show none that are minutes old; if it does,
 the reaper is not running or cannot reach the daemon (`sandbox_reaper_failed` in the log).
+
+### The tools
+
+The upstream `sandbox` has transport `builtin`. Add `- {id: sandbox, tenant: acme, transport:
+builtin}` under `upstreams` to give a tenant its two tools (the compose config does). An upstream
+id is unique across tenants, so one tenant has the sandbox unless you give another a copy under a
+second id.
+
+| Tool | Arguments | Runs |
+|---|---|---|
+| `sandbox__run_python` | `code`, and optionally `stdin` | `python -c code` with Python 3.12, numpy and pandas |
+| `sandbox__run_shell` | `command` | `sh -c command` in the same image, with `wget` |
+
+Both are high risk with the tag `code_exec`, so by the default access policy operators may call
+them and nobody else may: a user in support is denied (`default-deny`) and does not see them in
+`tools/list`. A tenant that wants other rules writes them in Cedar, or sets `risk` and `tags` for
+the tools in the config. Setting a price there (`tools: {run_python: {cost_per_call_usd: 0.002}}`)
+leaves the risk and the tag as they are.
+
+The answer is one text block of JSON: `{"exit_code": 0, "stdout": "4\n", "stderr": "",
+"timed_out": false, "truncated": false}`. A program that exits with anything but 0, or runs out of
+time, is an error result (`isError`), and the block still says why. A run that is cut at 64 KB says
+`truncated`. A NUL character in `code` or `command` is refused by the schema, before a container
+is made. If Docker cannot run the container, the agent gets `KS_UPSTREAM_ERROR` and "the sandbox is
+not available", and the log says why (`sandbox_unavailable`). The upstream is probed like the
+others, and one the probes find down is refused at once; the probe checks the daemon, the runtime
+and the image.
+
+What a script prints goes through the scanner like the output of any tool. A script that prints an
+instruction is redacted and wrapped in the warning (the action for high risk tools) and taints the
+session, as a web page that holds one would. A session that ran code is not marked as having read
+anything: `code_exec` is not one of the flags (`reads_untrusted`, `reads_sensitive`).
+
+The descriptions of the two tools are pinned like any tool's. If a release of Keystone words one
+differently, the tool is held until a person approves the change (`keystone tool approve-change`),
+and `keystone tool show` has the diff.
+
+`KEYSTONE_SANDBOX_ENABLED=false` leaves the `sandbox` upstream unregistered. Keystone sets a
+`sandbox` row it stored before to `disabled` at the next start, so its tools leave the list, and
+nothing talks to Docker.
 
 To run under gVisor, install `runsc` on the Docker host, register it as a runtime, and set
 `KEYSTONE_SANDBOX__RUNTIME=runsc`. Keystone checks that the daemon knows the runtime before it
