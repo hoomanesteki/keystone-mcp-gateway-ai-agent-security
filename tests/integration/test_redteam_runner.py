@@ -125,6 +125,13 @@ async def test_runner_naive_c0_vs_c2_smoke(
     # The session the run opened is read back from the admin API: tainted or flagged in C2 only.
     assert attack0["session"]["flags"] == [] and attack0["session"]["tainted"] is False
     assert attack2["session"]["flags"] == ["reads_sensitive", "reads_untrusted"]
+    # The scores the scanner gave the outputs of the session come from its audit records: none in
+    # C0, which scans nothing, and a score for each output that was read in C2.
+    assert attack0["session"]["scans"] == []
+    scanned = {scan["tool"]: scan for scan in attack2["session"]["scans"]}
+    assert {"mail__list_emails", "mail__read_email"} <= set(scanned)
+    assert scanned["mail__read_email"]["score"] > scanned["mail__list_emails"]["score"] >= 0
+    assert scanned["mail__read_email"]["action"] in {"annotate", "redact", "block"}
 
 
 async def test_the_report_reads_what_the_runner_wrote(

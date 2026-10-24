@@ -268,11 +268,12 @@ async def session_facts(
     target: Target, client: httpx.AsyncClient, since: datetime
 ) -> dict[str, Any] | None:
     """The flags and the taint of the session the run opened: the newest session of olivia through
-    ops-agent that began after `since`. None if the gateway shows none."""
+    ops-agent that began after `since`, and the score the scanner gave each output it read in it
+    (from the audit log). None if the gateway shows no session."""
     token = await anyio.to_thread.run_sync(target.tokens.admin)
+    headers = {"Authorization": f"Bearer {token}"}
     answer = await client.get(
-        f"{target.base_url.rstrip('/')}{API}/sessions?limit=200",
-        headers={"Authorization": f"Bearer {token}"},
+        f"{target.base_url.rstrip('/')}{API}/sessions?limit=200", headers=headers
     )
     if answer.status_code != 200:
         return None
@@ -286,7 +287,32 @@ async def session_facts(
     if not mine:
         return None
     newest = max(mine, key=lambda s: s["created_at"])
-    return {"flags": newest["flags"], "tainted": newest["tainted"], "calls": newest["call_count"]}
+    return {
+        "flags": newest["flags"],
+        "tainted": newest["tainted"],
+        "calls": newest["call_count"],
+        "scans": await scan_facts(target, client, newest["session_id"], headers),
+    }
+
+
+async def scan_facts(
+    target: Target, client: httpx.AsyncClient, session_id: str, headers: Mapping[str, str]
+) -> list[dict[str, Any]]:
+    """The tool, the score and the action of every output of a session that was scanned, oldest
+    first. Empty where nothing is scanned (C0) or the log cannot be read."""
+    answer = await client.get(
+        f"{target.base_url.rstrip('/')}{API}/audit",
+        params={"session": session_id, "limit": 200},
+        headers=headers,
+    )
+    if answer.status_code != 200:
+        return []
+    rows = sorted(answer.json()["items"], key=lambda row: row["seq"])
+    return [
+        {"tool": r["tool_name"], "score": float(r["scan_score"]), "action": r["scan_action"]}
+        for r in rows
+        if r.get("scan_score") is not None
+    ]
 
 
 async def ledger_cost(database_url: str, refs: Sequence[str]) -> float:
