@@ -304,6 +304,9 @@ class ToolRepo:
             .where(Tool.tenant_id == tenant_id, Tool.name == name)
         )
         async with self._sessionmaker() as session:
+            # One statement and no transaction around it: a read on every call (the pinning slot)
+            # that otherwise sent BEGIN and ROLLBACK as well (KS-992).
+            await session.connection(execution_options={"isolation_level": "AUTOCOMMIT"})
             found = (await session.execute(statement)).one_or_none()
         if found is None:
             return None
