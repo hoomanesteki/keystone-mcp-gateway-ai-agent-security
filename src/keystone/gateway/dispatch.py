@@ -9,7 +9,7 @@ import structlog
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, ToolResult
 from keystone.gateway.scrub import scrub_result
-from keystone.gateway.upstreams import UpstreamPool
+from keystone.gateway.upstreams import CALL_ID, UpstreamPool
 from keystone.registry.naming import is_virtual
 from keystone.telemetry.tracing import trace_context_meta
 
@@ -48,6 +48,9 @@ class UpstreamDispatcher:
             # Refused without a connection attempt, so the call never reached the upstream.
             ctx.dispatched = False
             raise Reject(Code.UPSTREAM_ERROR, f"upstream {upstream_id} is down")
+        # The sandbox labels its containers with the call that asked (KS-802). It is read in this
+        # task and not sent anywhere: an upstream over the wire never learns the call id.
+        call = CALL_ID.set(ctx.call_id)
         try:
             # The trace context of the running span (the upstream call) goes to the upstream in the
             # request's `_meta`, so its spans can join the trace. Nothing is sent without a span.
@@ -74,6 +77,7 @@ class UpstreamDispatcher:
                 )
             return scrubbed
         finally:
+            CALL_ID.reset(call)
             # The plain values live in the pool's client for as long as it is pooled. The context
             # does not keep them a moment longer than the call, whatever the call did.
             ctx.upstream_headers = {}

@@ -16,10 +16,12 @@ gets the same answer, and the backoff would only make the agent wait about 4 s f
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
+from contextvars import ContextVar
 from types import TracebackType
 from typing import Any, Literal, Protocol, Self, cast
 
@@ -59,6 +61,12 @@ _SESSION_LOST = {"Session not found", "Session terminated"}
 _INVALID_REQUEST = -32600
 
 Protocol_ = Literal["auto", "legacy"]
+
+# The id of the call being dispatched, set by the dispatcher for the length of the call. An upstream
+# that Keystone runs itself (the sandbox) reads it to label what it starts with the call that asked,
+# so a container in `docker ps` leads to a row of the audit log. Upstreams over the wire are not
+# told it.
+CALL_ID: ContextVar[str | None] = ContextVar("keystone_call_id", default=None)
 
 
 class AuthWatch:
@@ -429,6 +437,46 @@ class StdioUpstreamClient(_SessionClient):
         )
 
 
+# What a containerized stdio server may use (KS-803, ADR-0012). The plan's flags, with swap held at
+# the memory limit and no pull: an image that is not built here is an error, not a download.
+CONTAINER_MEMORY = "256m"
+CONTAINER_PIDS = "64"
+CONTAINER_USER = "10001"
+CONTAINER_LABEL = "keystone.container_stdio=1"
+
+
+def container_command(
+    image: str, command: Sequence[str], env_names: Sequence[str], network: str
+) -> list[str]:
+    """The `docker run` that starts a stdio server in a container: no capabilities, a read-only
+    root, 256 MB, 64 processes, user 10001 and, unless the config says `bridge`, no network. The
+    environment goes in by name (`-e NAME`), and docker reads the value from its own environment,
+    so no value is ever on a command line."""
+    argv = [
+        "docker", "run", "--rm", "-i", "--pull", "never",
+        "--network", network,
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--memory", CONTAINER_MEMORY, "--memory-swap", CONTAINER_MEMORY,
+        "--pids-limit", CONTAINER_PIDS,
+        "--user", CONTAINER_USER,
+        "--label", CONTAINER_LABEL,
+    ]  # fmt: skip
+    for name in sorted(env_names):
+        argv += ["-e", name]
+    return [*argv, image, *command]
+
+
+def container_environment(env: Mapping[str, str]) -> dict[str, str]:
+    """The environment of the `docker` process: the container's variables, which it passes in by
+    name, and the daemon's address when Keystone was told one. Nothing else of Keystone's."""
+    found = dict(env)
+    if os.environ.get("DOCKER_HOST"):
+        found["DOCKER_HOST"] = os.environ["DOCKER_HOST"]
+    return found
+
+
 _MCP_ERROR_MESSAGE = "the upstream server rejected the request"
 _DROPPED_MESSAGE = "the upstream server dropped the connection"
 
@@ -616,8 +664,12 @@ class UpstreamTarget(BaseModel, frozen=True):
     transport: str
     url: str | None = None
     command: tuple[str, ...] | None = None
-    # Extra environment for a stdio child, as sorted (name, value) pairs. Never logged.
+    # Extra environment for a stdio child (or for the container of a containerized one), as sorted
+    # (name, value) pairs. Never logged.
     env: tuple[tuple[str, str], ...] = ()
+    # For container_stdio: the image, and whether the container has a network (`none` or `bridge`).
+    image: str | None = None
+    network: str = "none"
 
 
 class UpstreamDirectory:
@@ -637,12 +689,17 @@ class UpstreamDirectory:
         return changed
 
 
+# Makes the client of an upstream that Keystone runs itself, by upstream id (the sandbox).
+BuiltinMaker = Callable[[], UpstreamClient]
+
+
 def directory_client_factory(
     directory: UpstreamDirectory,
     *,
     protocol: Protocol_ = "auto",
     backoff_s: Sequence[float] = RECONNECT_BACKOFF_S,
     health_timeout_s: float = HEALTH_TIMEOUT_S,
+    builtins: Mapping[str, BuiltinMaker] | None = None,
 ) -> ClientFactory:
     def make(upstream_id: str, headers: dict[str, str], task_group: TaskGroup) -> UpstreamClient:
         target = directory.get(upstream_id)
@@ -668,6 +725,24 @@ def directory_client_factory(
                 backoff_s=backoff_s,
                 health_timeout_s=health_timeout_s,
             )
+        if target.transport == "container_stdio" and target.image:
+            return StdioUpstreamClient(
+                container_command(
+                    target.image,
+                    target.command or (),
+                    [name for name, _ in target.env],
+                    target.network,
+                ),
+                container_environment(dict(target.env)),
+                task_group,
+                upstream_id=upstream_id,
+                protocol=protocol,
+                backoff_s=backoff_s,
+                health_timeout_s=health_timeout_s,
+            )
+        maker = (builtins or {}).get(upstream_id) if target.transport == "builtin" else None
+        if maker is not None:
+            return maker()
         raise ValueError(f"upstream {upstream_id!r}: transport {target.transport!r} is not served")
 
     return make

@@ -17,6 +17,12 @@ VIRTUAL_UPSTREAM = "keystone"
 RESERVED_UPSTREAM_IDS = frozenset({VIRTUAL_UPSTREAM})
 
 
+# The upstreams that Keystone runs itself, named in the config with `transport: builtin` (KS-802).
+# Unlike `keystone`, they are upstreams in every other way: a row, tools in the registry, and a
+# call through the whole pipeline.
+BUILTIN_UPSTREAM_IDS = frozenset({"sandbox"})
+
+
 def is_reserved(upstream_id: str) -> bool:
     return upstream_id in RESERVED_UPSTREAM_IDS
 

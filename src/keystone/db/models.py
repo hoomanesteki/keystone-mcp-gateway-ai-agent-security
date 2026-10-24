@@ -41,7 +41,7 @@ class Tenant(Base):
 
 # The values below are checked by the database as well as by the Python types, so a bug or a
 # hand-written SQL statement cannot store a state the code does not know.
-TRANSPORTS = ("http", "stdio", "container_stdio")
+TRANSPORTS = ("http", "stdio", "container_stdio", "builtin")
 CREDENTIAL_MODES = ("none", "static", "per_user")
 UPSTREAM_SOURCES = ("config", "cli")
 UPSTREAM_STATUSES = ("unknown", "up", "degraded", "down", "disabled")
