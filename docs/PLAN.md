@@ -1084,8 +1084,9 @@ moves, and how to add a tool server, a policy or an ADR.
 
 ## Set up
 
-You need Docker with Compose v2, GNU make, uv 0.12 (it installs Python 3.12), and for the console
-Node 26 and pnpm 12.
+You need Docker with Compose v2 and its daemon running, GNU make, uv 0.12 (it installs Python
+3.12), a `python3` on PATH (the shell scripts call it), Node 26 and pnpm 12. `make check` needs all
+of them: it builds the sandbox and echo images and ends with the console checks.
 
     git clone https://github.com/hoomanesteki/keystone-mcp-gateway-ai-agent-security.git
     cd keystone-mcp-gateway-ai-agent-security
@@ -1093,11 +1094,13 @@ Node 26 and pnpm 12.
     make check          # starts Postgres and Redis, then lint, types, unit, integration, console
 
 On macOS, if `uv run` fails with `ModuleNotFoundError: keystone` right after `uv sync`, put the
-virtual environment outside the repository: `export UV_PROJECT_ENVIRONMENT=$HOME/.cache/keystone-venv`
-(docs/runbook.md, Troubleshooting, says why).
+virtual environment outside the repository: put `export UV_PROJECT_ENVIRONMENT=$HOME/.cache/keystone-venv`
+in your shell profile, so every shell has it, then run `make setup` again (docs/runbook.md,
+Troubleshooting, says why).
 
-`make up` starts the full stack and `make down` stops it. Tests never use the stack's ports: they
-start their own services on free ports.
+`make up` starts the full stack and `make down` stops it. Integration tests use the Postgres and
+Redis of `make up-core` (a separate `keystone_test` database); the servers a test starts itself
+listen on free ports.
 
 ## How a change moves
 
