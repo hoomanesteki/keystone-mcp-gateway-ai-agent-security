@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import anyio
 import httpx2
 import pytest
 from fastapi import FastAPI
@@ -952,3 +953,59 @@ def test_the_request_id_header_is_on_every_answer(rig: Rig) -> None:
 def test_the_provider_ids_are_the_ones_the_registry_reserves() -> None:
     assert set(UPSTREAM_IDS.values()) == LLM_UPSTREAM_IDS
     assert PATHS == {"anthropic": "/v1/messages", "openai": "/v1/chat/completions"}
+
+
+# -- a whole answer that takes its time (KS-998)
+
+
+class Slowly(httpx2.AsyncByteStream):
+    """A body whose pieces arrive with a pause before each, as a long answer's do."""
+
+    def __init__(self, chunks: list[bytes], pause_s: float) -> None:
+        self.chunks = chunks
+        self.pause_s = pause_s
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self.chunks:
+            await anyio.sleep(self.pause_s)
+            yield chunk
+
+
+def test_a_whole_answer_slower_than_a_drain_is_delivered_and_booked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DRAIN_S is the time given to the rest of an answer whose caller has left. A whole answer
+    gets `llm_proxy.timeout_s`. Under the drain limit, a body that took longer was cut after the
+    200 had gone out: the SDK got an empty body, and the ledger a cost of nothing for an answer
+    the provider had finished and charged for."""
+    import keystone.metering.llm_proxy as proxy_module
+
+    monkeypatch.setattr(proxy_module, "DRAIN_S", 0.05)
+    answer_body = json.dumps(
+        {
+            "id": "msg_slow",
+            "type": "message",
+            "role": "assistant",
+            "model": "fake-model",
+            "content": [{"type": "text", "text": "a slow answer"}],
+            "usage": {"input_tokens": 4, "output_tokens": 12},
+        }
+    ).encode()
+
+    def slow(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=Slowly([answer_body[:20], answer_body[20:]], pause_s=0.1),
+        )
+
+    rig = build(transport=httpx2.MockTransport(slow), llm={"timeout_s": 5})
+
+    with capture_logs() as logs:
+        answer = rig.post(ANTHROPIC, body())
+
+    assert answer.status_code == 200
+    assert answer.json()["usage"] == {"input_tokens": 4, "output_tokens": 12}
+    entry = only_entry(rig)
+    assert (entry.input_tokens, entry.output_tokens, entry.cost_usd) == (4, 12, Decimal("0.000192"))
+    assert not [e for e in logs if e["event"] == "llm_usage_incomplete"]
