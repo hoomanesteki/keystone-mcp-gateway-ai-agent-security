@@ -13,10 +13,10 @@ The nine metrics of the plan (section 1.7), with the value and the verdict. Each
 | M3 | Benign utility drop, C0 to C2 | at most 10 points | 0.0 points (12 of 12 in both) | pass | [Red team](#red-team) |
 | M4 | Detector recall at a false positive rate of 5% or less | at least 0.90 | 0.71 (0.67 to 0.74) | fail | [Detector](#detector) |
 | M5 | Added latency, scanner off, 200 sessions, 1 KB | p50 at most 10 ms, p95 at most 25 ms | p50 +1987.9 ms, p95 +2731.4 ms | fail | [Performance](#performance) |
-| M5 | The same with one session, 1 KB | the same | p50 +8.6 ms, p95 +11.7 ms | pass | [Performance](#performance) |
-| M5 | The same with one session, 8 KB | the same | p50 +11.0 ms, p95 +15.6 ms | fail (p50 by 1.0 ms) | [Performance](#performance) |
+| M5, diagnostic | The same with one session, 1 KB (not the plan's condition, which is 200 sessions) | the same | p50 +8.6 ms, p95 +11.7 ms | meets the target at 1 KB; M5 itself stays fail | [Performance](#performance) |
+| M5, diagnostic | The same with one session, 8 KB | the same | p50 +11.0 ms, p95 +15.6 ms | fail (p50 by 1.0 ms) | [Performance](#performance) |
 | M6 | Added latency, classifier, up to 2,000 tokens | p95 at most 150 ms | not measured: the model scored none of the scans | not measured | [Performance](#performance) |
-| M7 | Calls with a recorded decision | 100% | invariant I1 passes at every gate | pass | `docs/gates/phase-8.md` |
+| M7 | Calls with a recorded decision | 100% | invariant I1 passed at the gates of phases 1 to 8 (it did not exist at phase 0; the phase 9 gate has not run) | pass | `docs/gates/phase-8.md` |
 | M8 | One edited audit row is detected | yes | `keystone audit verify` exits 2 and names the row | pass | `docs/gates/phase-5.md` |
 | M9 | Fresh clone to `make demo` | at most 10 minutes | measured at release | not run | `scripts/fresh_clone_test.sh` |
 
@@ -411,7 +411,7 @@ Measured on 2026-10-25 at commit `0b1d587781c5`, by `python -m eval.perf.matrix`
 
 The machine: Apple M4, 10 vCPUs, 16 GB of memory, macOS-26.7.1-arm64-arm-64bit, Docker 29.6.2 (its VM has 10 CPUs and 8 GB, Docker Desktop, aarch64). Docker reported the keystone container limited to 4 CPUs and 4 GB. It ran one uvicorn worker and logged at warning level, with the sandbox off and rate limits high enough that no call was refused (`deploy/perf.override.yml`).
 
-The run: 200 MCP sessions opened at once, each making 20 calls of the echo tool one after the other, with a payload of 1 KB (about 197 tokens) or 8 KB (about 1,581 tokens) of English text. The timed calls start together, after each session has made 3 calls that are not counted. A call is timed from the request to the whole answer, and a call that fails is counted and timed like the others. The percentiles are nearest-rank: of 4,000 calls the 95th is the 3,800th fastest. The generator is 4 processes, so that no one of them is the limit. The targets are the echo upstream alone, and Keystone in four settings of one build: passthrough (every slot a stub), full with the scanner off, full with the rules alone, and full with the classifier. Each was checked at `/metrics` before it was measured, and the model had loaded where there is one.
+The run: 200 MCP sessions opened at once, each making 20 calls of the echo tool one after the other, with a payload of 1 KB (about 197 tokens) or 8 KB (about 1,581 tokens) of English text. The timed calls start together, after each session has made 3 calls that are not counted. A call is timed from the request to the whole answer, and a call that fails is counted in the share of failures and left out of the percentiles. The percentiles are nearest-rank: of 4,000 calls the 95th is the 3,800th fastest. The generator is 4 processes, so that no one of them is the limit. The targets are the echo upstream alone, and Keystone in four settings of one build: passthrough (every slot a stub), full with the scanner off, full with the rules alone, and full with the classifier. Each was checked at `/metrics` before it was measured, and the model had loaded where there is one.
 
 ### Against the targets
 
@@ -419,7 +419,7 @@ The run: 200 MCP sessions opened at once, each making 20 calls of the echo tool 
 |---|---|---|---|---|
 | M5 | Added latency per call, scanner off, 200 sessions | p50 at most 10 ms, p95 at most 25 ms | 1 KB: p50 +1987.9 ms, p95 +2731.4 ms; 8 KB: p50 +2185.4 ms, p95 +2683.8 ms | not met |
 | M6 | Added latency per call, classifier, outputs up to 2,000 tokens, 200 sessions | p95 at most 150 ms | 1 KB (197 tokens): p95 +7071.9 ms; 8 KB (1581 tokens): p95 +6716.1 ms | not measured: the model scored 0% of the scans |
-| M5, one session | Added latency per call, scanner off, one session, no queue | p50 at most 10 ms, p95 at most 25 ms | 1 KB: p50 +8.6 ms, p95 +11.7 ms; 8 KB: p50 +11.0 ms, p95 +15.6 ms | not met |
+| M5, one session | Added latency per call, scanner off, one session, no queue | p50 at most 10 ms, p95 at most 25 ms | 1 KB: p50 +8.6 ms, p95 +11.7 ms; 8 KB: p50 +11.0 ms, p95 +15.6 ms | 1 KB met; 8 KB not met |
 | M6, one session | Added latency per call, classifier, outputs up to 2,000 tokens, one session, no queue | p95 at most 150 ms | 1 KB (197 tokens): p95 +47.8 ms; 8 KB (1581 tokens): p95 +115.8 ms | not measured: the model scored 0% of the scans |
 
 ### 200 sessions, 20 calls each, 1 KB payload

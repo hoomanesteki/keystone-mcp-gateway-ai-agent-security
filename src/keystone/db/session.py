@@ -11,9 +11,18 @@ from sqlalchemy.ext.asyncio import (
 )
 
 
-def create_engine(url: str) -> AsyncEngine:
-    # pool_pre_ping drops connections that Postgres closed while the gateway was idle.
-    return create_async_engine(url, pool_pre_ping=True)
+def create_engine(
+    url: str, *, connect_timeout_s: float | None = None, command_timeout_s: float | None = None
+) -> AsyncEngine:
+    # pool_pre_ping drops connections that Postgres closed while the gateway was idle. The
+    # timeouts (asyncpg's `timeout` and `command_timeout`) end a call that waits on a database
+    # that stopped answering (KS-993).
+    connect_args: dict[str, float] = {}
+    if connect_timeout_s is not None:
+        connect_args["timeout"] = connect_timeout_s
+    if command_timeout_s is not None:
+        connect_args["command_timeout"] = command_timeout_s
+    return create_async_engine(url, pool_pre_ping=True, connect_args=connect_args)
 
 
 def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

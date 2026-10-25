@@ -18,7 +18,12 @@ from keystone.app import create_app
 from keystone.approvals.service import MAX_NOTE_CHARS, _clean_note
 from keystone.core.errors import Code, Reject
 from keystone.core.types import ToolResult
-from keystone.gateway.dispatch import MAX_RESULT_BLOCKS, UpstreamDispatcher, check_result_size
+from keystone.gateway.dispatch import (
+    MAX_RESULT_BLOCKS,
+    MAX_RESULT_BYTES,
+    UpstreamDispatcher,
+    check_result_size,
+)
 from keystone.gateway.limits import (
     MAX_BODY_BYTES,
     MAX_HEADER_BYTES,
@@ -89,6 +94,40 @@ def test_headers_over_the_byte_limit_are_refused() -> None:
     assert client().post("/", content=b"{}", headers=big).status_code == 431
 
 
+def status_for(headers: list[tuple[bytes, bytes]]) -> int:
+    """The status the middleware answers for exactly these headers, with no client in between to
+    add its own."""
+    sent: list[Message] = []
+
+    async def run() -> None:
+        scope = {"type": "http", "headers": headers}
+
+        async def receive() -> Message:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message: Message) -> None:
+            sent.append(message)
+
+        await RequestLimitMiddleware(echo_body)(scope, receive, send)
+
+    asyncio.run(run())
+    return int(sent[0]["status"])
+
+
+def test_the_header_count_limit_is_exact() -> None:
+    at = [(b"h", b"1")] * MAX_HEADER_COUNT
+    assert status_for(at) == 200
+    assert status_for([*at, (b"h", b"1")]) == 431
+
+
+def test_the_header_byte_limit_is_exact() -> None:
+    # The total counts every name and every value: 8 + (MAX - 8) bytes is the limit itself.
+    at = [(b"x-pad", b"a" * (MAX_HEADER_BYTES - len(b"x-pad")))]
+    assert status_for(at) == 200
+    over = [(b"x-pad", b"a" * (MAX_HEADER_BYTES - len(b"x-pad") + 1))]
+    assert status_for(over) == 431
+
+
 def test_ordinary_headers_pass() -> None:
     headers = {"authorization": "Bearer " + "a" * 2000, "mcp-session-id": "s" * 64}
     assert client().post("/", content=b"{}", headers=headers).status_code == 200
@@ -112,6 +151,16 @@ def test_a_result_with_too_many_content_blocks_is_refused() -> None:
     with pytest.raises(Reject) as refused:
         check_result_size(blocks(MAX_RESULT_BLOCKS + 1))
     assert refused.value.code is Code.UPSTREAM_ERROR
+
+
+def test_the_result_byte_limit_is_exact() -> None:
+    empty = len(ToolResult(content=[{"type": "text", "text": ""}]).model_dump_json())
+    at = ToolResult(content=[{"type": "text", "text": "x" * (MAX_RESULT_BYTES - empty)}])
+    assert len(at.model_dump_json()) == MAX_RESULT_BYTES
+    check_result_size(at)
+    over = ToolResult(content=[{"type": "text", "text": "x" * (MAX_RESULT_BYTES - empty + 1)}])
+    with pytest.raises(Reject):
+        check_result_size(over)
 
 
 def test_a_result_over_the_byte_limit_is_refused() -> None:

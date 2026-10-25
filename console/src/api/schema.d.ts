@@ -307,8 +307,9 @@ export interface paths {
         put?: never;
         /**
          * Read the policy files again
-         * @description Read the policy files again. A set with any problem is refused with 422, every problem
-         *     named, and the set in force stays in force.
+         * @description Read the policy files again, for every tenant: the set is one for the process. A set with
+         *     any problem is refused with 422, every problem named, and the set in force stays in
+         *     force.
          */
         post: operations["reload_policies_policies_reload_post"];
         delete?: never;
@@ -398,9 +399,16 @@ export interface components {
             flags: string[];
             /**
              * Tainted
-             * @description The session has read untrusted content.
+             * @description The session has read untrusted content. False when `session_state` is not `live`: then the flags and the taint are not known.
              */
             tainted: boolean;
+            /**
+             * Session State
+             * @description `live`: flags and taint were read. `ended`: the session expired or is not this tenant's. `unavailable`: the session store did not answer. Do not read an empty flag list as clean unless this is `live`.
+             * @default live
+             * @enum {string}
+             */
+            session_state: "live" | "ended" | "unavailable";
             /**
              * Recent Calls
              * @description The last 10 calls of the session that asked, newest first.
@@ -487,9 +495,16 @@ export interface components {
             flags: string[];
             /**
              * Tainted
-             * @description The session has read untrusted content.
+             * @description The session has read untrusted content. False when `session_state` is not `live`: then the flags and the taint are not known.
              */
             tainted: boolean;
+            /**
+             * Session State
+             * @description `live`: flags and taint were read. `ended`: the session expired or is not this tenant's. `unavailable`: the session store did not answer. Do not read an empty flag list as clean unless this is `live`.
+             * @default live
+             * @enum {string}
+             */
+            session_state: "live" | "ended" | "unavailable";
         };
         /** ApproveChange */
         ApproveChange: {

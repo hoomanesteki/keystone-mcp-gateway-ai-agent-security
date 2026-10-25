@@ -549,6 +549,10 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_REDIS_URL` | `redis://localhost:56379/0` | Redis URL. Session state lives here. Set it to an empty string to keep session state in the gateway process instead (one process only, lost on restart). |
 | `KEYSTONE_REDIS_POOL_SIZE` | `500` | Connections in the one Redis pool that sessions, rate limits, budgets and approvals share. A caller that finds them all in use waits for one. |
 | `KEYSTONE_REDIS_POOL_TIMEOUT_S` | `2` | How long such a caller waits, in seconds. After that the call is refused as before (`session state is unavailable`), because a call that cannot read its session must not run. |
+| `KEYSTONE_REDIS_SOCKET_TIMEOUT_S` | `5` | How long one Redis command may take, in seconds. A store that accepts the connection and stops answering ends the call with a refusal after this, and not never. |
+| `KEYSTONE_REDIS_CONNECT_TIMEOUT_S` | `2` | How long opening a Redis connection may take. |
+| `KEYSTONE_DB_CONNECT_TIMEOUT_S` | `5` | How long opening a Postgres connection may take. |
+| `KEYSTONE_DB_COMMAND_TIMEOUT_S` | `60` | How long one Postgres statement may take. |
 | `KEYSTONE_CREDENTIAL_CACHE_TTL_S` | `60` | How long the gateway keeps an upstream's opened credential instead of reading and decrypting it on every call. `keystone cred set` and `rotate-keys` run in the CLI, another process, so the gateway sends the old credential until the entry expires: set `0` to read it every call. |
 | `KEYSTONE_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` |
 | `KEYSTONE_CONFIG` | unset | Path to a YAML file with the same keys |

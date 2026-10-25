@@ -8,7 +8,9 @@ needs no token: it describes the routes and holds no data.
 Everything is scoped to the tenant of the token. A record, a tool or a session of another tenant is
 not found, not forbidden, so the answer does not say that it exists. The one exception is
 `/audit/verify`: the hash chain runs through every tenant's records, so its result is about the
-whole log, and it says nothing of what any record holds.
+whole log, and it says nothing of what any record holds. `/policies/reload` is the other global
+operation: the policy set is one for the process, so any admin can make the files on disk live,
+for every tenant (accepted risk in docs/threat-model.md).
 """
 
 from collections.abc import Sequence
@@ -18,6 +20,7 @@ from decimal import Decimal
 from typing import Annotated
 from urllib.parse import urlsplit, urlunsplit
 
+import structlog
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
@@ -81,6 +84,8 @@ DEFAULT_VERIFY = 10_000
 MAX_VERIFY = 100_000
 MAX_SESSIONS = 200
 RECENT_CALLS = 10
+
+log = structlog.get_logger()
 
 
 @dataclass(frozen=True)
@@ -278,14 +283,21 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
             t.name: t for t in await ToolRepo(deps.sessions).list_by_tenant(principal.tenant_id)
         }
         states: dict[str, SessionState | None] = {}
-        if deps.session_directory is not None:
-            for session_id in {r.session_id for r in records}:
-                try:
-                    found = await deps.session_directory.peek(session_id)
-                except Exception:
-                    found = None
-                mine = found is not None and found.principal.tenant_id == principal.tenant_id
-                states[session_id] = found if mine else None
+        unavailable: set[str] = set()
+        for session_id in {r.session_id for r in records}:
+            if deps.session_directory is None:
+                unavailable.add(session_id)
+                continue
+            try:
+                found = await deps.session_directory.peek(session_id)
+            except Exception:
+                # An approver must not read "no flags" for a session whose flags could not be read
+                # (KS-993): the card says so.
+                log.warning("approval_session_unreadable", session_id=session_id, exc_info=True)
+                unavailable.add(session_id)
+                continue
+            mine = found is not None and found.principal.tenant_id == principal.tenant_id
+            states[session_id] = found if mine else None
         items = []
         for r in records:
             tool, state = tools.get(r.tool_name), states.get(r.session_id)
@@ -313,6 +325,13 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
                     decided_at=_moment(r.decided_at),
                     flags=sorted(flag.value for flag in state.flags) if state else [],
                     tainted=state.tainted if state else False,
+                    session_state=(
+                        "live"
+                        if state
+                        else "unavailable"
+                        if r.session_id in unavailable
+                        else "ended"
+                    ),
                 )
             )
         return items
@@ -619,8 +638,9 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
         responses={422: {"description": "The new set has problems; the old set stays in force."}},
     )
     async def reload_policies() -> Response:
-        """Read the policy files again. A set with any problem is refused with 422, every problem
-        named, and the set in force stays in force."""
+        """Read the policy files again, for every tenant: the set is one for the process. A set with
+        any problem is refused with 422, every problem named, and the set in force stays in
+        force."""
         result = await deps.policies.reload()
         if result.ok:
             return JSONResponse(
