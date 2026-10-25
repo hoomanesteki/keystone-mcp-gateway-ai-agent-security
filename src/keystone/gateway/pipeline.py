@@ -33,6 +33,7 @@ from keystone.core.canonical import canonical_json
 from keystone.core.errors import Code, Reject, to_tool_result
 from keystone.core.types import CallContext, Effect, ToolResult
 from keystone.gateway.hooks import is_noop
+from keystone.registry.naming import is_unknown
 from keystone.telemetry.metrics import Metrics
 from keystone.telemetry.tracing import NO_SPAN, SpanHandle, Tracer
 
@@ -180,7 +181,12 @@ class Pipeline:
             try:
                 try:
                     self._require_audit(ctx)
-                    validate_arguments(ctx)
+                    try:
+                        validate_arguments(ctx)
+                    except Reject as invalid:
+                        # Refused before the rate limit slot saw it, so it takes its token here:
+                        # a loop of calls with arguments that fit no schema is a loop (KS-998).
+                        raise await self._charged(ctx, invalid) from None
                     for interceptor in self.interceptors:
                         await self._hook(interceptor, interceptor.before_call, ctx, Code.DENIED)
                     require_dispatch_decision(ctx)
@@ -232,32 +238,37 @@ class Pipeline:
                 await self._hook(interceptor, interceptor.before_call, ctx, Code.DENIED)
 
     async def reject(self, ctx: CallContext, reject: Reject) -> ToolResult:
-        """Refuse a call that cannot enter the pipeline (a tool that does not exist). The
-        refusal is still audited, so every call leaves one record (invariant I2)."""
+        """Refuse a call that cannot enter the pipeline: a tool that does not exist, a session or
+        a registry that cannot be read. The refusal is still audited, so every call leaves one
+        record (invariant I2), and it takes its rate limit token as any call does. The outcome is
+        "error" when Keystone failed the call (an upstream code), as it is in `run`."""
         started = time.perf_counter()
+        outcome: Outcome = "error" if is_failure(reject) else "rejected"
         with self.tracer.tool_call(ctx) as span:
             try:
                 reject = await self._charged(ctx, reject)
+                outcome = "error" if is_failure(reject) else "rejected"
                 ctx.result = to_tool_result(reject, ctx.call_id)
                 return ctx.result
             finally:
-                self._describe(span, ctx, "rejected", reject)
-                self._count(ctx, "rejected", reject, started)
-                await self._audit(ctx, "rejected", reject)
+                self._describe(span, ctx, outcome, reject)
+                self._count(ctx, outcome, reject, started)
+                await self._audit(ctx, outcome, reject)
 
     async def _charged(self, ctx: CallContext, reject: Reject) -> Reject:
-        """A call to a tool that does not exist costs the principal a token of the rate limit, as
-        any call does; without that, a loop of made-up names was audited and never limited. When a
-        bucket is empty the agent is told to slow down, not that the tool is missing. A limiter
-        that fails leaves the refusal as it was: the call is refused either way."""
-        if reject.code is not Code.TOOL_NOT_FOUND:
-            return reject
+        """A call refused before the slots run costs the principal a token of the rate limit, as
+        any call does; without that, a loop of made-up names (KS-992), or of arguments that fit no
+        schema (KS-998), was audited and never limited. The tool's own bucket is charged too when
+        the call names a tool that exists. A name that is no tool has no bucket, so a loop of names
+        makes none. When a bucket is empty the agent is told to slow down, not what else was wrong.
+        A limiter that fails leaves the refusal as it was: the call is refused either way."""
+        with_tool = reject.code is not Code.TOOL_NOT_FOUND and not is_unknown(ctx.tool)
         for interceptor in self.interceptors:
             charge = getattr(interceptor, "charge_principal", None)
             if charge is None:
                 continue
             try:
-                await charge(ctx)
+                await charge(ctx, with_tool=with_tool)
             except Reject as refused:
                 return refused
             except Exception:
