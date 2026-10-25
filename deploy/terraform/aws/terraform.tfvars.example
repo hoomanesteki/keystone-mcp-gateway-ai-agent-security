@@ -9,7 +9,8 @@ image = ""
 # Narrow this to your own address (203.0.113.7/32) for a demo.
 ingress_cidrs = ["0.0.0.0/0"]
 
-# Set a certificate to serve HTTPS and redirect 80 to 443.
+# Set a certificate to serve HTTPS and redirect 80 to 443. Without one the task runs in dev mode,
+# a trial from your own address (README, "Without a certificate").
 acm_certificate_arn = ""
 
 enable_cognito = true

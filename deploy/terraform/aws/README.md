@@ -81,8 +81,15 @@ Fargate time when you turn it on, plus X-Ray's own charges.
   mode. The `sandbox` upstream is not served, and the containerized stdio upstreams cannot start either.
   Running code on AWS would need a separate service (a Lambda or a second ECS task per call), which
   this stack does not build.
-- **HTTP without a certificate.** With no `acm_certificate_arn` the ALB serves plain HTTP, so tokens
-  cross the internet in the clear. Use it only with `ingress_cidrs` narrowed to your own address.
+- **Without a certificate the stack runs in dev mode.** With no `acm_certificate_arn` the ALB serves
+  plain HTTP, and Keystone in prod refuses an http public URL and identity provider, so the task
+  runs with `KEYSTONE_ENV=dev`. Tokens cross the internet in the clear. That is a trial from your
+  own address (`ingress_cidrs`), not a deployment: prod needs the certificate. Dev mode here
+  relaxes the https rule. The other things `KEYSTONE_ENV` changes do not reach this stack: the
+  audit log is pinned to fail closed, sign-in stays `oidc`, and the vault key is generated, so the
+  prod-only refusal of the published development key has nothing to refuse.
+  With a certificate, `terraform plan` refuses an http `public_base_url` or `oidc_issuer` instead
+  of letting the service crash-loop at startup.
 - **Secrets are in the state.** Terraform generates the passwords and the vault key, so they sit in
   `terraform.tfstate` as well as in Secrets Manager. The state stays local here. Use an encrypted S3
   backend with locking before sharing it.

@@ -23,7 +23,7 @@ variable "vpc_cidr" {
 }
 
 variable "acm_certificate_arn" {
-  description = "ACM certificate for the load balancer. When set, the ALB serves HTTPS on 443 and redirects 80 to it. When empty, it serves plain HTTP on 80 (a demo only)."
+  description = "ACM certificate for the load balancer. When set, the ALB serves HTTPS on 443 and redirects 80 to it, and the task runs with KEYSTONE_ENV=prod. When empty, it serves plain HTTP on 80 and the task runs in dev mode: a trial from your own address, not a deployment (README)."
   type        = string
   default     = ""
 }

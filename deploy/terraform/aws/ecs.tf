@@ -35,7 +35,13 @@ locals {
 
   environment = merge(
     {
-      KEYSTONE_ENV = "prod"
+      # Keystone in prod refuses an http public URL, issuer or discovery address. Without a
+      # certificate the ALB serves http, so the task runs in dev mode: a trial from your own
+      # address, not a deployment (README, "Without a certificate").
+      KEYSTONE_ENV = local.https ? "prod" : "dev"
+      # In dev the audit log fails open by default. Keep it closed here: dev mode on AWS exists
+      # to relax the https rule, not that.
+      KEYSTONE_AUDIT__FAIL_CLOSED = "true"
       # Fargate has no Docker socket. The sandbox needs one, so it is off here (README).
       KEYSTONE_SANDBOX_ENABLED    = "false"
       KEYSTONE_AUTH__MODE         = "oidc"
@@ -129,6 +135,19 @@ resource "aws_ecs_task_definition" "keystone" {
   container_definitions = jsonencode(
     concat([local.keystone_container], [for c in [local.adot_container] : c if var.enable_adot])
   )
+
+  lifecycle {
+    # Keystone would refuse these at startup, and the service would crash-loop behind a load
+    # balancer that looks healthy while the NAT gateway and the database bill by the hour.
+    precondition {
+      condition     = !local.https || var.public_base_url == "" || startswith(var.public_base_url, "https://")
+      error_message = "With a certificate the task runs with KEYSTONE_ENV=prod, and Keystone refuses an http public_base_url there. Give an https URL or leave it empty."
+    }
+    precondition {
+      condition     = !local.https || var.enable_cognito || var.oidc_issuer == "" || startswith(var.oidc_issuer, "https://")
+      error_message = "With a certificate the task runs with KEYSTONE_ENV=prod, and Keystone refuses an http oidc_issuer there."
+    }
+  }
 }
 
 resource "aws_ecs_service" "keystone" {
