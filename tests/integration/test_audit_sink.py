@@ -514,8 +514,8 @@ async def test_the_app_stores_the_arguments_of_a_call_masked(
     assert first["args_redacted"] == {"payload": "[redacted]", "extra": "unlisted"}
     assert first["args_digest"] == hashlib.sha256(canonical_json(secret_call)).hexdigest()
     assert second["args_redacted"] == {"payload": "[redacted]"}
-    # The card as it was sent, with its spaces: the hex of a hash, a session id or a ULID never holds
-    # a space, so a random "4111" inside one of them cannot fail the test (it did, once in CI).
+    # The card as it was sent, with its spaces: the hex of a hash, a session id or a ULID never
+    # holds a space, so a random "4111" inside one of them cannot fail the test (it did once in CI).
     assert "4111 1111" not in str(app.audit.records)
 
 
