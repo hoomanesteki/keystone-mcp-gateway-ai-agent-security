@@ -15,6 +15,27 @@ from keystone.telemetry.tracing import trace_context_meta
 
 log = structlog.get_logger()
 
+# What one upstream result may hold (KS-906). A result goes through the scanner and into the
+# agent's context, so an upstream that answers with thousands of blocks, or 100 MiB, is refused
+# as a fault of the upstream and not carried further.
+MAX_RESULT_BLOCKS = 256
+MAX_RESULT_BYTES = 16 * 1024 * 1024
+
+
+def check_result_size(result: ToolResult) -> None:
+    if len(result.content) > MAX_RESULT_BLOCKS:
+        raise Reject(
+            Code.UPSTREAM_ERROR,
+            f"the upstream returned {len(result.content)} content blocks, the limit is "
+            f"{MAX_RESULT_BLOCKS}",
+        )
+    size = len(result.model_dump_json())
+    if size > MAX_RESULT_BYTES:
+        raise Reject(
+            Code.UPSTREAM_ERROR,
+            f"the upstream's result is {size} bytes, the limit is {MAX_RESULT_BYTES}",
+        )
+
 
 class DownCheck(Protocol):
     def is_down(self, upstream_id: str) -> bool: ...
@@ -64,6 +85,7 @@ class UpstreamDispatcher:
                     result = await client.call_tool(
                         ctx.tool.upstream_tool_name, ctx.arguments, ctx.tool.timeout_s
                     )
+            check_result_size(result)
             # An upstream that echoes the credential it received must not pass it to the agent.
             # This runs before the result leaves dispatch, while the injected values are still
             # on the context (KS-392).
