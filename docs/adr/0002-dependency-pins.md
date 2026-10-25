@@ -46,6 +46,9 @@ is newer than the plan: see "Console: where a pin differs" below.
 | Item | Version | Notes |
 |---|---|---|
 | actions/checkout | v7 | |
+| actions/configure-pages | v6 | the Pages workflow for the project site |
+| actions/upload-pages-artifact | v5 | the Pages workflow for the project site |
+| actions/deploy-pages | v5 | the Pages workflow for the project site |
 | astral-sh/setup-uv | v10.3.1 | no moving major tag is published |
 | gitleaks | 8.30.1 | downloaded in the security job and checked against its SHA-256 |
 | actions/setup-node | v7 | the console and nightly jobs; Node's version is read from `console/.nvmrc` |
