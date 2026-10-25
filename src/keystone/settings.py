@@ -554,6 +554,10 @@ class Settings(BaseSettings):
     oidc_issuer: str | None = None
     oidc_audience: str = "keystone"
     oidc_discovery_url: str | None = None
+    # How long a fetched set of signing keys is trusted before it is fetched again (a shorter
+    # Cache-Control max-age from the provider wins). A key the provider withdraws is refused within
+    # this time, whether or not any token names a kid Keystone has not seen.
+    oidc_jwks_max_age_s: float = Field(default=600.0, gt=0)
     # The one origin a browser may call the admin API from (the console, KS-605). CORS refuses any
     # other.
     console_origin: str = "http://localhost:5173"

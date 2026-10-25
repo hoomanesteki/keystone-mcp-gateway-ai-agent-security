@@ -498,6 +498,13 @@ be fetched, the answer is 503, not 401: the token was not shown to be bad. An an
 Keystone can use (an identity provider that is starting up can serve an empty set for a moment)
 counts as a failed fetch: the cached keys stay, and the log says `jwks_without_usable_keys`.
 
+A cached set is not trusted for ever. Once it is older than `KEYSTONE_OIDC_JWKS_MAX_AGE_S` (600
+seconds, or the `max-age` of the answer's `Cache-Control` when that is shorter, never under a
+minute) the next token makes Keystone fetch the keys again, so a key the identity provider has
+withdrawn stops validating within that time even when every token names a key Keystone already
+holds. If that fetch fails the old set stays and is tried again a minute later: a token under a
+cached key was not shown to be bad.
+
 `tenant` is required and must look like a tenant id. The agent is `azp`, or `client_id` when
 there is no `azp`. Groups lose their leading `/`, and the `/tenants/...` groups are dropped,
 because the tenant has its own claim. The roles come from `roles`, or from `realm_access.roles`
@@ -571,6 +578,7 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_OIDC_ISSUER` | unset | The `iss` of valid tokens. Required when the mode is `oidc`, and an https URL when `KEYSTONE_ENV=prod`. |
 | `KEYSTONE_OIDC_AUDIENCE` | `keystone` | The value `aud` must contain. |
 | `KEYSTONE_OIDC_DISCOVERY_URL` | the issuer's own `/.well-known/openid-configuration` | Where to read the discovery document, when that is not the issuer's address. See "The issuer". |
+| `KEYSTONE_OIDC_JWKS_MAX_AGE_S` | `600` | Seconds a fetched set of signing keys is trusted before it is fetched again (a shorter `max-age` in the answer's `Cache-Control` wins, down to one minute). A key the identity provider withdraws is refused within this time. See "How Keystone checks a token". |
 | `KEYSTONE_PUBLIC_BASE_URL` | the address of the request | How clients reach Keystone, for the sign-in metadata (`http://localhost:8080` in compose). Set it behind a proxy that changes the scheme or the host. |
 | `KEYSTONE_MASTER_KEYS` | unset | Fernet keys for the credential vault, comma separated. The first encrypts, all decrypt. Needed by `keystone cred ...` and, from KS-306, by the gateway. |
 | `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is when `KEYSTONE_AUTH__MODE=none`. Refused in any other mode. |

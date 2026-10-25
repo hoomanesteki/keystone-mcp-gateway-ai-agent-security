@@ -13,11 +13,14 @@ Read `TokenValidator.validate` first. The order of its checks is what keeps a fo
 
 The identity provider's keys are fetched with a 3 s timeout and cached. A token with an unknown
 `kid` may refresh them, at most once a minute, so that a rotation is picked up and a flood of
-made-up key ids cannot turn into a flood of requests to the identity provider.
+made-up key ids cannot turn into a flood of requests to the identity provider. The set is also
+fetched again once it is older than `max_age_s` (10 minutes, or a shorter `Cache-Control` max-age),
+so that a key the provider withdraws stops being trusted even when no request ever misses the cache.
 """
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,10 +44,13 @@ MIN_RSA_BITS = 2048
 
 JWKS_TIMEOUT_S = 3.0
 JWKS_REFRESH_INTERVAL_S = 60.0
+# How long a fetched set is trusted before it is fetched again, whatever the tokens name.
+JWKS_MAX_AGE_S = 600.0
 # With no keys at all, a failed fetch may be tried again this soon.
 COLD_RETRY_INTERVAL_S = 2.0
 MAX_TOKEN_CHARS = 16 * 1024
 MAX_KID_CHARS = 256
+CACHE_CONTROL_MAX_AGE = re.compile(r"\bmax-age=(\d+)", re.IGNORECASE)
 
 
 class Reason(StrEnum):
@@ -152,6 +158,13 @@ def _parse_jwks(document: object) -> dict[str, _Key]:
     return keys
 
 
+def _advertised_max_age(cache_control: str | None) -> float | None:
+    """The `max-age` of a Cache-Control header, in seconds, when it names one. `no-store` and
+    `no-cache` say nothing about how long a key stays valid, so they are not read as zero."""
+    match = CACHE_CONTROL_MAX_AGE.search(cache_control or "")
+    return float(match.group(1)) if match else None
+
+
 def check_key_type(alg: str, key: _Key) -> None:
     """The key must be the kind the algorithm needs. Raises KEY_TYPE_MISMATCH otherwise, so a
     token cannot be checked with a key of another family, whatever its `kid` points at."""
@@ -176,6 +189,7 @@ class TokenValidator:
         discovery_url: str | None = None,
         timeout_s: float = JWKS_TIMEOUT_S,
         refresh_interval_s: float = JWKS_REFRESH_INTERVAL_S,
+        max_age_s: float = JWKS_MAX_AGE_S,
         retry_interval_s: float = COLD_RETRY_INTERVAL_S,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -188,12 +202,16 @@ class TokenValidator:
             discovery_url or f"{issuer.rstrip('/')}/.well-known/openid-configuration"
         )
         self.timeout_s = timeout_s
+        self.max_age_s = max_age_s
         self._refresh_interval_s = refresh_interval_s
         self._retry_interval_s = retry_interval_s
         self._clock = clock
         self._jwks_uri: str | None = None
         self._keys: dict[str, _Key] = {}
         self._loaded = False
+        self._fetched_at: float | None = None
+        # `max_age_s`, or the shorter max-age the last JWKS answer advertised.
+        self._age_limit_s = max_age_s
         self._last_cold_attempt: float | None = None
         self._last_refresh: float | None = None
         self._last_refresh_failed = False
@@ -262,6 +280,8 @@ class TokenValidator:
         return claims
 
     async def _signing_key(self, kid: str) -> _Key:
+        if self._aged():
+            await self._refresh(None)
         key = self._keys.get(kid)
         if key is None:
             await self._refresh(kid)
@@ -270,16 +290,24 @@ class TokenValidator:
             raise AuthError(Reason.UNKNOWN_KEY)
         return key
 
-    async def _refresh(self, kid: str) -> None:
-        """Fetch the keys, when that is allowed, for a kid that is not in the cache.
+    def _aged(self) -> bool:
+        """The set was fetched longer ago than its age limit."""
+        fetched_at = self._fetched_at
+        return fetched_at is not None and self._clock() - fetched_at >= self._age_limit_s
+
+    async def _refresh(self, kid: str | None) -> None:
+        """Fetch the keys, when that is allowed: for a kid that is not in the cache, or (kid None)
+        because the set has reached its age limit.
 
         With no keys yet, the fetch may be repeated every `retry_interval_s`. With keys, a miss
-        may refresh them once per `refresh_interval_s`; the first fetch does not count against
-        that, so the first rotation after startup is picked up at once.
+        or the age may refresh them once per `refresh_interval_s`; the first fetch does not count
+        against that, so the first rotation after startup is picked up at once. When the fetch for
+        an aged set fails, the old set stays: a token under a cached key was not shown to be bad.
         """
         async with self._lock:
-            if kid in self._keys:
-                return  # another request refreshed them while this one waited for the lock
+            # Another request may have refreshed them while this one waited for the lock.
+            if (kid is None and not self._aged()) or (kid is not None and kid in self._keys):
+                return
             now = self._clock()
             if not self._loaded:
                 last = self._last_cold_attempt
@@ -289,19 +317,31 @@ class TokenValidator:
             else:
                 last = self._last_refresh
                 if last is not None and now - last < self._refresh_interval_s:
-                    if self._last_refresh_failed:
+                    if self._last_refresh_failed and kid is not None:
                         raise KeysUnavailable
                     return
                 self._last_refresh = now
             try:
-                self._keys = await self._fetch()
+                keys, advertised_max_age = await self._fetch()
             except KeysUnavailable:
                 self._last_refresh_failed = True
+                if kid is None:
+                    return
                 raise
+            self._keys = keys
             self._last_refresh_failed = False
             self._loaded = True
+            self._fetched_at = now
+            # A shorter max-age from the provider is honoured, down to the refresh interval, so
+            # that `max-age=0` means one fetch a minute and not one per request.
+            self._age_limit_s = self.max_age_s
+            if advertised_max_age is not None:
+                self._age_limit_s = min(
+                    self.max_age_s, max(advertised_max_age, self._refresh_interval_s)
+                )
 
-    async def _fetch(self) -> dict[str, _Key]:
+    async def _fetch(self) -> tuple[dict[str, _Key], float | None]:
+        """The published keys and the max-age their answer advertised, if any."""
         try:
             async with httpx2.AsyncClient(
                 timeout=httpx2.Timeout(self.timeout_s), follow_redirects=False
@@ -309,14 +349,15 @@ class TokenValidator:
                 if self._jwks_uri is None:
                     self._jwks_uri = await self._discover(http)
                 try:
-                    keys = _parse_jwks(await self._get_json(http, self._jwks_uri))
+                    response = await self._get(http, self._jwks_uri)
+                    keys = _parse_jwks(_json_object(response))
                     if not keys:
                         # A 200 with no key Keystone can use (a provider that is starting up, or
                         # one that publishes only keys _admit skips) is a failed fetch, not a new
                         # set: taking it would refuse every caller until the next refresh.
                         log.warning("jwks_without_usable_keys")
                         raise KeysUnavailable
-                    return keys
+                    return keys, _advertised_max_age(response.headers.get("cache-control"))
                 except Exception:
                     self._jwks_uri = None  # ask the discovery document again next time
                     raise
@@ -328,7 +369,7 @@ class TokenValidator:
             raise KeysUnavailable from None
 
     async def _discover(self, http: httpx2.AsyncClient) -> str:
-        document = await self._get_json(http, self.discovery_url)
+        document = _json_object(await self._get(http, self.discovery_url))
         if document.get("issuer") != self.issuer:
             # Talking to the wrong identity provider, or one configured for another address.
             log.error(
@@ -343,13 +384,17 @@ class TokenValidator:
             raise KeysUnavailable
         return uri
 
-    async def _get_json(self, http: httpx2.AsyncClient, url: str) -> dict[str, Any]:
+    async def _get(self, http: httpx2.AsyncClient, url: str) -> httpx2.Response:
         with anyio.fail_after(self.timeout_s):
             response = await http.get(url)
         if response.status_code != 200:
             log.warning("oidc_fetch_refused", status=response.status_code)
             raise KeysUnavailable
-        body = response.json()
-        if not isinstance(body, dict):
-            raise KeysUnavailable
-        return body
+        return response
+
+
+def _json_object(response: httpx2.Response) -> dict[str, Any]:
+    body = response.json()
+    if not isinstance(body, dict):
+        raise KeysUnavailable
+    return body

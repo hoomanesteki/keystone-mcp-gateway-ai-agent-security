@@ -274,6 +274,18 @@ def test_oidc_settings_have_defaults_and_come_from_env(monkeypatch: pytest.Monke
 
 
 @pytest.mark.phase(3)
+def test_the_key_set_max_age_defaults_to_ten_minutes_and_must_be_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert Settings().oidc_jwks_max_age_s == 600.0
+
+    monkeypatch.setenv("KEYSTONE_OIDC_JWKS_MAX_AGE_S", "90")
+    assert Settings().oidc_jwks_max_age_s == 90.0
+    with pytest.raises(ValueError):
+        Settings(oidc_jwks_max_age_s=0)
+
+
+@pytest.mark.phase(3)
 @pytest.mark.parametrize("field", ["oidc_issuer", "oidc_discovery_url", "public_base_url"])
 @pytest.mark.parametrize("value", ["localhost:8180", "ftp://idp.test/realm", "http://", "/realm"])
 def test_urls_must_be_http_or_https(field: str, value: str) -> None:
