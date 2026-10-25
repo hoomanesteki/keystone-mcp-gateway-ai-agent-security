@@ -343,7 +343,7 @@ async def test_the_model_is_loaded_once_even_when_scans_arrive_together() -> Non
         time.sleep(0.1)
         return engine
 
-    classifier = HFClassifier("test/model", {}, name="test", loader=loader)
+    classifier = HFClassifier("test/model", {}, name="test", loader=loader, concurrency=5)
     async with anyio.create_task_group() as group:
         for _ in range(5):
             group.start_soon(classifier.score, "text")
