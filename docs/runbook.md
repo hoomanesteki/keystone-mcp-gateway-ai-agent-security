@@ -494,7 +494,9 @@ The keys are fetched from the discovery document with a 3 second timeout and kep
 token with an unknown `kid` makes Keystone fetch them again, at most once a minute, so a rotation
 is picked up and a stream of made-up key ids costs the identity provider one request a minute.
 While Keystone holds no keys at all, a failed fetch is retried after 2 seconds. If the keys cannot
-be fetched, the answer is 503, not 401: the token was not shown to be bad.
+be fetched, the answer is 503, not 401: the token was not shown to be bad. An answer with no key
+Keystone can use (an identity provider that is starting up can serve an empty set for a moment)
+counts as a failed fetch: the cached keys stay, and the log says `jwks_without_usable_keys`.
 
 `tenant` is required and must look like a tenant id. The agent is `azp`, or `client_id` when
 there is no `azp`. Groups lose their leading `/`, and the `/tenants/...` groups are dropped,
@@ -2420,7 +2422,7 @@ a 1 second limit each and returns 503 if either is down.
 | `401` with `reason: expired` | The token is older than five minutes. Get a new one with `scripts/get_token.sh`. |
 | `401` with `reason: wrong_issuer` | The token was issued under another address than `KEYSTONE_OIDC_ISSUER`. Get tokens from `http://localhost:8180`, the address in the setting. |
 | `403` with `reason: unknown_agent` | The token's `azp` is not under `agents`. Add it, or run `keystone agent list`. |
-| `503` from `/mcp` | Keystone cannot read the identity provider's keys. Check `KEYSTONE_OIDC_DISCOVERY_URL` and that Keycloak is up; the log says `jwks_fetch_failed` or `oidc_issuer_mismatch`. |
+| `503` from `/mcp` | Keystone cannot read the identity provider's keys. Check `KEYSTONE_OIDC_DISCOVERY_URL` and that Keycloak is up; the log says `jwks_fetch_failed`, `jwks_without_usable_keys` or `oidc_issuer_mismatch`. |
 | Every call gets `KS_DENIED`, "audit unavailable" | The audit writer is unhealthy and `audit.fail_closed` is on. Look for `audit_flush_failed` in the Keystone log: the database is down or refusing the writer. Calls resume within a few seconds of the writer succeeding. |
 | A call returns `KS_APPROVAL_PENDING` after 10 seconds | The policy sent it to approval and nobody decided in the hold (`approvals.wait_seconds`). Approve it through the admin API as an approver (`scripts/get_token.sh lena keystone-cli`), then have the agent call `keystone__await_approval`. |
 | `KS_DENIED`, "approval not available" | Keystone has no master keys, so it has no approval service. Set `KEYSTONE_MASTER_KEYS`. |

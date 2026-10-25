@@ -309,7 +309,14 @@ class TokenValidator:
                 if self._jwks_uri is None:
                     self._jwks_uri = await self._discover(http)
                 try:
-                    return _parse_jwks(await self._get_json(http, self._jwks_uri))
+                    keys = _parse_jwks(await self._get_json(http, self._jwks_uri))
+                    if not keys:
+                        # A 200 with no key Keystone can use (a provider that is starting up, or
+                        # one that publishes only keys _admit skips) is a failed fetch, not a new
+                        # set: taking it would refuse every caller until the next refresh.
+                        log.warning("jwks_without_usable_keys")
+                        raise KeysUnavailable
+                    return keys
                 except Exception:
                     self._jwks_uri = None  # ask the discovery document again next time
                     raise

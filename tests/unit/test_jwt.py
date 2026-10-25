@@ -8,8 +8,8 @@ from typing import Any
 import anyio
 import jwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric import rsa
-from jwt.algorithms import RSAAlgorithm
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from jwt.algorithms import ECAlgorithm, RSAAlgorithm
 from structlog.testing import capture_logs
 
 from keystone.core.types import Principal
@@ -398,6 +398,55 @@ async def test_cached_keys_keep_working_while_the_idp_is_down(fake_idp: FakeIdp)
 
     assert claims["sub"] == "bob"
     assert fake_idp.jwks_requests == 1
+
+
+# A published key Keystone never uses: EC, but on P-384.
+P384_JWK = {
+    **ECAlgorithm.to_jwk(ec.generate_private_key(ec.SECP384R1()).public_key(), as_dict=True),
+    "kid": "p384",
+    "use": "sig",
+}
+
+
+@pytest.mark.phase(3)
+@pytest.mark.parametrize(
+    "document",
+    [{"keys": []}, {"error": "starting"}, {"keys": [P384_JWK]}],
+    ids=["no keys", "no keys field", "no usable key"],
+)
+async def test_a_jwks_answer_without_a_usable_key_keeps_the_cached_keys(
+    fake_idp: FakeIdp, document: dict[str, Any]
+) -> None:
+    # A provider that is restarting can answer 200 with an empty set for a moment. That must not
+    # empty the cache: every caller would be refused until the next refresh is allowed.
+    check = validator(fake_idp, clock=Clock())
+    token = fake_idp.token_for("alice")
+    await check.validate(token)
+    fake_idp.jwks_document = document
+
+    with capture_logs() as logs:
+        await refused(check, fake_idp.make_token("alice", "acme", kid="never-published"))
+
+    assert (await check.validate(token))["sub"] == "alice"
+    assert fake_idp.jwks_requests == 2
+    assert "jwks_without_usable_keys" in [entry["event"] for entry in logs]
+
+
+@pytest.mark.phase(3)
+async def test_a_provider_that_publishes_no_usable_key_is_keys_unavailable(
+    fake_idp: FakeIdp,
+) -> None:
+    clock = Clock()
+    check = validator(fake_idp, clock=clock)
+    fake_idp.jwks_document = {"keys": []}
+    token = fake_idp.token_for("alice")
+
+    error = await refused(check, token)
+
+    assert isinstance(error, KeysUnavailable)
+    fake_idp.jwks_document = None
+    clock.now += 3
+    assert (await check.validate(token))["sub"] == "alice"
 
 
 @pytest.mark.phase(3)
