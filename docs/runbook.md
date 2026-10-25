@@ -251,7 +251,9 @@ Integration tests use the Postgres and Redis of `make up-core` on these ports (a
 | Console | 5173 | the Vite dev server (`pnpm dev` in `console/`), which `make console-e2e` also starts. The port is fixed because the Keycloak client `console` allows `http://localhost:5173/*` only |
 
 The credentials above are for local development only. Nothing in compose is meant to be exposed
-beyond the machine.
+beyond the machine, and the ports are published on `127.0.0.1` (`BIND_ADDRESS` in `.env.example`),
+so another machine cannot reach them. `BIND_ADDRESS=0.0.0.0` in `.env` opens them; change the
+passwords first.
 
 ## Demo upstreams
 
@@ -494,7 +496,16 @@ The keys are fetched from the discovery document with a 3 second timeout and kep
 token with an unknown `kid` makes Keystone fetch them again, at most once a minute, so a rotation
 is picked up and a stream of made-up key ids costs the identity provider one request a minute.
 While Keystone holds no keys at all, a failed fetch is retried after 2 seconds. If the keys cannot
-be fetched, the answer is 503, not 401: the token was not shown to be bad.
+be fetched, the answer is 503, not 401: the token was not shown to be bad. An answer with no key
+Keystone can use (an identity provider that is starting up can serve an empty set for a moment)
+counts as a failed fetch: the cached keys stay, and the log says `jwks_without_usable_keys`.
+
+A cached set is not trusted for ever. Once it is older than `KEYSTONE_OIDC_JWKS_MAX_AGE_S` (600
+seconds, or the `max-age` of the answer's `Cache-Control` when that is shorter, never under a
+minute) the next token makes Keystone fetch the keys again, so a key the identity provider has
+withdrawn stops validating within that time even when every token names a key Keystone already
+holds. If that fetch fails the old set stays and is tried again a minute later: a token under a
+cached key was not shown to be bad.
 
 `tenant` is required and must look like a tenant id. The agent is `azp`, or `client_id` when
 there is no `azp`. Groups lose their leading `/`, and the `/tenants/...` groups are dropped,
@@ -538,14 +549,15 @@ a minute, so a token fetched right after the restart may be refused for up to a 
 
 ## Keystone settings
 
-Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
+Environment variables win over the YAML file named by `KEYSTONE_CONFIG`, or over the same YAML
+given as text in `KEYSTONE_CONFIG_YAML`.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `KEYSTONE_ENV` | `dev` | `dev`, `test` or `prod` |
 | `KEYSTONE_DATABASE_URL` | `postgresql+asyncpg://keystone:keystone@localhost:55432/keystone` | Postgres DSN. Compose runs Keystone as the role `keystone_app` (see Database roles). |
 | `KEYSTONE_MIGRATE_DATABASE_URL` | unset | Where `keystone db upgrade` and `keystone serve --migrate` connect, when that is not `KEYSTONE_DATABASE_URL`: creating tables takes the role that owns them. Unset means they use `KEYSTONE_DATABASE_URL`. Compose sets it to the owner. |
-| `KEYSTONE_APP_DB_PASSWORD` | the development password | Read by the migration that creates the `keystone_app` role. With `KEYSTONE_ENV=prod` and no value, that migration stops. It is not a Keystone setting: set the same value in the password of `KEYSTONE_DATABASE_URL`. |
+| `KEYSTONE_APP_DB_PASSWORD` | the development password | Read by the migration that creates the `keystone_app` role. With env `prod` (`KEYSTONE_ENV`, or `env` in the YAML file) and no value, `keystone db upgrade` and `keystone serve --migrate` stop with `error: set KEYSTONE_APP_DB_PASSWORD ...` and exit 1. It is not a Keystone setting: set the same value in the password of `KEYSTONE_DATABASE_URL`. |
 | `KEYSTONE_REDIS_URL` | `redis://localhost:56379/0` | Redis URL. Session state lives here. Set it to an empty string to keep session state in the gateway process instead (one process only, lost on restart). |
 | `KEYSTONE_REDIS_POOL_SIZE` | `500` | Connections in the one Redis pool that sessions, rate limits, budgets and approvals share. A caller that finds them all in use waits for one. |
 | `KEYSTONE_REDIS_POOL_TIMEOUT_S` | `2` | How long such a caller waits, in seconds. After that the call is refused as before (`session state is unavailable`), because a call that cannot read its session must not run. |
@@ -556,6 +568,7 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_CREDENTIAL_CACHE_TTL_S` | `60` | How long the gateway keeps an upstream's opened credential instead of reading and decrypting it on every call. `keystone cred set` and `rotate-keys` run in the CLI, another process, so the gateway sends the old credential until the entry expires: set `0` to read it every call. |
 | `KEYSTONE_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` |
 | `KEYSTONE_CONFIG` | unset | Path to a YAML file with the same keys |
+| `KEYSTONE_CONFIG_YAML` | unset | The text of that file, for a host that passes secrets as environment variables and mounts no file (the ECS task in `deploy/terraform/aws` reads it from an SSM parameter). Refused together with `KEYSTONE_CONFIG`. |
 | `KEYSTONE_ALLOWED_HOSTS` | `["127.0.0.1:*","localhost:*","[::1]:*"]` | JSON list of `Host` header values the MCP endpoint accepts (DNS rebinding guard). `:*` matches any port. Add the service name, for example `keystone:*`, to reach it from another container. |
 | `KEYSTONE_ALLOW_PRIVATE_UPSTREAMS` | `false` | When `false`, an upstream URL whose host resolves to a loopback, private (RFC 1918), link-local (including 169.254.169.254), CGNAT (100.64.0.0/10) or IPv6 unique-local address is refused. Local compose sets it to `true`, because the demo upstreams are on a private network. |
 | `KEYSTONE_REGISTRY__SYNC_INTERVAL_S` | `300` | Seconds between syncs of every upstream. `0` turns the timer off (the startup sync and the CLI still run). Also `registry.sync_interval_s` in the YAML. |
@@ -569,6 +582,7 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_OIDC_ISSUER` | unset | The `iss` of valid tokens. Required when the mode is `oidc`, and an https URL when `KEYSTONE_ENV=prod`. |
 | `KEYSTONE_OIDC_AUDIENCE` | `keystone` | The value `aud` must contain. |
 | `KEYSTONE_OIDC_DISCOVERY_URL` | the issuer's own `/.well-known/openid-configuration` | Where to read the discovery document, when that is not the issuer's address. See "The issuer". |
+| `KEYSTONE_OIDC_JWKS_MAX_AGE_S` | `600` | Seconds a fetched set of signing keys is trusted before it is fetched again (a shorter `max-age` in the answer's `Cache-Control` wins, down to one minute). A key the identity provider withdraws is refused within this time. See "How Keystone checks a token". |
 | `KEYSTONE_PUBLIC_BASE_URL` | the address of the request | How clients reach Keystone, for the sign-in metadata (`http://localhost:8080` in compose). Set it behind a proxy that changes the scheme or the host. |
 | `KEYSTONE_MASTER_KEYS` | unset | Fernet keys for the credential vault, comma separated. The first encrypts, all decrypt. Needed by `keystone cred ...` and, from KS-306, by the gateway. |
 | `KEYSTONE_DEV_PRINCIPAL` | tenant `acme`, user `olivia`, groups `operators`, agent `ops-agent` | JSON object. Who every caller is when `KEYSTONE_AUTH__MODE=none`. Refused in any other mode. |
@@ -1285,14 +1299,17 @@ When a sync finds a different description or schema, the tool is `quarantined`, 
 one. A quarantined tool is left out of `tools/list`, and a call to it returns `KS_QUARANTINED`
 without reaching the upstream. The check reads the tool's status from Postgres on every call, so a
 quarantine made by the CLI in another process stops the very next call. If an upstream takes the
-change back, the tool is released by the next sync. A newer offer replaces an older pending one.
+change back, the tool is released by the next sync. A newer offer replaces an older pending one. A
+tool held at first sight (below) is not released that way: the definition the upstream went back to
+was never accepted by anyone, so the offer is dropped and the tool waits for `approve-change` as
+before.
 
 | Command | What it does |
 |---|---|
 | `keystone tool list [--status S] [--json]` | Every tool with its status and reason. |
 | `keystone tool show NAME` | The pinned definition, the pending one, a diff, and a fingerprint of the pending definition. |
 | `keystone tool approve-change NAME [--expect FP] [--note TEXT]` | Make the pending definition the pinned one, recompute the hashes and set the tool `active`. With `--expect`, refuses if the pending definition is no longer the one with that fingerprint. The note goes in the log. |
-| `keystone tool disable NAME` / `enable NAME` | Take a tool out of service by hand. Sync never re-enables a tool you disabled. `disable` and `enable` both refuse a quarantined tool (review it and approve it instead), and `enable` refuses one the upstream stopped listing. |
+| `keystone tool disable NAME` / `enable NAME` | Take a tool out of service by hand. Sync never re-enables a tool you disabled. `disable` and `enable` both refuse a quarantined tool (review it and approve it instead), and `enable` refuses one the upstream stopped listing; `disable` leaves such a tool as it is (it says `already disabled` and keeps the reason, which is what `enable` reads). A tool whose definition changed while it was disabled is not enabled by hand either: `tool show` prints the offer, and `approve-change` is what puts it live. |
 
 A tool seen for the first time is screened too (`keystone.defense.description_check`), in two
 passes over its description and over the `description` of every field of its input schema, at any
@@ -1753,7 +1770,7 @@ An output that scores `suspicious` or `injection` is handled by the risk of the 
 | Action | Default for | What the agent gets |
 |---|---|---|
 | `annotate` | low, medium | A warning block in front, then `<<<untrusted>>>`, the upstream's blocks as they were, then `<<<end untrusted>>>` |
-| `redact` | high | The same, with the invisible characters and the leaking images and links cut out of every text, resource and structured value first |
+| `redact` | high | The same, with the invisible characters and the leaking images and links cut out of every text, resource and structured value first. The cut follows the view the rules read: an image hidden by a zero-width character goes with the character, and a string whose address is a link only after normalizing (fullwidth letters) is dropped whole |
 | `block` | critical | Only `[keystone:KS_OUTPUT_BLOCKED] output withheld (score 0.93, rules: ...). Call id <id>.`, as an error |
 | `pass` | none | The output as it was. The score is still recorded |
 
@@ -2420,7 +2437,7 @@ a 1 second limit each and returns 503 if either is down.
 | `401` with `reason: expired` | The token is older than five minutes. Get a new one with `scripts/get_token.sh`. |
 | `401` with `reason: wrong_issuer` | The token was issued under another address than `KEYSTONE_OIDC_ISSUER`. Get tokens from `http://localhost:8180`, the address in the setting. |
 | `403` with `reason: unknown_agent` | The token's `azp` is not under `agents`. Add it, or run `keystone agent list`. |
-| `503` from `/mcp` | Keystone cannot read the identity provider's keys. Check `KEYSTONE_OIDC_DISCOVERY_URL` and that Keycloak is up; the log says `jwks_fetch_failed` or `oidc_issuer_mismatch`. |
+| `503` from `/mcp` | Keystone cannot read the identity provider's keys. Check `KEYSTONE_OIDC_DISCOVERY_URL` and that Keycloak is up; the log says `jwks_fetch_failed`, `jwks_without_usable_keys` or `oidc_issuer_mismatch`. |
 | Every call gets `KS_DENIED`, "audit unavailable" | The audit writer is unhealthy and `audit.fail_closed` is on. Look for `audit_flush_failed` in the Keystone log: the database is down or refusing the writer. Calls resume within a few seconds of the writer succeeding. |
 | A call returns `KS_APPROVAL_PENDING` after 10 seconds | The policy sent it to approval and nobody decided in the hold (`approvals.wait_seconds`). Approve it through the admin API as an approver (`scripts/get_token.sh lena keystone-cli`), then have the agent call `keystone__await_approval`. |
 | `KS_DENIED`, "approval not available" | Keystone has no master keys, so it has no approval service. Set `KEYSTONE_MASTER_KEYS`. |

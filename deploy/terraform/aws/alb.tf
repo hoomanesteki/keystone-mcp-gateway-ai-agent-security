@@ -10,6 +10,10 @@ resource "aws_lb" "main" {
   subnets                    = aws_subnet.public[*].id
   drop_invalid_header_fields = true
   enable_deletion_protection = var.deletion_protection
+  # A call that waits for an approval, or runs in the sandbox, sends no bytes for up to 300 s
+  # (the cap of approvals.wait_seconds and sandbox.timeout_s). The default of 60 s would answer
+  # the agent with a 504 instead of the pending result that names the approval.
+  idle_timeout = 360
 }
 
 resource "aws_lb_target_group" "keystone" {

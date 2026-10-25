@@ -1,5 +1,7 @@
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import AsyncIterator, Mapping
+from contextlib import AsyncExitStack, asynccontextmanager
+from types import SimpleNamespace
+from typing import Any, cast
 
 import anyio
 import anyio.lowlevel
@@ -7,8 +9,16 @@ import pytest
 from anyio.abc import TaskGroup
 from pydantic import SecretStr
 
+from keystone.core.errors import Reject
 from keystone.core.types import ToolResult
-from keystone.gateway.upstreams import UpstreamPool, UpstreamTool, headers_fingerprint
+from keystone.gateway.upstreams import (
+    AuthWatch,
+    UpstreamPool,
+    UpstreamTool,
+    _Connection,
+    _SessionClient,
+    headers_fingerprint,
+)
 
 
 class FakeClient:
@@ -276,3 +286,88 @@ async def test_concurrent_gets_share_one_client() -> None:
             tasks.start_soon(pool.get, "mail", secret(X_Api_Key="k"))
 
     assert len(factory.created) == 1
+
+
+# -- closing a client while it connects (KS-998)
+
+
+@asynccontextmanager
+async def no_transport(_watch: AuthWatch) -> AsyncIterator[None]:
+    yield None  # never entered: the slow connection below opens no transport
+
+
+class Answers:
+    """Stands in for the SDK client of an open session: a call returns an empty result."""
+
+    async def call_tool(self, name: str, args: dict[str, Any], meta: Any = None) -> Any:
+        return SimpleNamespace(content=[], structured_content=None, is_error=False)
+
+
+class SlowConnection(_Connection):
+    """A session that takes a moment to open, as a real one does, and then waits to be closed
+    in the pool's task group, as a real one does."""
+
+    def __init__(self, connecting: anyio.Event, opened: list["SlowConnection"]) -> None:
+        super().__init__("slow", no_transport, "auto")
+        self._connecting = connecting
+        opened.append(self)
+
+    async def run(self) -> None:
+        try:
+            with self.scope:
+                self._connecting.set()
+                await anyio.sleep(0.2)
+                self.client = cast(Any, Answers())
+                self.ready.set()
+                await self.closing.wait()
+        finally:
+            self.client = None
+            self.done.set()
+            self.ready.set()
+
+
+class SlowClient(_SessionClient):
+    def __init__(
+        self, task_group: TaskGroup, connecting: anyio.Event, opened: list[SlowConnection]
+    ) -> None:
+        super().__init__(no_transport, task_group, upstream_id="slow")
+        self._connecting = connecting
+        self._opened = opened
+
+    async def _open(self) -> _Connection:
+        connection = SlowConnection(self._connecting, self._opened)
+        self._task_group.start_soon(connection.run)
+        await connection.ready.wait()
+        return connection
+
+
+@pytest.mark.phase(2)
+async def test_shutdown_while_a_call_is_connecting_leaves_no_session_behind() -> None:
+    """The pool closes a leased client while its call is still opening the session. The session
+    that opens afterwards must be closed too: nothing else ever closes it, and its task keeps the
+    pool's task group, and so the app's shutdown, from ending."""
+    connecting = anyio.Event()
+    opened: list[SlowConnection] = []
+    codes: list[str] = []
+
+    def factory(upstream_id: str, headers: dict[str, str], task_group: TaskGroup) -> SlowClient:
+        return SlowClient(task_group, connecting, opened)
+
+    async def call(pool: UpstreamPool) -> None:
+        async with pool.lease("slow") as client:
+            try:
+                await client.call_tool("x", {}, timeout_s=5)
+            except Reject as refused:
+                codes.append(refused.code.value)
+
+    with anyio.fail_after(3):
+        # The pool is entered after the task group and left before it, as cancel scopes must be.
+        async with anyio.create_task_group() as calls, AsyncExitStack() as stack:
+            pool = await stack.enter_async_context(UpstreamPool(factory))
+            calls.start_soon(call, pool)
+            await connecting.wait()
+            # The app shuts down: the pool closes the client and waits for its task group.
+            await stack.aclose()
+
+    assert codes == ["KS_UPSTREAM_ERROR"]
+    assert [c.done.is_set() for c in opened] == [True]

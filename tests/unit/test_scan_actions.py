@@ -199,6 +199,31 @@ async def test_redact_cuts_what_the_rules_find_and_nothing_else() -> None:
     assert seen.result.content[2] == text_block(text)
 
 
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        ("see !\u200b[logo](http://evil.test/p.png?x=1) end", "see  end"),
+        ("see ![logo](ht\u200btp://evil.test/p.png) end", "see  end"),
+        ("see ![logo](\uff48\uff54\uff54\uff50://evil.test/p.png) end", ""),
+    ],
+    ids=["zero-width-space-before-the-bracket", "zero-width-space-in-the-scheme", "fullwidth"],
+)
+async def test_redact_cuts_an_image_that_only_the_normalized_text_shows(
+    text: str, kept: str
+) -> None:
+    """The rules read the text with the hidden characters out and NFKC applied, and `redact` must
+    cut what they found there: cutting the hidden character alone hands the model a working image.
+    A string whose address is one only after normalizing cannot be cut in place: it goes whole."""
+    result = ToolResult(content=[text_block(text)], structured_content={"note": text})
+
+    seen = await inspect(result, Risk.HIGH)
+
+    assert seen.scan.action == "redact" and "markdown_exfil" in seen.scan.rule_hits
+    assert seen.result.content[2] == text_block(kept)
+    assert seen.result.structured_content == {"note": kept}
+    assert "evil.test" not in json.dumps(seen.result.model_dump())
+
+
 # -- block
 
 

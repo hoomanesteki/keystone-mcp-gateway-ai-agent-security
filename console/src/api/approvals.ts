@@ -20,6 +20,10 @@ export function usePendingApprovals() {
     queryKey: approvalKeys.pending,
     queryFn: ({ signal }) => api.get("/approvals", { query: { status: "pending" }, signal }),
     refetchInterval: POLL_MS,
+    // The count in the tab's title and in the menu is for the approver who is in another tab,
+    // and TanStack skips interval reads of an unfocused document unless told not to. The list is
+    // small and a request lives 15 minutes, so the 5 s read goes on in the background.
+    refetchIntervalInBackground: true,
   });
 }
 

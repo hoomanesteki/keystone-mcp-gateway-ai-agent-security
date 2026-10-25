@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
+import yaml
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -16,6 +17,7 @@ from pydantic import (
 )
 from pydantic_settings import (
     BaseSettings,
+    InitSettingsSource,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
     YamlConfigSettingsSource,
@@ -25,6 +27,9 @@ from keystone.core.types import Principal
 from keystone.registry.config import UpstreamConfig
 
 CONFIG_ENV_VAR = "KEYSTONE_CONFIG"
+# The same YAML as text, for a host that hands a process its secrets as environment variables
+# and has no file to mount (the ECS task in deploy/terraform/aws).
+CONFIG_YAML_ENV_VAR = "KEYSTONE_CONFIG_YAML"
 
 # The defaults match the host ports in deploy/docker-compose.yml, so a bare `uv run` works
 # against `make up-core` without any environment.
@@ -477,7 +482,8 @@ DEV_PRINCIPAL = Principal(
 
 
 class Settings(BaseSettings):
-    """Typed settings. Environment variables beat the YAML file named by KEYSTONE_CONFIG."""
+    """Typed settings. Environment variables beat the YAML named by KEYSTONE_CONFIG (a file) or
+    held in KEYSTONE_CONFIG_YAML (its text)."""
 
     model_config = SettingsConfigDict(
         env_prefix="KEYSTONE_",
@@ -554,6 +560,10 @@ class Settings(BaseSettings):
     oidc_issuer: str | None = None
     oidc_audience: str = "keystone"
     oidc_discovery_url: str | None = None
+    # How long a fetched set of signing keys is trusted before it is fetched again (a shorter
+    # Cache-Control max-age from the provider wins). A key the provider withdraws is refused within
+    # this time, whether or not any token names a kid Keystone has not seen.
+    oidc_jwks_max_age_s: float = Field(default=600.0, gt=0)
     # The one origin a browser may call the admin API from (the console, KS-605). CORS refuses any
     # other.
     console_origin: str = "http://localhost:5173"
@@ -677,9 +687,26 @@ class Settings(BaseSettings):
         sources: list[PydanticBaseSettingsSource] = [init_settings, env_settings]
         init_kwargs = init_settings.init_kwargs  # type: ignore[attr-defined]
         explicit = init_kwargs.get("config_path") or init_kwargs.get(CONFIG_ENV_VAR)
-        path = explicit or os.environ.get(CONFIG_ENV_VAR)
+        env_path = os.environ.get(CONFIG_ENV_VAR)
+        inline = os.environ.get(CONFIG_YAML_ENV_VAR)
+        # Two YAMLs from the environment is a mistake somewhere, and the one that would win is
+        # not obvious. An explicit config_path argument is a choice and stands.
+        if not explicit and env_path and inline:
+            raise ValueError(f"set {CONFIG_ENV_VAR} or {CONFIG_YAML_ENV_VAR}, not both")
+        path = explicit or env_path
         if path:
             if not Path(path).is_file():
                 raise FileNotFoundError(f"config file not found: {path}")
             sources.append(YamlConfigSettingsSource(settings_cls, yaml_file=path))
+        elif inline:
+            sources.append(InitSettingsSource(settings_cls, _inline_yaml(inline)))
         return tuple(sources)
+
+
+def _inline_yaml(text: str) -> dict[str, Any]:
+    data = yaml.safe_load(text)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{CONFIG_YAML_ENV_VAR} must hold a YAML mapping, as keystone.yaml does")
+    return data

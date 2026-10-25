@@ -67,8 +67,9 @@ class ToolAdmin:
         self._changed()
         return row
 
-    async def disable(self, tenant_id: str, name: str) -> Tool:
-        """Take a tool out of the list and refuse calls to it. Sync will not turn it back on."""
+    async def disable(self, tenant_id: str, name: str) -> tuple[Tool, bool]:
+        """Take a tool out of the list and refuse calls to it. Sync will not turn it back on.
+        Returns the tool and whether it changed."""
         found = await self.get(tenant_id, name)
         if found.status == ToolStatus.QUARANTINED.value:
             # It is out of service already. Disabling it would lose the fact that it awaits a
@@ -76,9 +77,13 @@ class ToolAdmin:
             raise ToolConflict(
                 f"{name} is quarantined and cannot be called; review it with tool show"
             )
+        if found.status == ToolStatus.DISABLED.value:
+            # Already off, and the reason says why. Writing disabled_by_operator over
+            # removed_from_upstream would let `enable` revive a tool the upstream does not serve.
+            return found, False
         await self._tools.set_status(tenant_id, name, ToolStatus.DISABLED, reason=OPERATOR_DISABLED)
         self._changed()
-        return await self.get(tenant_id, name)
+        return await self.get(tenant_id, name), True
 
     async def enable(self, tenant_id: str, name: str) -> tuple[Tool, bool]:
         """Turn a tool an operator disabled back on. Returns the tool and whether it changed."""
@@ -94,6 +99,13 @@ class ToolAdmin:
                 else "it was not disabled by an operator"
             )
             raise ToolConflict(f"{name} cannot be enabled by hand: {why}")
+        if found.pending_description is not None:
+            # Sync saw a new definition while the tool was off. Enabling it would put that
+            # definition into service without anyone reading it.
+            raise ToolConflict(
+                f"{name} changed while it was disabled: review it with tool show, "
+                "then use approve-change"
+            )
         await self._tools.set_status(tenant_id, name, ToolStatus.ACTIVE)
         self._changed()
         return await self.get(tenant_id, name), True

@@ -136,6 +136,14 @@ def test_prod_needs_https_for_every_address() -> None:
 
 
 @pytest.mark.phase(3)
+def test_the_validator_takes_its_max_age_from_the_settings() -> None:
+    authenticator = Authenticator(Settings(env="test", oidc_issuer=ISSUER, oidc_jwks_max_age_s=90))
+
+    assert authenticator.validator is not None
+    assert authenticator.validator.max_age_s == 90.0
+
+
+@pytest.mark.phase(3)
 def test_an_app_is_not_built_with_authentication_that_cannot_work() -> None:
     with pytest.raises(AuthConfigError, match="oidc_issuer"):
         create_app(Settings(env="test"))

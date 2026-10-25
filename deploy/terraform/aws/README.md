@@ -24,7 +24,7 @@ flowchart LR
 | `alb.tf` | ALB, target group on `/healthz`, HTTP listener, HTTPS listener when `acm_certificate_arn` is set |
 | `ecs.tf` | ECR repository, ECS cluster, task definition, service, log group, optional ADOT sidecar |
 | `data.tf` | RDS Postgres 16 `db.t4g.micro` (20 GB gp3, encrypted), ElastiCache Redis 7 `cache.t4g.micro` (TLS, encrypted) |
-| `secrets.tf` | Generated database passwords and the vault key, stored in Secrets Manager |
+| `secrets.tf` | Generated database passwords and the vault key, stored in Secrets Manager; the config YAML as an SSM SecureString parameter, when given |
 | `iam.tf` | Execution role and task role |
 | `cognito.tf` | Optional user pool, groups and app clients (`enable_cognito`) |
 
@@ -44,6 +44,14 @@ terraform output keystone_url
 ```
 
 `make tf-plan` runs `init`, `validate` and `plan` with `terraform.tfvars.example`.
+
+Tenants, upstreams and budgets come from `keystone_config_yaml`, the text of a `keystone.yaml`
+(`deploy/keystone.compose.yaml` is the compose one). Pass a file with
+`terraform apply -var "keystone_config_yaml=$(cat keystone.aws.yaml)"`. Terraform keeps it as a
+SecureString parameter and the task reads it from `KEYSTONE_CONFIG_YAML`. Without it Keystone
+starts with no upstreams. Upstream addresses inside the VPC pass the SSRF guard because
+`allow_private_upstreams` is on. The credentials an upstream needs (`credential_env` in the YAML)
+are not part of this module.
 
 The default image is built without the scanner model (3.1 GB with it, 401 MB without, see the
 Dockerfile), so `scanner_classifier` defaults to `none` and the scanner runs on its rules alone.
@@ -81,17 +89,30 @@ Fargate time when you turn it on, plus X-Ray's own charges.
   mode. The `sandbox` upstream is not served, and the containerized stdio upstreams cannot start either.
   Running code on AWS would need a separate service (a Lambda or a second ECS task per call), which
   this stack does not build.
-- **HTTP without a certificate.** With no `acm_certificate_arn` the ALB serves plain HTTP, so tokens
-  cross the internet in the clear. Use it only with `ingress_cidrs` narrowed to your own address.
+- **Without a certificate the stack runs in dev mode.** With no `acm_certificate_arn` the ALB serves
+  plain HTTP, and Keystone in prod refuses an http public URL and identity provider, so the task
+  runs with `KEYSTONE_ENV=dev`. Tokens cross the internet in the clear. That is a trial from your
+  own address (`ingress_cidrs`), not a deployment: prod needs the certificate. Dev mode here
+  relaxes the https rule. The other things `KEYSTONE_ENV` changes do not reach this stack: the
+  audit log is pinned to fail closed, sign-in stays `oidc`, and the vault key is generated, so the
+  prod-only refusal of the published development key has nothing to refuse.
+  With a certificate, `terraform plan` refuses an http `public_base_url` or `oidc_issuer` instead
+  of letting the service crash-loop at startup.
 - **Secrets are in the state.** Terraform generates the passwords and the vault key, so they sit in
   `terraform.tfstate` as well as in Secrets Manager. The state stays local here. Use an encrypted S3
   backend with locking before sharing it.
 - **Redis has no AUTH token.** Traffic is encrypted and the security group admits only the task.
+- **The ALB idle timeout is 360 s.** A `tools/call` that waits for an approval sends nothing for
+  `approvals.wait_seconds` (60 s by default, 300 s at most), and a sandbox run may take
+  `sandbox.timeout_s` (300 s at most). The ALB default of 60 s would close the connection first,
+  and the agent would get a 504 instead of `KS_APPROVAL_PENDING` with the approval id. Raise one
+  of those caps and the timeout has to follow; lower the timeout and set
+  `KEYSTONE_APPROVALS__WAIT_SECONDS` well under it.
 - **One NAT gateway, one task, no Multi-AZ database.** A second of each is the first change for
   production.
 - **The task role holds nothing** except X-Ray write access when `enable_adot` is on. Keystone
-  calls no AWS API. The execution role may pull from this ECR repository, write this log group and
-  read the five secrets.
+  calls no AWS API. The execution role may pull from this ECR repository, write this log group,
+  read the five secrets and, when there is one, the config parameter.
 - **The ADOT sidecar** uses the collector's bundled `ecs-xray.yaml`, and Keystone sends OTLP/HTTP to
   `localhost:4318` (the containers share a network namespace). I have not run it.
 

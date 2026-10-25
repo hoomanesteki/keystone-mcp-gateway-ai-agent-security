@@ -327,6 +327,30 @@ def test_the_shipped_pack_decides_as_the_plan_says() -> None:
 
 
 @pytest.mark.phase(4)
+def test_eval_latency_is_nowhere_near_the_budget(tmp_path: Path) -> None:
+    # The unit job's smoke: ten times the budget, so a shared runner under load passes and an
+    # engine that re-parses the policies on every call still fails here. The 5 ms budget itself
+    # is checked by the test below, in `make gate` and by scripts/bench_policy.py.
+    store = PolicyStore(write_policies(tmp_path / "policies", fifty_policies()), ["acme"])
+    store.start()
+    engine = CedarPolicyEngine(store)
+    for _ in range(20):
+        ask(engine, OLIVIA, TRANSFER, args={"amount": 900})
+
+    samples = []
+    for i in range(100):
+        started = time.perf_counter()
+        decision = ask(engine, OLIVIA, TRANSFER, args={"amount": 50 + i % 20})
+        samples.append((time.perf_counter() - started) * 1000)
+
+    samples.sort()
+    p95 = samples[int(0.95 * (len(samples) - 1))]
+    assert decision.effect is Effect.ALLOW
+    assert p95 < 50.0, f"p50 {statistics.median(samples):.2f} ms, p95 {p95:.2f} ms"
+
+
+@pytest.mark.phase(4)
+@pytest.mark.slow  # a wall-clock budget: measured by the gate and the bench, not on a shared runner
 def test_eval_latency_budget(tmp_path: Path) -> None:
     store = PolicyStore(write_policies(tmp_path / "policies", fifty_policies()), ["acme"])
     store.start()

@@ -49,7 +49,7 @@ from keystone.identity.middleware import (
     SessionBindings,
     principal_key,
 )
-from keystone.registry.naming import is_virtual
+from keystone.registry.naming import UNKNOWN_UPSTREAM, is_virtual
 from keystone.registry.service import ToolLookup
 from keystone.settings import Settings
 from keystone.telemetry.tracing import incoming_trace
@@ -119,11 +119,15 @@ class Gateway:
         # The registry is asked for this tenant only. A tool of another tenant that came back
         # anyway is not shown (invariant I5), and neither is a row that claims to be one of
         # Keystone's own, which only the gateway lists.
-        tools = [
-            t
-            for t in await self.registry.list_for_tenant(tenant_id)
-            if t.tenant_id == tenant_id and not is_virtual(t)
-        ]
+        try:
+            found = await self.registry.list_for_tenant(tenant_id)
+        except Exception as exc:
+            # A registry that cannot answer shows nothing, as a filter that cannot decide does.
+            # The SDK would send the exception's text (a statement, a driver's message) to the
+            # agent as the error, so it stays in the log, by type.
+            log.error("registry_lookup_failed", tenant=tenant_id, error=type(exc).__name__)
+            found = []
+        tools = [t for t in found if t.tenant_id == tenant_id and not is_virtual(t)]
         if self.tool_filter is not None:
             try:
                 tools = await self.tool_filter.visible(principal, tools)
@@ -164,8 +168,16 @@ class Gateway:
         # A name that starts with `keystone__` is one of Keystone's own tools, found before the
         # registry is asked. A registry row that claims to be one is not believed.
         tool = self.virtual.tool(params.name, principal) if self.virtual is not None else None
+        registry_down = False
         if tool is None:
-            tool = await self.registry.get(principal.tenant_id, params.name)
+            try:
+                tool = await self.registry.get(principal.tenant_id, params.name)
+            except Exception as exc:
+                # As with the session: the call does not run, and it is refused through the
+                # pipeline so that it leaves its audit record. Left to the SDK, the exception's
+                # text (a statement, a driver's message) went to the agent as the error.
+                log.error("registry_lookup_failed", error=type(exc).__name__)
+                registry_down = True
             if tool is not None and (tool.tenant_id != principal.tenant_id or is_virtual(tool)):
                 tool = None  # as above: another tenant's tool does not exist for this caller
         call = CallContext(
@@ -176,7 +188,11 @@ class Gateway:
             tool=tool or unknown_tool(params.name, principal),
             arguments=params.arguments or {},
         )
-        if tool is None:
+        if registry_down:
+            result = await self.pipeline.reject(
+                call, Reject(Code.UPSTREAM_ERROR, "the tool registry is unavailable")
+            )
+        elif tool is None:
             shown = params.name[:MAX_NAME_IN_MESSAGE]
             result = await self.pipeline.reject(
                 call, Reject(Code.TOOL_NOT_FOUND, f"there is no tool named {shown!r}")
@@ -258,7 +274,7 @@ def unknown_tool(name: str, principal: Principal) -> ToolRef:
     """A stand-in so a call to a tool that does not exist can still be audited."""
     return ToolRef(
         name=name[:MAX_NAME_IN_AUDIT],
-        upstream_id="unknown",
+        upstream_id=UNKNOWN_UPSTREAM,
         upstream_tool_name=name[:MAX_NAME_IN_AUDIT],
         tenant_id=principal.tenant_id,
         description="",

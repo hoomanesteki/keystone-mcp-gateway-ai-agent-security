@@ -24,7 +24,7 @@ from keystone.core.types import Risk, ToolRef, ToolStatus, ToolTag
 from keystone.db.models import Tool, Upstream
 from keystone.db.session import affected
 from keystone.registry.naming import LLM_UPSTREAM_IDS, is_reserved
-from keystone.registry.pinning import pending_fingerprint
+from keystone.registry.pinning import OPERATOR_DISABLED, pending_fingerprint
 
 Sessionmaker = async_sessionmaker[AsyncSession]
 
@@ -295,6 +295,32 @@ class ToolRepo:
         async with self._sessionmaker() as session, session.begin():
             return bool(affected(await session.execute(statement)))
 
+    async def hold_pending(
+        self, tenant_id: str, name: str, *, description: str, input_schema: dict[str, Any]
+    ) -> bool:
+        """Store a changed definition without touching the status or the reason: for a tool an
+        operator disabled, which stays disabled. `enable` then refuses it until the change is
+        approved, so a definition nobody has read cannot go into service by that route."""
+        statement = (
+            update(Tool)
+            .where(Tool.tenant_id == tenant_id, Tool.name == name)
+            .values(pending_description=description, pending_schema=input_schema)
+        )
+        async with self._sessionmaker() as session, session.begin():
+            return bool(affected(await session.execute(statement)))
+
+    async def forget_pending(self, tenant_id: str, name: str) -> bool:
+        """Drop a pending definition the upstream no longer offers, and nothing else. The tool
+        stays in its status: a disabled one is still disabled, one held at first sight is still
+        held, and what waits for review is now the pinned definition alone."""
+        statement = (
+            update(Tool)
+            .where(Tool.tenant_id == tenant_id, Tool.name == name)
+            .values(pending_description=None, pending_schema=None)
+        )
+        async with self._sessionmaker() as session, session.begin():
+            return bool(affected(await session.execute(statement)))
+
     async def current_state(self, tenant_id: str, name: str) -> ToolState | None:
         """The status the database holds for one tool, read fresh and in one query, with the
         status of its upstream folded in. None when there is no such tool."""
@@ -342,7 +368,9 @@ class ToolRepo:
     ) -> Tool:
         """Accept the pending definition of a quarantined tool: it becomes the live one, its
         hashes are recomputed, and the tool is active. A tool quarantined without a pending
-        definition (a new tool that screening held back) is released as it is.
+        definition (a new tool that screening held back) is released as it is. A tool an operator
+        disabled that changed while it was disabled holds its offer the same way, and this is the
+        one way to put it back (`enable` refuses it).
 
         `expect_hash` is the fingerprint that `keystone tool show` printed for the pending
         definition (a prefix is enough). The approval then applies only if the pending definition
@@ -352,7 +380,12 @@ class ToolRepo:
             row = await session.get(Tool, (tenant_id, name), with_for_update=True)
             if row is None:
                 raise PinningError(f"there is no tool {name!r}")
-            if row.status != ToolStatus.QUARANTINED.value:
+            changed_while_disabled = (
+                row.status == ToolStatus.DISABLED.value
+                and row.quarantine_reason == OPERATOR_DISABLED
+                and row.pending_description is not None
+            )
+            if row.status != ToolStatus.QUARANTINED.value and not changed_while_disabled:
                 raise PinningError(f"tool {name!r} is {row.status}, not quarantined")
             if row.pending_description is not None and row.pending_schema is not None:
                 fingerprint = pending_fingerprint(row.pending_description, row.pending_schema)

@@ -1,4 +1,6 @@
-"""KS-992: a call to a tool that does not exist takes a token from the principal's buckets."""
+"""KS-992: a call to a tool that does not exist takes a token from the principal's buckets.
+KS-998: so does one refused before the slots run for any other reason: arguments that fit no
+schema, a session or a registry that cannot be read."""
 
 from typing import Any
 
@@ -7,14 +9,16 @@ import pytest
 from keystone.audit.sink import InMemoryAuditSink
 from keystone.core.errors import Code, Reject
 from keystone.core.types import ToolResult
+from keystone.gateway.server import unknown_tool
 from keystone.gateway.wiring import PipelineDeps, build_pipeline
 from keystone.metering.ratelimit import MemoryLimiter
 from keystone.settings import RateLimit, RateLimitSettings, Settings
-from tests.fixtures.calls import make_ctx, make_tool
+from tests.fixtures.calls import OLIVIA, make_ctx, make_tool
 
 pytestmark = pytest.mark.phase(9)
 
 MISSING = Reject(Code.TOOL_NOT_FOUND, "there is no tool named 'made_up'")
+NOT_A_STRING = {"text": 42}  # the echo schema wants a string
 
 
 class Dispatching:
@@ -68,13 +72,65 @@ async def test_the_tools_own_bucket_is_not_charged_and_the_principals_is() -> No
     assert "per_user" in message(third) or "your user's" in message(third)
 
 
-async def test_other_refusals_are_not_charged() -> None:
-    pipeline, _ = build(RateLimitSettings(per_user=RateLimit(capacity=1, refill_per_s=0.001)))
+async def test_a_call_whose_session_cannot_be_read_is_charged_as_well() -> None:
+    """The gateway refuses such a call before the pipeline. A loop of them is a loop."""
+    pipeline, sink = build(RateLimitSettings(per_user=RateLimit(capacity=1, refill_per_s=0.001)))
     other = Reject(Code.DENIED, "session state is unavailable")
 
     answers = [await pipeline.reject(make_ctx(), other) for _ in range(3)]
 
-    assert all("KS_DENIED" in message(a) for a in answers)
+    assert "KS_DENIED" in message(answers[0])
+    assert all("KS_RATE_LIMITED" in message(a) for a in answers[1:])
+    codes = [r["reject_code"] for r in sink.records]
+    assert codes == ["KS_DENIED", "KS_RATE_LIMITED", "KS_RATE_LIMITED"]
+
+
+async def test_arguments_that_fit_no_schema_in_a_loop_are_limited() -> None:
+    """The arguments are checked before any slot runs, so the rate limit never saw such a call:
+    every attempt was audited, traced and counted, and none was limited."""
+    pipeline, sink = build(RateLimitSettings(per_user=RateLimit(capacity=3, refill_per_s=0.001)))
+
+    answers = [await pipeline.run(make_ctx(NOT_A_STRING)) for _ in range(5)]
+
+    assert ["KS_INVALID_ARGUMENTS" in message(a) for a in answers] == [True] * 3 + [False] * 2
+    assert all("KS_RATE_LIMITED" in message(a) for a in answers[3:])
+    codes = [r["reject_code"] for r in sink.records]
+    assert codes == ["KS_INVALID_ARGUMENTS"] * 3 + ["KS_RATE_LIMITED"] * 2
+
+
+async def test_bad_arguments_to_a_tool_that_exists_charge_its_own_bucket_too() -> None:
+    pipeline, _ = build(
+        RateLimitSettings(
+            per_user=RateLimit(capacity=5, refill_per_s=0.001),
+            per_tool=RateLimit(capacity=1, refill_per_s=0.001),
+        )
+    )
+
+    first = await pipeline.run(make_ctx(NOT_A_STRING))
+    second = await pipeline.run(make_ctx(NOT_A_STRING))
+
+    assert "KS_INVALID_ARGUMENTS" in message(first)
+    assert "KS_RATE_LIMITED" in message(second)
+    assert "this tool's" in message(second)
+
+
+async def test_a_name_that_is_no_tool_has_no_bucket_whatever_it_is_refused_with() -> None:
+    """The registry is down, so the gateway refuses the call with the stand-in it audits a made-up
+    name under. A loop of names must not make a bucket for each."""
+    pipeline, _ = build(
+        RateLimitSettings(
+            per_user=RateLimit(capacity=5, refill_per_s=0.001),
+            per_tool=RateLimit(capacity=1, refill_per_s=0.001),
+        )
+    )
+    down = Reject(Code.UPSTREAM_ERROR, "the tool registry is unavailable")
+
+    answers = [
+        await pipeline.reject(make_ctx(tool=unknown_tool(f"made_up_{n}", OLIVIA)), down)
+        for n in range(3)
+    ]
+
+    assert all("KS_UPSTREAM_ERROR" in message(a) for a in answers)
 
 
 async def test_a_limiter_that_fails_leaves_the_refusal_as_it_was() -> None:

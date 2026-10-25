@@ -108,6 +108,10 @@ class FakeIdp:
         self.jwks_delay_s = 0.0
         self.discovery_issuer: str | None = None  # what the document claims, if not the issuer
         self.extra_keys: list[dict[str, Any]] = []  # more JWKs to publish, for key selection tests
+        # A document to serve instead of the keys (a provider that restarts answers 200 with none),
+        # and a Cache-Control header for the JWKS answer.
+        self.jwks_document: dict[str, Any] | None = None
+        self.jwks_cache_control: str | None = None
         self._keys: dict[str, SigningKey] = {}
         rsa_key, ec_key = _first_keys()
         self._install(rsa_key, ec_key)
@@ -242,7 +246,9 @@ class FakeIdp:
             await anyio.sleep(self.jwks_delay_s)
         if self.jwks_status != 200:
             return Response(status_code=self.jwks_status)
-        return JSONResponse(self.jwks())
+        headers = {"cache-control": self.jwks_cache_control} if self.jwks_cache_control else None
+        document = self.jwks() if self.jwks_document is None else self.jwks_document
+        return JSONResponse(document, headers=headers)
 
 
 @pytest.fixture

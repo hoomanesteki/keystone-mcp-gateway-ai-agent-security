@@ -103,7 +103,23 @@ def test_keycloak_issues_one_issuer_for_every_address() -> None:
     assert environment["KC_HOSTNAME"] == "http://localhost:${KEYCLOAK_PORT:-8180}"
     assert environment["KC_HOSTNAME_BACKCHANNEL_DYNAMIC"] == "true"
     ports = COMPOSE["services"]["keycloak"]["ports"]
-    assert ports == ["${KEYCLOAK_PORT:-8180}:8080"], json.dumps(ports)
+    assert ports == ["${BIND_ADDRESS:-127.0.0.1}:${KEYCLOAK_PORT:-8180}:8080"], json.dumps(ports)
+
+
+@pytest.mark.phase(9)
+def test_every_published_port_stays_on_loopback_unless_told_otherwise() -> None:
+    # The stores and consoles behind the ports run with the passwords above, so a laptop on a
+    # shared network must not offer them to the LAN. One variable opens them on purpose.
+    published = [
+        (name, port)
+        for name, service in COMPOSE["services"].items()
+        for port in service.get("ports", [])
+    ]
+
+    assert len(published) >= 16
+    for name, port in published:
+        assert port.startswith("${BIND_ADDRESS:-127.0.0.1}:"), f"{name}: {port}"
+    assert env_example()["BIND_ADDRESS"] == "127.0.0.1"
 
 
 @pytest.mark.phase(3)

@@ -213,11 +213,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
     parser.add_argument("--records", type=int, default=20000)
     args = parser.parse_args()
-    admin_url = Settings().database_url.get_secret_value()
+    settings = Settings()
+    admin_url = settings.database_url.get_secret_value()
     url = make_url(admin_url).set(database=SCRATCH).render_as_string(hide_password=False)
     asyncio.run(make_database(admin_url, SCRATCH, create=True))
     try:
-        migrate_database(url)
+        migrate_database(url, settings.env)
         print(f"python {platform.python_version()} on {platform.machine()}, {args.records} records")
         for writers in (1, 2):
             figures = asyncio.run(run_writers(url, writers, args.records))

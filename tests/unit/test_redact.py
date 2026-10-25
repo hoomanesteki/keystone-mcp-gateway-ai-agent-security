@@ -115,6 +115,22 @@ def test_digits_that_are_not_a_card_number_stay(text: str) -> None:
 
 
 @pytest.mark.phase(5)
+@pytest.mark.parametrize(
+    ("text", "masked"),
+    [
+        ("4111 1111 1111 1111 12/25", "[redacted:card] 12/25"),
+        ("4111111111111111 123", "[redacted:card] 123"),
+        ("12 4111 1111 1111 1111", "12 [redacted:card]"),
+        ("4111 1111 1111 1111 1234 5678", "[redacted:card] 1234 5678"),
+    ],
+)
+def test_a_card_number_next_to_more_digits_is_masked(text: str, masked: str) -> None:
+    # An expiry or a code written after the number used to be taken into the match, which then
+    # failed Luhn as a whole and was kept as it was.
+    assert redact_string(text) == masked
+
+
+@pytest.mark.phase(5)
 def test_luhn() -> None:
     assert luhn_valid("4111111111111111") and luhn_valid("378282246310005")
     assert not luhn_valid("4111111111111112")

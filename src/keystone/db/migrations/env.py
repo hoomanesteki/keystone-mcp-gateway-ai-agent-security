@@ -21,6 +21,8 @@ def database_url() -> str:
     if url := (config.attributes.get("url") or config.get_main_option("sqlalchemy.url")):
         return str(url)
     settings = Settings()
+    # A plain `alembic upgrade head` gets the env the CLI would have passed (migration 0006).
+    config.attributes.setdefault("env", settings.env)
     return (settings.migrate_database_url or settings.database_url).get_secret_value()
 
 

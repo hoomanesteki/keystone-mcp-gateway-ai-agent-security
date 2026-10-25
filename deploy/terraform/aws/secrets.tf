@@ -44,3 +44,16 @@ resource "aws_secretsmanager_secret_version" "keystone" {
   secret_id     = aws_secretsmanager_secret.keystone[each.key].id
   secret_string = each.value
 }
+
+# The YAML Keystone starts from, when the variable holds one. ECS reads a parameter into the
+# container's environment the way it reads a secret, and Keystone takes the text from
+# KEYSTONE_CONFIG_YAML (docs/runbook.md, Keystone settings). The standard tier holds 4 KB, which
+# fits a few upstreams; a longer file takes the advanced tier (8 KB, $0.05 a month).
+resource "aws_ssm_parameter" "config_yaml" {
+  count = var.keystone_config_yaml != "" ? 1 : 0
+
+  name  = "/${var.name}/config-yaml"
+  type  = "SecureString"
+  tier  = length(var.keystone_config_yaml) > 4096 ? "Advanced" : "Standard"
+  value = var.keystone_config_yaml
+}

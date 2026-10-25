@@ -287,7 +287,7 @@ How a change flows:
 
 **One host, Docker Compose.** [deploy/docker-compose.yml](deploy/docker-compose.yml) is the stack `make up` starts. Its secrets are development values, and nothing in it should be reachable from beyond the machine. To run it against your own tools, put your own values in `.env`, list your tool servers in `deploy/keystone.compose.yaml`, and follow [docs/runbook.md](docs/runbook.md).
 
-**AWS, Terraform.** [deploy/terraform/aws/](deploy/terraform/aws/) creates a VPC over 2 availability zones, an ALB, ECS Fargate, RDS Postgres 16, ElastiCache Redis 7, Secrets Manager secrets, CloudWatch logs and an optional Cognito pool. From list prices it costs about $4.30 a day (about $130 a month), so run `terraform destroy` after a demo. The sandbox is off there (`KEYSTONE_SANDBOX_ENABLED=false`), because a Fargate task has no Docker socket. CI checks the module with fmt, validate and tflint. It has not been applied: I have no AWS credentials on this machine. `make tf-plan` plans it with the example variables.
+**AWS, Terraform.** [deploy/terraform/aws/](deploy/terraform/aws/) creates a VPC over 2 availability zones, an ALB, ECS Fargate, RDS Postgres 16, ElastiCache Redis 7, Secrets Manager secrets, CloudWatch logs and an optional Cognito pool. From list prices it costs about $4.30 a day (about $130 a month), so run `terraform destroy` after a demo. The sandbox is off there (`KEYSTONE_SANDBOX_ENABLED=false`), because a Fargate task has no Docker socket. Without an ACM certificate the ALB serves plain HTTP and the task runs with `KEYSTONE_ENV=dev`, a trial from your own address; prod needs the certificate. CI checks the module with fmt, validate and tflint. It has not been applied: I have no AWS credentials on this machine. `make tf-plan` plans it with the example variables.
 
 Operating it: [docs/runbook.md](docs/runbook.md) (start, stop, credentials, policies, approvals, audit, troubleshooting) and [docs/policies.md](docs/policies.md) (writing and testing policies).
 
@@ -306,9 +306,9 @@ I built Keystone one phase at a time. Each phase ended with a gate report and a 
 | 6 Approvals and the console | v0.6.0 | [phase-6](docs/gates/phase-6.md) |
 | 7 Injection defense and the Rule of Two | v0.7.0 | [phase-7](docs/gates/phase-7.md) |
 | 8 Sandbox, rate limits, budgets, LLM proxy | v0.8.0 | [phase-8](docs/gates/phase-8.md) |
-| 9 Proof and release | v1.0.0, not released | |
+| 9 Proof and release | v1.0.0 | [phase-9](docs/gates/phase-9.md) |
 
-Phase 9 so far: the red team, the detector join, the performance harness, the AgentDojo adapter, the untrusted-then-external rule, the load fixes (KS-992) and the Terraform module are done. The hardening pass with fuzz tests (KS-906) and the final review (KS-993) are done too. Still open: a decision on the classifier in the container (M6), the fresh-clone check (KS-907) and the release (KS-908). Two gaps are accepted for v1: pinning the resolved address of an upstream (KS-995) and publishing the head of the audit chain (KS-996). Status per story: [docs/progress.md](docs/progress.md).
+Phase 9 is done: the red team, the detector join, the performance harness, the AgentDojo adapter, the untrusted-then-external rule, the load fixes (KS-992), the Terraform module, the hardening pass with fuzz tests (KS-906), the final review (KS-993) and the fresh-clone check (KS-907). v1.0.0 was tagged on 2026-10-25. Still open after v1: a decision on the classifier in the container (M6). Two gaps are accepted for v1: pinning the resolved address of an upstream (KS-995) and publishing the head of the audit chain (KS-996). Status per story: [docs/progress.md](docs/progress.md).
 
 After v1:
 
