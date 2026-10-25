@@ -1,7 +1,7 @@
 # Runbook
 
-How to run Keystone, and what to do on an ordinary day. The first two sections are the short
-version. Everything after them is reference: every setting, port, command and error, by topic.
+How to run Keystone and what to do on an ordinary day. The first two sections are the short
+version. The rest is reference by topic: settings, ports, commands and errors.
 
 ## Getting started
 
