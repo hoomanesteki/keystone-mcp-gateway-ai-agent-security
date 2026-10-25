@@ -48,13 +48,15 @@ locals {
       KEYSTONE_PUBLIC_BASE_URL    = local.base_url
       KEYSTONE_ALLOWED_HOSTS      = jsonencode(local.allowed_hosts)
       KEYSTONE_SCANNER_CLASSIFIER = var.scanner_classifier
+      # The upstreams of a deployment sit in the VPC, on private addresses, which the SSRF guard
+      # (KS-202) refuses unless told so.
+      KEYSTONE_ALLOW_PRIVATE_UPSTREAMS = tostring(var.allow_private_upstreams)
     },
     local.oidc_issuer == "" ? {} : {
       KEYSTONE_OIDC_ISSUER   = local.oidc_issuer
       KEYSTONE_OIDC_AUDIENCE = local.oidc_audience
     },
     var.enable_adot ? { KEYSTONE_OTLP_ENDPOINT = "http://localhost:4318" } : {},
-    var.keystone_config_yaml != "" ? { KEYSTONE_CONFIG = "/etc/keystone/keystone.yaml" } : {},
   )
 
   # Pairs of the variable Keystone reads and the name of its secret in secrets.tf.
@@ -75,12 +77,22 @@ locals {
     portMappings = [{ containerPort = 8080, protocol = "tcp" }]
 
     environment = [for k, v in local.environment : { name = k, value = v }]
-    secrets = [
-      for pair in local.secret_env : {
-        name      = pair[0]
-        valueFrom = aws_secretsmanager_secret.keystone[pair[1]].arn
-      }
-    ]
+    secrets = concat(
+      [
+        for pair in local.secret_env : {
+          name      = pair[0]
+          valueFrom = aws_secretsmanager_secret.keystone[pair[1]].arn
+        }
+      ],
+      # The YAML Keystone starts from, when keystone_config_yaml holds one (secrets.tf). The task
+      # has no file to mount, so Keystone reads the text from this variable.
+      [
+        for parameter in aws_ssm_parameter.config_yaml : {
+          name      = "KEYSTONE_CONFIG_YAML"
+          valueFrom = parameter.arn
+        }
+      ],
+    )
 
     readonlyRootFilesystem = false
     healthCheck = {

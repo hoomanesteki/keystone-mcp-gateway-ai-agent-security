@@ -71,9 +71,15 @@ variable "scanner_classifier" {
 }
 
 variable "keystone_config_yaml" {
-  description = "Optional contents of keystone.yaml (tenants, upstreams, budgets). Empty means Keystone starts with no upstreams."
+  description = "Optional contents of keystone.yaml (tenants, upstreams, budgets), kept as a SecureString parameter and read by the task from KEYSTONE_CONFIG_YAML. Empty means Keystone starts with no upstreams."
   type        = string
   default     = ""
+}
+
+variable "allow_private_upstreams" {
+  description = "Let Keystone register upstreams on private addresses. On, because the upstreams of a deployment sit in the VPC; off, the SSRF guard refuses every RFC 1918, link-local and loopback address."
+  type        = bool
+  default     = true
 }
 
 variable "db_instance_class" {

@@ -85,6 +85,27 @@ def test_the_task_env_follows_the_certificate() -> None:
 
 
 @pytest.mark.phase(9)
+def test_the_config_yaml_reaches_the_task() -> None:
+    # The variable used to set KEYSTONE_CONFIG to a path nothing wrote. It is now a SecureString
+    # parameter that ECS hands to the container as KEYSTONE_CONFIG_YAML.
+    secrets = (TF_DIR / "secrets.tf").read_text()
+    iam = (TF_DIR / "iam.tf").read_text()
+    ecs = (TF_DIR / "ecs.tf").read_text()
+
+    assert 'resource "aws_ssm_parameter" "config_yaml"' in secrets
+    assert re.search(r'type\s*=\s*"SecureString"', secrets)
+    assert re.search(r"value\s*=\s*var\.keystone_config_yaml", secrets)
+    assert "ssm:GetParameters" in iam
+    assert re.search(r'name\s*=\s*"KEYSTONE_CONFIG_YAML"', ecs)
+    assert "aws_ssm_parameter.config_yaml" in ecs
+    assert not re.search(r"\bKEYSTONE_CONFIG\s*=", ecs)
+    # Upstreams in the VPC have private addresses, which the SSRF guard refuses unless told so.
+    assert re.search(
+        r"KEYSTONE_ALLOW_PRIVATE_UPSTREAMS\s*=\s*tostring\(var\.allow_private_upstreams\)", ecs
+    )
+
+
+@pytest.mark.phase(9)
 def test_the_stack_has_the_planned_pieces() -> None:
     text = "\n".join(path.read_text() for path in TF_DIR.glob("*.tf"))
 
