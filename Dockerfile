@@ -11,7 +11,7 @@ ARG WITH_SCANNER=0
 
 # The docker client, for the containerized stdio upstreams (KS-803), which Keystone starts with
 # `docker run`. Only the binary is used: the daemon is the host's, reached through its socket.
-FROM docker:29.6.2-cli AS docker-cli
+FROM docker:29.9.2-cli AS docker-cli
 
 FROM python:3.12.15-slim-trixie AS build
 ARG WITH_SCANNER
