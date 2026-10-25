@@ -19,7 +19,7 @@ def test_the_web_upstream_runs_on_8105_with_a_key_and_a_health_check() -> None:
 
     assert web["command"][:1] == ["examples.upstreams.web_server"]
     assert web["command"][-2:] == ["--port", "8105"]
-    assert web["ports"] == ["${WEB_PORT:-8105}:8105"]
+    assert web["ports"] == ["${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8105}:8105"]
     assert "WEB_API_KEY" in web["environment"]
     assert "8105/healthz" in " ".join(web["healthcheck"]["test"])
     assert COMPOSE["services"]["keystone"]["depends_on"]["web-mcp"] == {

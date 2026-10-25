@@ -251,7 +251,9 @@ Integration tests use the Postgres and Redis of `make up-core` on these ports (a
 | Console | 5173 | the Vite dev server (`pnpm dev` in `console/`), which `make console-e2e` also starts. The port is fixed because the Keycloak client `console` allows `http://localhost:5173/*` only |
 
 The credentials above are for local development only. Nothing in compose is meant to be exposed
-beyond the machine.
+beyond the machine, and the ports are published on `127.0.0.1` (`BIND_ADDRESS` in `.env.example`),
+so another machine cannot reach them. `BIND_ADDRESS=0.0.0.0` in `.env` opens them; change the
+passwords first.
 
 ## Demo upstreams
 
