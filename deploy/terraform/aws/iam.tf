@@ -52,6 +52,17 @@ data "aws_iam_policy_document" "execution" {
     actions   = ["secretsmanager:GetSecretValue"]
     resources = [for s in aws_secretsmanager_secret.keystone : s.arn]
   }
+
+  # The config YAML, when there is one (secrets.tf). The parameter uses the account's SSM key,
+  # which needs no kms:Decrypt of its own.
+  dynamic "statement" {
+    for_each = aws_ssm_parameter.config_yaml
+    content {
+      sid       = "ReadConfigParameter"
+      actions   = ["ssm:GetParameters"]
+      resources = [statement.value.arn]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "execution" {

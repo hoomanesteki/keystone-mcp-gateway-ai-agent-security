@@ -1,3 +1,4 @@
+import { focusManager } from "@tanstack/react-query";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
@@ -251,6 +252,29 @@ test("reads the list again every five seconds and shows the count in the menu", 
     const menu = screen.getByRole("navigation", { name: "Main" });
     expect(within(menu).getByRole("link", { name: /Approvals/ })).toHaveTextContent("1 waiting");
   } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("keeps reading the list in a tab nobody is looking at", async () => {
+  // The count in the tab's title and the menu exist for the approver who is in another tab, and
+  // TanStack skips interval reads of an unfocused document unless the query says otherwise.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  focusManager.setFocused(false);
+  try {
+    const api = approvalsApi([approval()]);
+    renderApp({ path: "/approvals", session: PEOPLE.lena, api });
+    await cardFor();
+    const before = api.to("GET", "/approvals").length;
+
+    await vi.advanceTimersByTimeAsync(5200);
+
+    await waitFor(() => {
+      expect(api.to("GET", "/approvals").length).toBeGreaterThan(before);
+    });
+    expect(document.title).toMatch(/^\(1\) Approvals/);
+  } finally {
+    focusManager.setFocused(undefined);
     vi.useRealTimers();
   }
 });

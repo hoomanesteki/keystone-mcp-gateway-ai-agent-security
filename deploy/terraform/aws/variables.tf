@@ -23,7 +23,7 @@ variable "vpc_cidr" {
 }
 
 variable "acm_certificate_arn" {
-  description = "ACM certificate for the load balancer. When set, the ALB serves HTTPS on 443 and redirects 80 to it. When empty, it serves plain HTTP on 80 (a demo only)."
+  description = "ACM certificate for the load balancer. When set, the ALB serves HTTPS on 443 and redirects 80 to it, and the task runs with KEYSTONE_ENV=prod. When empty, it serves plain HTTP on 80 and the task runs in dev mode: a trial from your own address, not a deployment (README)."
   type        = string
   default     = ""
 }
@@ -71,9 +71,15 @@ variable "scanner_classifier" {
 }
 
 variable "keystone_config_yaml" {
-  description = "Optional contents of keystone.yaml (tenants, upstreams, budgets). Empty means Keystone starts with no upstreams."
+  description = "Optional contents of keystone.yaml (tenants, upstreams, budgets), kept as a SecureString parameter and read by the task from KEYSTONE_CONFIG_YAML. Empty means Keystone starts with no upstreams."
   type        = string
   default     = ""
+}
+
+variable "allow_private_upstreams" {
+  description = "Let Keystone register upstreams on private addresses. On, because the upstreams of a deployment sit in the VPC; off, the SSRF guard refuses every RFC 1918, link-local and loopback address."
+  type        = bool
+  default     = true
 }
 
 variable "db_instance_class" {

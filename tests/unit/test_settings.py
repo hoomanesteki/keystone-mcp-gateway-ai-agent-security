@@ -57,6 +57,57 @@ def test_missing_config_file_is_an_error(tmp_path: Path, monkeypatch: pytest.Mon
         Settings()
 
 
+@pytest.mark.phase(9)
+def test_the_yaml_can_come_as_text_in_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    # What the ECS task gets: the file's text as a secret environment variable, no file.
+    monkeypatch.setenv(
+        "KEYSTONE_CONFIG_YAML",
+        "log_level: debug\n"
+        "env: test\n"
+        "upstreams:\n"
+        "  - {id: mail, tenant: acme, url: 'http://mail-mcp:8101/mcp'}\n",
+    )
+    monkeypatch.setenv("KEYSTONE_LOG_LEVEL", "warning")
+
+    settings = Settings()
+
+    assert settings.env == "test"
+    assert settings.log_level == "WARNING", "the environment still wins over the YAML"
+    assert [(u.id, u.url) for u in settings.upstreams] == [("mail", "http://mail-mcp:8101/mcp")]
+    assert settings.config_path is None
+
+
+@pytest.mark.phase(9)
+def test_an_empty_inline_yaml_is_the_same_as_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KEYSTONE_CONFIG_YAML", "")
+
+    assert Settings().upstreams == []
+
+
+@pytest.mark.phase(9)
+def test_inline_yaml_must_be_a_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KEYSTONE_CONFIG_YAML", "- mail\n- files\n")
+
+    with pytest.raises(ValueError, match="YAML mapping"):
+        Settings()
+
+
+@pytest.mark.phase(9)
+def test_a_file_and_inline_yaml_together_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "keystone.yaml"
+    config.write_text("env: test\n")
+    monkeypatch.setenv("KEYSTONE_CONFIG", str(config))
+    monkeypatch.setenv("KEYSTONE_CONFIG_YAML", "env: dev\n")
+
+    with pytest.raises(ValueError, match="not both"):
+        Settings()
+
+    # An explicit path is a choice of the caller (the tests make it), and stands.
+    assert Settings(config_path=config).env == "test"
+
+
 @pytest.mark.phase(0)
 def test_invalid_env_value_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KEYSTONE_ENV", "staging")

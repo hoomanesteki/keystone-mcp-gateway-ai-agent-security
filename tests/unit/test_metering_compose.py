@@ -71,7 +71,7 @@ def test_the_compose_llm_proxy_is_pointed_at_the_fake_service_and_its_key() -> N
     # The address in the config is the service name and the port the server listens on.
     assert fake["command"][-2:] == ["--port", "8199"]
     assert proxy.anthropic.base_url == proxy.openai.base_url == "http://fake-llm:8199"
-    assert fake["ports"] == ["${FAKE_LLM_PORT:-8199}:8199"]
+    assert fake["ports"] == ["${BIND_ADDRESS:-127.0.0.1}:${FAKE_LLM_PORT:-8199}:8199"]
     # The key the fake wants and the key Keystone sends are one variable with one default.
     variable = proxy.anthropic.api_key_env
     assert variable == proxy.openai.api_key_env == "FAKE_LLM_API_KEY"
