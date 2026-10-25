@@ -29,6 +29,7 @@ from prometheus_client import (
 
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, ToolRef, ToolStatus
+from keystone.registry.naming import is_unknown
 
 __all__ = ["CONTENT_TYPE_LATEST", "Declared", "Metrics"]
 
@@ -315,8 +316,12 @@ class Metrics:
     ) -> None:
         """One finished call: its counters and its total time."""
         tenant = self._tenant(ctx.principal.tenant_id)
-        # A call to a tool that does not exist is "unknown", whatever name the caller made up.
-        missing = reject is not None and reject.code is Code.TOOL_NOT_FOUND
+        # A call to a tool that does not exist is "unknown", whatever name the caller made up and
+        # whatever it was refused with in the end: the rate limit refuses such a call once its
+        # bucket is empty (KS-992), and the name must not become a label value for that.
+        missing = is_unknown(ctx.tool) or (
+            reject is not None and reject.code is Code.TOOL_NOT_FOUND
+        )
         tool = UNKNOWN if missing else self._tool(ctx.tool.name)
         effect = ctx.decision.effect.value if ctx.decision else NO_DECISION
         self.tool_calls.labels(tenant=tenant, tool=tool, effect=effect, outcome=outcome).inc()
