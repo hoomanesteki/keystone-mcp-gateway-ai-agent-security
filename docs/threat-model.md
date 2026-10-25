@@ -2,8 +2,7 @@
 
 What can go wrong at the gateway, what stops it, and which test fails if the stop is removed.
 Every link below is `file::function`, and `tests/unit/test_threat_model.py` fails when one of
-them does not exist. Where nothing stops a threat, it is listed under accepted risks with the
-reason, not left out.
+them does not exist. A threat that nothing stops is under accepted risks, with the reason.
 
 ## What is defended
 

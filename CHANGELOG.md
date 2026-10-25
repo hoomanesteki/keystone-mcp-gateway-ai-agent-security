@@ -1,6 +1,6 @@
 # Changelog
 
-Grouped by release tag, from the conventional commit subjects since v0.0.1. Merge commits and the release commits are left out. Each line ends with the short hash. v1.0.0 is not released; the commits after v0.8.0 are under Unreleased.
+Commit subjects since v0.0.1, grouped by release tag, with the short hash at the end of each line. Merge and release commits are left out. v1.0.0 is not released, so the commits after v0.8.0 are under Unreleased.
 
 ## Unreleased
 

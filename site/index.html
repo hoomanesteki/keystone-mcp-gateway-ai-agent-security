@@ -306,7 +306,7 @@ when { resource.tags.contains("external_effect")
 <section id="limits">
   <div class="wrap">
     <p class="kicker">7. What it does not do</p>
-    <h2>The honest limits</h2>
+    <h2>Limits I know about</h2>
     <ul class="limits">
       <li><strong>I have not measured a real model.</strong> The red team used a naive agent and an approver who is always right. That shows what the layers do when the person decides well. It says nothing about a person who reads a card badly or a model that is only partly steered.</li>
       <li><strong>The detector misses most of the hard cases.</strong> At a false positive rate of 5% it finds 0.71 of the injections in my test split, against a target of 0.90. The policy does not depend on the scanner alone, but a scan that misses taints nothing.</li>
@@ -339,7 +339,7 @@ make demo-attack   # the poisoned email, with and without Keystone</code></pre>
         <tr><td><code>alice</code></td><td>Support</td><td>See a smaller tool list and a refused transfer.</td></tr>
       </tbody>
     </table>
-    <p>In the console you will see the approval queue, the audit trail with each call's scan score, the tool list, budgets and live sessions. The local stack is for development only. Nothing in it is meant to be exposed. The <a href="https://github.com/hoomanesteki/keystone-mcp-gateway-ai-agent-security/blob/main/docs/runbook.md">runbook</a> has the ports and settings.</p>
+    <p>The console has the approval queue, the audit trail with each call's scan score, the tool list, budgets and live sessions. The local stack is for development only, and nothing in it should be exposed. The <a href="https://github.com/hoomanesteki/keystone-mcp-gateway-ai-agent-security/blob/main/docs/runbook.md">runbook</a> has the ports and settings.</p>
   </div>
 </section>
 

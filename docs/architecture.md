@@ -1,6 +1,6 @@
 # Architecture
 
-What is built, as it is in the code at the time of writing. The decisions behind it are in [docs/adr/](adr/), the plan's own sections (3.4 pipeline, 3.6 contracts, 3.7 data model) are in [PLAN.md](PLAN.md), and every setting and port is in the [runbook](runbook.md).
+What the code does today. The reasons for each choice are in [docs/adr/](adr/). The plan sections behind it (3.4 pipeline, 3.6 contracts, 3.7 data model) are in [PLAN.md](PLAN.md). Settings and ports are in the [runbook](runbook.md).
 
 ## Components
 
