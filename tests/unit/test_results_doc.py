@@ -75,7 +75,8 @@ def test_results_numbers_match_raw() -> None:
     }
     for key, label in names.items():
         for run in perf["targets"][key]["runs"]:
-            ok = [x for x in run["latencies_ms"]]
+            # latencies_ms holds the calls that succeeded; failures are in failed_ms.
+            ok = run["latencies_ms"]
             p50, p95 = percentile(ok, 50), percentile(ok, 95)
             heading = f"### 200 sessions, 20 calls each, {run['size'] // 1024} KB payload"
             block = text.split(heading, 1)[1].split("###", 1)[0]
@@ -122,3 +123,31 @@ def test_readme_quotes_the_red_team_counts() -> None:
     assert "48 of 48" in README
     for sentence in re.findall(r"(\d+) of 48", README):
         assert sentence in {"0", "36", "48", "8", "29"}, sentence
+
+
+@pytest.mark.phase(9)
+def test_site_quotes_the_current_performance_run() -> None:
+    site = (ROOT / "site" / "index.html").read_text()
+    perf = json.loads((RESULTS / "perf-2026-10-24b.json").read_text())
+
+    def added(key: str, size: int, q: int, field: str) -> float:
+        def run(name: str) -> dict:  # type: ignore[type-arg]
+            [found] = [r for r in perf["targets"][name][field] if r["size"] == size]
+            return found
+
+        target, direct = run(key)["latencies_ms"], run("direct")["latencies_ms"]
+        return percentile(target, q) - percentile(direct, q)
+
+    one50, one95 = (
+        added("scanner-off", 1024, 50, "sequential"),
+        added("scanner-off", 1024, 95, "sequential"),
+    )
+    many50 = added("scanner-off", 1024, 50, "runs")
+    assert f"adds {one50:.1f} ms at p50 and {one95:.1f} ms at p95" in site
+    assert f"added {many50:.1f} ms at p50" in site
+    assert "none of the 4,000 calls failed" in site
+    # The figures of the first run, before KS-992, must not come back.
+    for old in ("13.8", "23.8", "531.7", "895.4", "2695.0", "3.2% of the calls"):
+        assert old not in site, old
+    assert "5 minutes" not in site
+    assert "scores the reminder at 0.88" not in site
