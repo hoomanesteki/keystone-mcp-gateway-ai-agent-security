@@ -1,10 +1,14 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 from keystone.settings import Settings
 
 pytestmark = pytest.mark.usefixtures("clean_env")
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.phase(0)
@@ -257,6 +261,36 @@ def test_tool_overrides_load_from_yaml_and_typos_fail(tmp_path: Path) -> None:
         )
     with pytest.raises(ValueError, match="tool"):
         Settings(upstreams=[{"id": "mail", "tool": {}}])  # type: ignore[list-item]
+
+
+def classifications(path: Path) -> dict[str, dict[str, Any]]:
+    """Upstream id -> tool name -> its risk and tags. A price or an extractor is not a
+    classification: the example prices a tool to show the shape, and compose does not."""
+    config = yaml.safe_load(path.read_text())
+    return {
+        entry["id"]: {
+            name: {key: override.get(key) for key in ("risk", "tags")}
+            for name, override in entry.get("tools", {}).items()
+        }
+        for entry in config["upstreams"]
+    }
+
+
+@pytest.mark.phase(4)
+def test_the_example_config_classifies_every_tool_the_compose_config_does() -> None:
+    """The example is what a deployment copies, and it points at the same demo servers as the
+    compose stack. A tool it leaves out is medium risk with no tags: anyone may call it and the
+    Rule of Two never sees it, where the compose config tags it. The two must not decide the same
+    call differently."""
+    example = classifications(ROOT / "keystone.example.yaml")
+    compose = classifications(ROOT / "deploy" / "keystone.compose.yaml")
+
+    for upstream_id, tools in compose.items():
+        for name, classified in tools.items():
+            if upstream_id in example:
+                assert example[upstream_id].get(name) == classified, (upstream_id, name)
+    # Globex's drive is the same server as acme's, so its tools are what acme's are.
+    assert example["files_globex"] == example["files"] != {}
 
 
 @pytest.mark.phase(3)

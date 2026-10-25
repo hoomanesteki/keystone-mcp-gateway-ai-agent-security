@@ -276,35 +276,47 @@ class RegistrySyncer:
     async def _settle(self, row: Upstream, old: Tool) -> None:
         """The upstream lists the definition we hold. A tool that sync disabled because it was
         gone is active again. A tool quarantined for a change the upstream has since taken back
-        is released: nothing but the definition a person accepted is on offer any more."""
+        is released: nothing but the definition a person accepted is on offer any more. A tool
+        held at first sight is not released by that route, because nobody accepted the definition
+        the upstream went back to: it drops the offer and waits for approve-change as before. A
+        tool an operator disabled drops the offer too and stays disabled."""
         if old.status == ToolStatus.DISABLED and old.quarantine_reason == REMOVED:
             await self.tools.set_status(row.tenant_id, old.name, ToolStatus.ACTIVE)
-        elif (
-            old.status == ToolStatus.QUARANTINED
-            and old.pending_description is not None
-            and old.quarantine_reason in CHANGE_REASONS
-        ):
+        elif old.pending_description is None:
+            return
+        elif old.status == ToolStatus.QUARANTINED and old.quarantine_reason in CHANGE_REASONS:
             await self.tools.clear_pending(row.tenant_id, old.name)
             log.info("tool_released", upstream=row.id, tool=old.name, why="change taken back")
+        else:
+            await self.tools.forget_pending(row.tenant_id, old.name)
+            log.info("tool_offer_withdrawn", upstream=row.id, tool=old.name, status=old.status)
 
     async def _hold_change(
         self, row: Upstream, old: Tool, ref: ToolRef, report: SyncReport
     ) -> None:
         """The upstream lists a different definition. Keep the one we hold, store the new one as
-        pending and quarantine the tool. A tool an operator disabled stays disabled."""
+        pending and quarantine the tool. A tool an operator disabled stays disabled, with the
+        offer stored so that `enable` cannot put it live unread. A tool held at first sight keeps
+        that verdict as its reason: the definition it holds was never accepted, so a change and
+        its reversal must not read as a change a person can be assumed to have accepted."""
         report.changed.append(ref.name)
         await self.tools.refresh(ref)
+        if old.pending_description == ref.description and old.pending_schema == ref.input_schema:
+            return  # the same pending definition as last time: already held, nothing new to say
         if old.status == ToolStatus.DISABLED and old.quarantine_reason != REMOVED:
+            await self.tools.hold_pending(
+                row.tenant_id,
+                ref.name,
+                description=ref.description,
+                input_schema=ref.input_schema,
+            )
+            log.info("tool_change_held", upstream=row.id, tool=ref.name, before=old.status)
             return
         reason = change_reason(
             (old.description_hash, old.schema_hash), (ref.description_hash, ref.schema_hash)
         )
-        if (
-            old.status == ToolStatus.QUARANTINED
-            and old.pending_description == ref.description
-            and old.pending_schema == ref.input_schema
-        ):
-            return  # the same pending definition as last time: already held, nothing new to say
+        if (old.quarantine_reason or "").startswith(SUSPICIOUS):
+            reason = old.quarantine_reason
         await self.tools.set_pending(
             row.tenant_id,
             ref.name,

@@ -10,7 +10,10 @@ it goes on as the same object, so what an agent reads is byte for byte what the 
   wrapped, because it has no place for a warning.
 - `redact` cuts out what hides or leaks (the places `hidden_unicode` and `markdown_exfil` find),
   in every text block, resource, resource link and string of structured content, and then
-  annotates. It does not remove a phrase: an instruction in plain words stays, under the warning.
+  annotates. It cuts on the view the rules read: the hidden characters go first, and a link they
+  were hiding goes in the next pass. A string whose link is one only after normalizing (fullwidth
+  letters in the address) cannot be cut in place and is dropped whole. It does not remove a
+  phrase: an instruction in plain words stays, under the warning.
 - `block` withholds the output and returns a refusal with the score and the rules that found it.
 
 An action cannot be applied to an output it does not understand without care: a JSON text block is
@@ -26,7 +29,7 @@ from typing import Any, Literal
 
 from keystone.core.errors import Code, RejectionResult
 from keystone.core.types import ScanResult, ToolResult
-from keystone.defense.rules import Rule, Span
+from keystone.defense.rules import Rule, Span, prepare
 
 Action = Literal["pass", "annotate", "redact", "block"]
 
@@ -38,6 +41,11 @@ UNTRUSTED_OPEN = "<<<untrusted>>>"
 UNTRUSTED_CLOSE = "<<<end untrusted>>>"
 # The rules whose places in a text `redact` cuts. The others find phrases, and a phrase is not cut.
 REDACTED_RULES = ("hidden_unicode", "markdown_exfil")
+LEAK_RULES = ("markdown_exfil",)
+# How many times the cutting rules run over one string. A hidden character cut in one pass can
+# leave a link the next pass finds (`!` and `[` with a zero-width space between them). Bounded,
+# because each pass reads the whole string again.
+PASSES = 3
 
 
 def _text(text: str) -> dict[str, Any]:
@@ -112,10 +120,20 @@ def redact(result: ToolResult, rules: Sequence[Rule]) -> ToolResult:
     """The output without the characters that hide and the images and links that leak, under the
     warning. `rules` are the scanner's own, so that an allowed domain is still allowed."""
     checks = [rule.check for rule in rules if rule.id in REDACTED_RULES]
+    leaks = [rule.check for rule in rules if rule.id in LEAK_RULES]
 
     def clean(text: str) -> str:
-        spans = [span for check in checks for span in check(text)]
-        return cut(text, spans) if spans else text
+        for _ in range(PASSES):
+            spans = [span for check in checks for span in check(text)]
+            if not spans:
+                break
+            text = cut(text, spans)
+        # The scanner found the leak on the normalized text (`rules.prepare`). A link that is one
+        # only there has no place in the original to cut, so the string goes whole.
+        plain, _ = prepare(text)
+        if plain != text and any(check(plain) for check in leaks):
+            return ""
+        return text
 
     content = [_clean_block(block, clean) for block in result.content if isinstance(block, dict)]
     structured = result.structured_content

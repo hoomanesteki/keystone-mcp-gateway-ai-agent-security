@@ -29,9 +29,20 @@ upstreams:
     credential_mode: static
     credential_env: {X-Api-Key: MAIL_API_KEY}
     tools:
+      list_emails: {risk: low, tags: [reads_sensitive]}
       read_email: {risk: low, tags: [reads_untrusted, reads_sensitive]}
       send_email: {risk: high, tags: [external_effect], extract: {recipient_domain: "$.to | domain"}}
-  - {id: files, tenant: acme, transport: http, url: "http://localhost:8102/mcp"}
+  - id: files
+    tenant: acme
+    transport: http
+    url: "http://localhost:8102/mcp"
+    # What each tool is to the Rule of Two (policies/default/approval/rule_of_two.cedar). A drive
+    # holds files that people outside the company wrote or touched, and private ones, so a read is
+    # untrusted and sensitive; a write changes state. A tool with no tag is invisible to the rule.
+    tools:
+      list_files: {risk: medium, tags: [reads_sensitive]}
+      read_file: {risk: medium, tags: [reads_untrusted, reads_sensitive]}
+      write_file: {risk: medium, tags: [external_effect]}
   # The sandbox (ADR-0012): run_python and run_shell in a container with no network. It needs the
   # Docker socket and `make sandbox-image`, and `sandbox.enabled: false` leaves it out. Both tools
   # are high risk, so only operators may call them.
@@ -51,6 +62,9 @@ upstreams:
     tools:
       # A price makes a call count against the budgets at the end of this file.
       get_balance: {risk: medium, tags: [reads_sensitive], cost_per_call_usd: 0.002}
+      # The description of a transaction is written by whoever paid or was paid, so reading the
+      # history is a read of untrusted text as well as of private data.
+      list_transactions: {risk: medium, tags: [reads_untrusted, reads_sensitive]}
       # The amount in cents: `int` would cut 500.99 down to 500 and let it past a limit of 500.
       transfer: {risk: high, tags: [external_effect], extract: {amount: "$.amount | cents"}}
   - {id: echo, tenant: acme, transport: http, url: "http://localhost:8104/mcp"}
@@ -67,6 +81,11 @@ upstreams:
     tenant: globex
     transport: http
     url: "http://localhost:8112/mcp"
+    # The same server as acme's drive, so its tools are what acme's are.
+    tools:
+      list_files: {risk: medium, tags: [reads_sensitive]}
+      read_file: {risk: medium, tags: [reads_untrusted, reads_sensitive]}
+      write_file: {risk: medium, tags: [external_effect]}
 
 # The policies (Cedar). root has schema.cedarschema, default/, one directory per tenant, and demo/.
 # A tenant's rules are default/ plus demo/ (if include_demo) plus its own directory, each with an

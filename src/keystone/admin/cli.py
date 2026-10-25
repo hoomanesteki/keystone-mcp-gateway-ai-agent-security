@@ -628,10 +628,12 @@ def tool_disable(
     async def action(settings: Settings, sessions: Sessionmaker) -> str:
         found = await find_tool(settings, sessions, name, tenant)
         try:
-            await ToolAdmin(sessions).disable(found.tenant_id, name)
+            row, changed = await ToolAdmin(sessions).disable(found.tenant_id, name)
         except (ToolConflict, ToolNotFound) as exc:
             raise CliError(str(exc)) from exc
-        return f"disabled {name}"
+        if changed:
+            return f"disabled {name}"
+        return f"{name} is already disabled ({row.quarantine_reason})"
 
     typer.echo(run_with_database(action))
 
