@@ -538,7 +538,8 @@ a minute, so a token fetched right after the restart may be refused for up to a 
 
 ## Keystone settings
 
-Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
+Environment variables win over the YAML file named by `KEYSTONE_CONFIG`, or over the same YAML
+given as text in `KEYSTONE_CONFIG_YAML`.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -556,6 +557,7 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_CREDENTIAL_CACHE_TTL_S` | `60` | How long the gateway keeps an upstream's opened credential instead of reading and decrypting it on every call. `keystone cred set` and `rotate-keys` run in the CLI, another process, so the gateway sends the old credential until the entry expires: set `0` to read it every call. |
 | `KEYSTONE_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` |
 | `KEYSTONE_CONFIG` | unset | Path to a YAML file with the same keys |
+| `KEYSTONE_CONFIG_YAML` | unset | The text of that file, for a host that passes secrets as environment variables and mounts no file (the ECS task in `deploy/terraform/aws` reads it from an SSM parameter). Refused together with `KEYSTONE_CONFIG`. |
 | `KEYSTONE_ALLOWED_HOSTS` | `["127.0.0.1:*","localhost:*","[::1]:*"]` | JSON list of `Host` header values the MCP endpoint accepts (DNS rebinding guard). `:*` matches any port. Add the service name, for example `keystone:*`, to reach it from another container. |
 | `KEYSTONE_ALLOW_PRIVATE_UPSTREAMS` | `false` | When `false`, an upstream URL whose host resolves to a loopback, private (RFC 1918), link-local (including 169.254.169.254), CGNAT (100.64.0.0/10) or IPv6 unique-local address is refused. Local compose sets it to `true`, because the demo upstreams are on a private network. |
 | `KEYSTONE_REGISTRY__SYNC_INTERVAL_S` | `300` | Seconds between syncs of every upstream. `0` turns the timer off (the startup sync and the CLI still run). Also `registry.sync_interval_s` in the YAML. |
