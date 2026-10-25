@@ -53,6 +53,11 @@ jobs:
         run: make test-e2e
       - name: console end-to-end test
         run: make console-e2e
+      # 10 sessions making 5 calls each to the echo upstream and to Keystone (KS-903). It checks
+      # that the harness still runs and that no call fails; the numbers are the ones of the full
+      # matrix, which needs a machine of its own (docs/runbook.md, Performance).
+      - name: performance smoke
+        run: make perf-smoke
       - name: container logs
         if: failure()
         run: docker compose -f deploy/docker-compose.yml logs --no-color --tail=200

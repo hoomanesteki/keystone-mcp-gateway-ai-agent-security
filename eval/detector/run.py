@@ -4,8 +4,11 @@
     python -m eval.detector.run --config combined --split test --out result.json
     python -m eval.detector.run --config rules --split test --limit 200      # the nightly run
 
-`--config` is `rules` (the seven rules of ADR-0011), `classifier` (the model alone) or `combined`
-(the higher of the two, which is what the gateway uses). The model needs the extra
+`--config` is `rules` (the seven rules of ADR-0011), `classifier` (the model alone, which is asked
+about every text) or `combined` (the rules and the model joined the way the gateway joins them: by
+default the rules first and then the model, `scanner.join`). `--join`, `--window-tokens`,
+`--window-overlap` and `--model-weight` run another setting of the scanner; the report uses them
+to measure what Phase 7 shipped next to what runs now. The model needs the extra
 `keystone[scanner]`. The rules need nothing.
 
 For every text the run takes the score of the scanner and the time the scan took, one text at a
@@ -26,6 +29,8 @@ The model is given as long as it needs (`--timeout-ms`, 10 s), so that the numbe
 do. The gateway waits 300 ms by default and then goes on with the rules, so a `combined` run also
 reports `combined_300ms`, computed from the measured time of each scan: a text whose scan took more
 than 300 ms is scored by its rules alone. That row is derived from the timings and not a second run.
+With the rules-first join a text the rules flag is not given to the model, so the model has no score
+for it and `classifier` is not asked of that run: the model alone is a run with `--join max`.
 
 A run on `test` is logged in `eval/results/test-runs.jsonl`, every time: the test split is for the
 numbers that are published, thresholds are tuned on `dev` (`tune.py`), and the log is how anyone
@@ -62,7 +67,7 @@ from eval.detector.metrics import (
 from keystone.core.types import ToolRef
 from keystone.defense.classifier import load_classifier
 from keystone.defense.rules import default_rules
-from keystone.defense.scanner import CompositeScanner, build_scanner
+from keystone.defense.scanner import SKIPPED, CompositeScanner, build_scanner
 from keystone.settings import ScannerSettings
 
 CONFIGS = ("rules", "classifier", "combined")
@@ -290,33 +295,46 @@ def config_metrics(
 
 
 def evaluate(
-    scored: Sequence[Scored], configs: Sequence[str], flag: float, taint: float
+    scored: Sequence[Scored],
+    configs: Sequence[str],
+    flag: float,
+    taint: float,
+    prefix: str = "",
 ) -> dict[str, Any]:
-    """The metrics of each config in `configs`, for the scored texts."""
+    """The metrics of each config in `configs`, for the scored texts, under names that start with
+    `prefix` (the report keeps a second run of the scanner beside the first, as `previous_`)."""
     out: dict[str, Any] = {}
     if "rules" in configs:
-        out["rules"] = config_metrics(scored, lambda i: i.rules, lambda i: i.rules_ms, flag, taint)
-    modeled = [i for i in scored if i.classifier is not None]
+        out[f"{prefix}rules"] = config_metrics(
+            scored, lambda i: i.rules, lambda i: i.rules_ms, flag, taint
+        )
+    # A text of a run with a model: the model answered, was left out for being slow or failing, or
+    # was not asked because the rules had flagged the text. The model alone has a score for the
+    # first kind only, and the joined score is there for all of them.
+    run_with_model = [i for i in scored if i.model is not None]
+    answered = [i for i in run_with_model if i.classifier is not None]
     if "classifier" in configs:
-        out["classifier"] = config_metrics(
-            modeled, lambda i: i.classifier or 0.0, lambda i: i.scan_ms, flag, taint
+        out[f"{prefix}classifier"] = config_metrics(
+            answered, lambda i: i.classifier or 0.0, lambda i: i.scan_ms, flag, taint
         )
     if "combined" in configs:
-        out["combined"] = config_metrics(
-            modeled, lambda i: i.combined, lambda i: i.scan_ms, flag, taint
+        out[f"{prefix}combined"] = config_metrics(
+            run_with_model, lambda i: i.combined, lambda i: i.scan_ms, flag, taint
         )
         # What the gateway does with a 300 ms wait: a text whose scan took longer is scored by the
         # rules alone. Derived from the measured time of each scan.
-        out["combined_300ms"] = config_metrics(
-            modeled,
+        waiting = config_metrics(
+            run_with_model,
             lambda i: i.combined if (i.scan_ms or 0.0) <= GATEWAY_TIMEOUT_MS else i.rules,
             lambda i: i.scan_ms,
             flag,
             taint,
         )
-        out["combined_300ms"]["fell_back_to_rules"] = _rate(
-            sum(1 for i in modeled if (i.scan_ms or 0.0) > GATEWAY_TIMEOUT_MS), len(modeled)
+        waiting["fell_back_to_rules"] = _rate(
+            sum(1 for i in run_with_model if (i.scan_ms or 0.0) > GATEWAY_TIMEOUT_MS),
+            len(run_with_model),
         )
+        out[f"{prefix}combined_300ms"] = waiting
     return out
 
 
@@ -355,6 +373,17 @@ def machine() -> dict[str, Any]:
     }
 
 
+def plan(config: str, settings: ScannerSettings) -> tuple[tuple[str, ...], ScannerSettings]:
+    """The configs to measure and the settings to score them with, for the name of a config on a
+    command line. `classifier` is the model alone, so the scanner is set to ask it about every text
+    (`join: max`); `combined` is the scanner as it is set."""
+    if config == "rules":
+        return ("rules",), settings
+    if config == "classifier":
+        return ("rules", "classifier"), settings.model_copy(update={"join": "max"})
+    return ("rules", "combined"), settings
+
+
 def score_split(
     data: Dataset,
     split: str,
@@ -365,13 +394,30 @@ def score_split(
     timeout_ms: int = DEFAULT_TIMEOUT_MS,
     progress: Callable[[int, int], None] | None = None,
 ) -> list[Scored]:
-    """Score a split. One pass with the model serves both `classifier` and `combined`."""
+    """Score a split. One pass with the model serves both `classifier` and `combined` when the
+    scanner asks the model about every text (`join: max`); with the rules-first join it does not
+    ask about a text the rules flag, and the model alone cannot be measured in that pass."""
     base = settings or ScannerSettings()
+    if "classifier" in configs and base.join != "max":
+        raise ValueError(
+            "the model alone needs `join: max`: with `rules_first` it is not asked about a text "
+            "the rules flag, so it has no score for it"
+        )
     samples = pick_subset(data.split(split), limit)
     if any(c in ("classifier", "combined") for c in configs):
         modelled = base.model_copy(update={"classifier_timeout_ms": timeout_ms})
         return asyncio.run(score_with_model(samples, modelled, progress=progress))
     return score_rules(samples, base.model_copy(update={"classifier": "none"}))
+
+
+def scanner_facts(settings: ScannerSettings) -> dict[str, Any]:
+    """The settings of the scanner that decide what a model run measures."""
+    return {
+        "join": settings.join,
+        "model_weight": settings.model_weight,
+        "window_tokens": settings.window_tokens,
+        "window_overlap": settings.window_overlap,
+    }
 
 
 def assemble(
@@ -393,9 +439,11 @@ def assemble(
         "samples": describe_samples([s.sample for s in scored]),
         "configs": evaluate(scored, configs, flag, taint),
         "model_failures": sum(1 for s in scored if s.model in ("timeout", "error")),
+        "model_skipped": sum(1 for s in scored if s.model == SKIPPED),
         "notes": list(data.notes),
         "classifier": base.classifier if modelled else None,
         "timeout_ms": timeout_ms if modelled else None,
+        "scanner": scanner_facts(base) if modelled else None,
     }
 
 
@@ -473,6 +521,13 @@ def log_test_run(result: Mapping[str, Any], path: Path | None = None, note: str 
         "n": result["samples"]["n"],
         "configs": sorted(result["configs"]),
         "headline": headline,
+        # How the scanner was set, so that a line says what was measured (KS-792).
+        **({"scanner": result["scanner"]} if result.get("scanner") else {}),
+        **(
+            {"previous_scanner": result["previous_scanner"]}
+            if result.get("previous_scanner")
+            else {}
+        ),
         **({"note": note} if note else {}),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -500,6 +555,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=None, help="write the JSON here")
     parser.add_argument("--offline", action="store_true", help="do not download the public parts")
     parser.add_argument("--timeout-ms", type=int, default=DEFAULT_TIMEOUT_MS)
+    parser.add_argument("--join", choices=("rules_first", "max"), default=None)
+    parser.add_argument("--model-weight", type=float, default=None)
+    parser.add_argument("--window-tokens", type=int, default=None)
+    parser.add_argument("--window-overlap", type=int, default=None)
     parser.add_argument("--no-log", action="store_true", help="do not log a run on test")
     parser.add_argument("--note", default="", help="why a run on test was made, for its log line")
     parser.add_argument("--summary", action="store_true", help="print one line and not the JSON")
@@ -519,9 +578,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if done % 100 == 0 or done == total:
             print(f"  scored {done} of {total}", file=sys.stderr, flush=True)
 
-    # A model config needs both of the model's rows to be computed; asking for one gives the other.
-    configs = ("rules",) if args.config == "rules" else ("rules", "classifier", "combined")
-    base = ScannerSettings()
+    given = {
+        key: value
+        for key, value in (
+            ("join", args.join),
+            ("model_weight", args.model_weight),
+            ("window_tokens", args.window_tokens),
+            ("window_overlap", args.window_overlap),
+        )
+        if value is not None
+    }
+    configs, base = plan(args.config, ScannerSettings.model_validate(given))
     scored = score_split(
         data,
         args.split,

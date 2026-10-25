@@ -18,6 +18,7 @@ from examples.upstreams._common import (
     Database,
     register_test_routes,
     run_cli,
+    variant_folders,
 )
 
 MAX_BYTES = 1024 * 1024
@@ -46,12 +47,18 @@ def create_server(
     db = Database(db_path or (Path(env_path) if env_path else None), "files")
     log = CallLog()
 
-    def reset() -> None:
+    def reset(variant: str | None = None) -> None:
+        # A variant is the seed with the files of its folders over it, and it does not take the
+        # poisoned flag (KS-901).
+        folders = variant_folders(variant)
         if root.exists():
             shutil.rmtree(root)
         shutil.copytree(seed_dir, root)
-        if poisoned:
+        if poisoned and variant is None:
             shutil.copytree(FIXTURES / "injections" / "files", root, dirs_exist_ok=True)
+        for folder in folders:
+            if (overlay := folder / "files").is_dir():
+                shutil.copytree(overlay, root, dirs_exist_ok=True)
         db.path.unlink(missing_ok=True)
         log.calls.clear()
         with db.connect() as con:
@@ -126,7 +133,7 @@ def create_server(
             raise ToolError("could not record the write") from exc
         return {"path": str(target.relative_to(root)), "bytes": len(data)}
 
-    register_test_routes(server, reset, state)
+    register_test_routes(server, reset, state, variants=True)
     return server
 
 

@@ -270,6 +270,10 @@ class HFClassifier:
         loader: Callable[[], Engine] | None = None,
     ) -> None:
         self.name = name or model_id
+        # How a long text is cut for the model: tokens in a window with the two special tokens, and
+        # tokens shared with the window before (`scanner.window_tokens` and `window_overlap`).
+        self.max_length = max_length
+        self.stride = stride
         self._loader: Callable[[], Engine] = loader or partial(
             build_engine, model_id, revision, labels_map, max_length, stride, batch_size
         )
@@ -433,14 +437,22 @@ def load_classifier(cfg: ScannerSettings) -> Classifier | None:
             fix="install keystone[scanner], or set scanner.classifier to none",
         )
         return None
-    return HFClassifier(spec.model_id, spec.labels, name=spec.key, revision=spec.revision)
+    return HFClassifier(
+        spec.model_id,
+        spec.labels,
+        max_length=cfg.window_tokens + SPECIAL_TOKENS,
+        stride=cfg.window_overlap,
+        name=spec.key,
+        revision=spec.revision,
+    )
 
 
-async def warm_up(classifier: Classifier) -> None:
+async def warm_up(classifier: Classifier, on_ready: Callable[[str], None] | None = None) -> None:
     """Load the model in the background when the gateway starts, so that the first scans of a
     call do not find it still loading and fall back to the rules (ADR-0011). A classifier with no
     `warm` has nothing to load. A model that cannot be loaded is logged once and never stops the
-    gateway: each scan then reports `model: "error"` and the rules decide."""
+    gateway: each scan then reports `model: "error"` and the rules decide. `on_ready` is called
+    with the name of the model once it has loaded, so that the gateway can say so."""
     warm = getattr(classifier, "warm", None)
     if warm is None:
         return
@@ -452,6 +464,8 @@ async def warm_up(classifier: Classifier) -> None:
         )
         return
     log.info("scanner_classifier_ready", classifier=classifier.name)
+    if on_ready is not None:
+        on_ready(classifier.name)
 
 
 def fetch_model(spec: ClassifierSpec) -> str:

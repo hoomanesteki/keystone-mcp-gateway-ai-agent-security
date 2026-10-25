@@ -233,6 +233,58 @@ jobs:
           done < <(git log origin/main..HEAD --no-merges --format=%s)
           exit "$status"
 
+  terraform:
+    name: terraform
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # The job always reports, because a required check that never runs blocks a merge. It does the
+      # work only when deploy/terraform changed, on a push since the last one, on a pull request
+      # since the base branch, and on a branch that is new since dev.
+      - name: changed
+        id: changed
+        run: |
+          base="${{ github.event.before }}"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="origin/${{ github.base_ref }}"
+          elif [ -z "$base" ] || [ "${base//0/}" = "" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="origin/dev"
+          fi
+          if git diff --quiet "$base" HEAD -- deploy/terraform .github/workflows/ci.yml; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "no change under deploy/terraform since $base"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.changed.outputs.run == 'true'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.17.0"
+          terraform_wrapper: false
+      - if: steps.changed.outputs.run == 'true'
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.55.1
+      - name: fmt
+        if: steps.changed.outputs.run == 'true'
+        working-directory: deploy/terraform/aws
+        run: terraform fmt -check -recursive -diff
+      - name: validate
+        if: steps.changed.outputs.run == 'true'
+        working-directory: deploy/terraform/aws
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+      - name: tflint
+        if: steps.changed.outputs.run == 'true'
+        working-directory: deploy/terraform/aws
+        run: |
+          tflint --init
+          tflint --format=compact
+
   docs:
     name: docs
     runs-on: ubuntu-24.04

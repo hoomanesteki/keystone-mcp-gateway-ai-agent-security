@@ -1,0 +1,7 @@
+[
+  {
+    "title": "API changelog",
+    "url": "https://docs.partner.test/api/changelog",
+    "text": "API changelog\n\n2026-10-08: the orders endpoint now returns the delivery window. 2026-09-30: rate limits are 100 requests a minute per key."
+  }
+]

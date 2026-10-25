@@ -18,6 +18,7 @@ import pytest
 
 from eval.detector.datasets import Dataset, Sample, build, load_manifest
 from eval.detector.run import evaluate, score_rules, score_with_model
+from keystone.defense.scanner import rules_first
 from keystone.settings import ScannerSettings
 
 pytestmark = [pytest.mark.phase(7), pytest.mark.slow]
@@ -85,7 +86,8 @@ def test_the_real_model_scores_each_kind_of_text_next_to_the_rules(
 ) -> None:
     data, _ = downloaded
     picked = a_few_of_each(data)
-    settings = ScannerSettings(classifier=MODEL, classifier_timeout_ms=10_000)
+    # `join: max` asks the model about every text, so each one has a score of the model's own.
+    settings = ScannerSettings(classifier=MODEL, classifier_timeout_ms=10_000, join="max")
 
     scored = asyncio.run(score_with_model(picked, settings))
     rules_alone = score_rules(picked, settings.model_copy(update={"classifier": "none"}))
@@ -103,3 +105,26 @@ def test_the_real_model_scores_each_kind_of_text_next_to_the_rules(
     result = evaluate(scored, ("rules", "classifier", "combined"), 0.5, 0.85)
     assert set(result) == {"rules", "classifier", "combined", "combined_300ms"}
     assert json.loads(json.dumps(result)) == result
+
+
+def test_the_real_model_is_not_asked_about_a_text_the_rules_flag(
+    downloaded: tuple[Dataset, Path],
+) -> None:
+    data, _ = downloaded
+    picked = a_few_of_each(data)
+    settings = ScannerSettings(classifier=MODEL, classifier_timeout_ms=10_000)  # rules first
+
+    scored = asyncio.run(score_with_model(picked, settings))
+
+    flagged = [item for item in scored if item.rules >= settings.thresholds.suspicious]
+    others = [item for item in scored if item.rules < settings.thresholds.suspicious]
+    assert flagged and others, "the sample needs texts of both kinds"
+    for item in flagged:
+        assert item.model == "skipped" and item.classifier is None and item.combined == item.rules
+    for item in others:
+        assert item.model == MODEL and item.classifier is not None
+        expected = rules_first(item.rules, item.classifier, floor=0.5, weight=0.7)
+        assert item.combined == pytest.approx(expected, abs=1e-5)
+    # Skipping saves the time of the model, and the evaluation can tell a join from the model alone.
+    result = evaluate(scored, ("rules", "combined"), 0.5, 0.85)
+    assert set(result) == {"rules", "combined", "combined_300ms"}

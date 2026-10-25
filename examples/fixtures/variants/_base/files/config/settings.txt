@@ -1,0 +1,3 @@
+api_endpoint=https://api.acme.test/v1
+region=us-east
+log_level=info

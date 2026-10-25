@@ -13,7 +13,7 @@ COMPOSE := docker compose -f deploy/docker-compose.yml $(if $(wildcard .env),--e
 # The console has its own package, and console/.nvmrc names the Node version it runs on.
 CONSOLE := pnpm --dir console
 
-.PHONY: help prose commits setup lint fmt type policy test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo demo-attack github-setup console-types console-check console-e2e sandbox-image echo-image
+.PHONY: help prose commits setup lint fmt type policy test-unit test-int test-e2e test check ci-local migrate gate up up-core down reset demo demo-attack github-setup console-types console-check console-e2e sandbox-image echo-image perf perf-smoke tf-plan
 
 help:
 	@grep -E '^[a-z0-9-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | column -t -s $$'\t'
@@ -76,7 +76,7 @@ ci-local: up-core ## the same steps as CI, run locally
 	docker run --rm keystone:ci version
 	$(MAKE) commits prose
 
-gate: up echo-image ## everything a phase gate runs: make gate PHASE=N
+gate: up echo-image ## everything a phase gate runs: make gate PHASE=N (9 runs phases 0 to 8 inside phase_9.sh)
 	@test -n "$(PHASE)" || { echo "usage: make gate PHASE=N" >&2; exit 2; }
 	@if [ $(PHASE) -ge 7 ]; then uv sync --locked --extra scanner --extra eval; fi
 	$(MAKE) lint type
@@ -85,9 +85,20 @@ gate: up echo-image ## everything a phase gate runs: make gate PHASE=N
 	@if [ $(PHASE) -ge 6 ]; then $(MAKE) console-check console-e2e; fi
 	@k=0; while [ $$k -le $(PHASE) ]; do \
 		f=scripts/smoke/phase_$$k.sh; \
+		if [ $$k -lt 9 ] && [ $(PHASE) -ge 9 ]; then k=$$((k+1)); continue; fi; \
 		if [ -f $$f ]; then echo "== smoke: phase $$k"; bash $$f || exit 1; fi; \
 		k=$$((k+1)); \
 	done
+
+perf: ## the performance matrix against the running stack: 5 targets, 200 sessions (about an hour)
+	$(RUN) python -m eval.perf.matrix
+
+tf-plan: ## terraform plan for deploy/terraform/aws with the example variables (needs AWS credentials)
+	cd deploy/terraform/aws && terraform init -input=false && terraform validate \
+		&& terraform plan -input=false -var-file=terraform.tfvars.example
+
+perf-smoke: ## 10 sessions x 5 calls against the running stack, as the nightly job does
+	$(RUN) python -m eval.perf.matrix --smoke
 
 console-types: ## regenerate console/src/api/schema.d.ts from the admin API's schema
 	$(RUN) python scripts/dump_openapi.py console/openapi.json

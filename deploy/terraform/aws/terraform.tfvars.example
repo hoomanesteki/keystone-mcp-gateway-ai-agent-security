@@ -1,0 +1,18 @@
+# Copy to terraform.tfvars and edit. Nothing secret belongs here: passwords and keys are generated
+# by Terraform and kept in Secrets Manager.
+region = "us-east-1"
+name   = "keystone"
+
+# Empty uses the ECR repository this stack creates, tag latest.
+image = ""
+
+# Narrow this to your own address (203.0.113.7/32) for a demo.
+ingress_cidrs = ["0.0.0.0/0"]
+
+# Set a certificate to serve HTTPS and redirect 80 to 443.
+acm_certificate_arn = ""
+
+enable_cognito = true
+enable_adot    = false
+
+desired_count = 1

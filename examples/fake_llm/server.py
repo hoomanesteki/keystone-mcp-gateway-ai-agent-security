@@ -23,6 +23,23 @@ choose by what they ask for:
 | `error-429` | 429 with `retry-after: 7` |
 | `error-500` | 500 |
 | `error-echo-key` | 401 that repeats the credential it was given, as some real APIs do |
+| `agent` | on `/v1/messages` with `tools`, a deterministic agent that calls tools (below) |
+
+A model whose name contains `agent`, asked with `tools`, answers like the worst-case agent of
+KS-708 with a script, so that the loop of `examples/agents/llm_agent.py`, the metering of the proxy
+and a budget that stops it can be exercised with no key. Each answer is one `tool_use` or the
+word "Done.":
+
+1. If a tool result of the conversation holds a `<!--ks-do:...-->` marker (examples/injections.py)
+   for a tool it was given and has not called with those arguments, it calls that tool: it obeys
+   what it reads, before anything else.
+2. Otherwise it makes the next call of its script that it has not made. The script is a
+   `<!--ks-script:[{"tool": "mail__list_emails", "args": {}}, ...]-->` comment in the first user
+   message. With none, the script is one call of `keystone__whoami`, if it is given that tool.
+3. Otherwise it says "Done." and the stop reason is `end_turn`.
+
+It does not stream. The tokens in are the words of the system prompt, of every message, of the
+tool results and of the inputs of its earlier calls, so a conversation costs more with each turn.
 
 If `FAKE_LLM_API_KEY` is set the server wants it: `x-api-key` for Anthropic and
 `Authorization: Bearer` for OpenAI. `GET /_state` says what it has been asked (never the key,
@@ -38,12 +55,15 @@ import asyncio
 import hmac
 import json
 import os
+import re
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+
+from examples.injections import find_markers, readable
 
 REPLY_WORDS = 12
 CACHE_READ = 5
@@ -53,12 +73,21 @@ SLOW_ANSWER_S = 0.5
 
 
 def words(value: Any) -> int:
-    """The words in a string, or in the text blocks of a list of content blocks."""
+    """The words in a string, or in the content blocks of a list: the text of a text block, what a
+    tool returned, and the input of a tool call."""
     if isinstance(value, str):
         return len(value.split())
     if isinstance(value, list):
-        return sum(words(block.get("text", "")) for block in value if isinstance(block, dict))
+        return sum(block_words(block) for block in value if isinstance(block, dict))
     return 0
+
+
+def block_words(block: dict[str, Any]) -> int:
+    if block.get("type") == "tool_result":
+        return words(block.get("content"))
+    if block.get("type") == "tool_use":
+        return words(json.dumps(block.get("input") or {}))
+    return words(block.get("text", ""))
 
 
 def prompt_tokens(payload: dict[str, Any]) -> int:
@@ -72,6 +101,109 @@ def prompt_tokens(payload: dict[str, Any]) -> int:
 def reply_tokens(payload: dict[str, Any]) -> int:
     asked = payload.get("max_tokens") or payload.get("max_completion_tokens") or REPLY_WORDS
     return max(1, min(int(asked), REPLY_WORDS))
+
+
+# -- the agent mode: a model that makes the calls of a script, and obeys what it reads
+
+SCRIPT_COMMENT = re.compile(r"<!--ks-script:(\[.*?\])-->", re.DOTALL)
+WHOAMI = "keystone__whoami"
+Call = tuple[str, dict[str, Any]]
+
+
+def text_of(content: Any) -> str:
+    """The text of the content of a message: a string, or the text blocks of a list."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(str(block.get("text", "")) for block in content if isinstance(block, dict))
+    return ""
+
+
+def calls_made(messages: Sequence[dict[str, Any]]) -> list[Call]:
+    """The tool calls the conversation holds already: name and input of each `tool_use` block."""
+    found: list[Call] = []
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") == "assistant" and isinstance(content, list):
+            found += [
+                (str(block.get("name")), dict(block.get("input") or {}))
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "tool_use"
+            ]
+    return found
+
+
+def read_results(messages: Sequence[dict[str, Any]]) -> str:
+    """Everything the tools returned in the conversation, as a reader of it would see it. The
+    content of a result is a string or a list of text blocks, and each block is read on its own,
+    because a tool that returns an object sends it as JSON and a block of JSON is read as the
+    strings in it."""
+    texts: list[str] = []
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") == "user" and isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    inner = block.get("content")
+                    parts = inner if isinstance(inner, list) else [{"text": inner}]
+                    texts += [
+                        readable(str(part.get("text") or ""))
+                        for part in parts
+                        if isinstance(part, dict)
+                    ]
+    return "\n".join(texts)
+
+
+def script_of(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The steps in the `ks-script` comment of the first user message, or none."""
+    first = next((m for m in messages if m.get("role") == "user"), None)
+    found = SCRIPT_COMMENT.search(text_of(first.get("content")) if first else "")
+    if found is None:
+        return []
+    try:
+        steps = json.loads(found.group(1))
+    except ValueError:
+        return []
+    return [s for s in steps if isinstance(s, dict) and isinstance(s.get("tool"), str)]
+
+
+def next_call(payload: dict[str, Any]) -> Call | None:
+    """The call the agent makes next, or None when it is done (see the top of this file)."""
+    offered = {t.get("name") for t in payload.get("tools") or [] if isinstance(t, dict)}
+    messages = [m for m in payload.get("messages") or [] if isinstance(m, dict)]
+    made = calls_made(messages)
+    for wanted in find_markers(read_results(messages)):
+        call = (wanted.tool, dict(wanted.args))
+        if wanted.tool in offered and call not in made:
+            return call
+    steps = script_of(messages) or ([{"tool": WHOAMI}] if WHOAMI in offered else [])
+    for step in steps:
+        args = step.get("args")
+        call = (step["tool"], dict(args) if isinstance(args, dict) else {})
+        if step["tool"] in offered and call not in made:
+            return call
+    return None
+
+
+def agent_message(payload: dict[str, Any], model: str) -> dict[str, Any]:
+    """The answer of the agent mode, in the shape of Anthropic's Messages API."""
+    call = next_call(payload)
+    turn = sum(1 for m in payload.get("messages") or [] if m.get("role") == "assistant") + 1
+    content: list[dict[str, Any]] = (
+        [{"type": "text", "text": "Done."}]
+        if call is None
+        else [{"type": "tool_use", "id": f"toolu_fake_{turn}", "name": call[0], "input": call[1]}]
+    )
+    return {
+        "id": f"msg_fake_{turn}",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": content,
+        "stop_reason": "end_turn" if call is None else "tool_use",
+        "stop_sequence": None,
+        "usage": {"input_tokens": prompt_tokens(payload), "output_tokens": reply_tokens(payload)},
+    }
 
 
 def sse(event: str | None, data: Any) -> bytes:
@@ -153,6 +285,19 @@ def create_app(api_key: str | None = None) -> FastAPI:
         ok, given = check(request, "anthropic", payload)
         if (refused := refusal("anthropic", model, ok, given)) is not None:
             return refused
+        if "agent" in model and payload.get("tools") is not None:
+            if payload.get("stream"):
+                return JSONResponse(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "the agent model does not stream",
+                        },
+                    },
+                    status_code=400,
+                )
+            return JSONResponse(agent_message(payload, model))
         n_in, n_out = prompt_tokens(payload), reply_tokens(payload)
         cached = "cached" in model
         usage: dict[str, int] = {"input_tokens": n_in, "output_tokens": n_out}

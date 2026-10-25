@@ -84,7 +84,7 @@ async def test_untrusted_and_sensitive_then_external_requires_approval(
         assert code_of(held) == "KS_APPROVAL_PENDING"
         [request] = await approver.pending()
         assert request.tool_name == "mail__send_email"
-        assert list(request.reasons) == ["rule-of-two"]
+        assert list(request.reasons) == ["rule-of-two", "untrusted-then-external-effect"]
         assert len(sent_mail(demo_upstreams)) == 1  # only the first mail went out
         # A person says yes, and the mail goes out then.
         await approver.approve("a colleague, and I wrote it")
@@ -189,6 +189,7 @@ async def test_the_reasons_of_the_poisoned_email_are_all_three(
         "external-email-needs-approval",
         "rule-of-two",
         "tainted-external-effect",
+        "untrusted-then-external-effect",
     ]
 
 

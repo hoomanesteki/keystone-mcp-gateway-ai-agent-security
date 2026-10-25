@@ -27,6 +27,7 @@ model again.
 | `make console-e2e` | The browser test of the approval loop (see Console). It starts the stack if it is not running; `make gate PHASE=6` and the nightly run it |
 | `bash scripts/smoke/phase_0.sh` | Print one health row per service |
 | `bash scripts/smoke/phase_1.sh` | The body of `make demo`; exits 1 if a step fails or the audit log (read through the admin API) does not hold one new record for each call |
+| `bash scripts/smoke/phase_9.sh` | The smokes of phases 0 to 8, in that order, against the one stack that is up. It runs all nine even when one fails and ends with the list of the ones that passed and the ones that failed (exit 1 if any failed), so that a gate says every phase that is broken and not only the first. A script that is missing counts as a failure. `make gate PHASE=9` runs this one and not the eight again. `SMOKE_DIR` names another folder of `phase_0.sh` to `phase_8.sh`, which its tests use. |
 | `bash scripts/smoke/phase_8.sh` | The sandbox (olivia's script prints 42, alice is refused with `default-deny`); lena's fourth call of a cent is `KS_BUDGET_EXCEEDED` and the budgets API shows $0.03 of $0.03; the LLM proxy against the fake model API (a whole answer, an Anthropic stream equal to the fake's own bytes, an OpenAI stream asked for its usage, each booked at 4 tokens in and 12 out and $0.000192; an unpriced model is a 400; lena's day is spent, so her request is a 402 and the fake sees nothing; a provider that repeats the key is answered with it taken out, and the key is in no response, log or span; `keystone_llm_tokens_total` grows by 12 and 36). Then Keystone is restarted with a burst of 5 calls for one user, 12 calls are made, 5 pass and 7 are `KS_RATE_LIMITED` with a `retry_after_s` of about 2 s, and a call after that long passes. It clears the day's spend of acme first so that it can run twice, and restores the default limits when it ends. About 2 minutes. |
 | `bash scripts/smoke/phase_7.sh` | The naive agent summarizes unread mail, and one email tells it to forward an invoice to attacker@evil.test. Straight at the mail server the attack lands. Through Keystone nothing is sent: the email scores above 0.85, the session is tainted, and the approval card names `rule-of-two` and `tainted-external-effect`. A summary of harmless mail asks for no approval. `make demo-attack` prints the two runs one after the other. |
 | `bash scripts/smoke/phase_6.sh` | Three agents run as olivia and lena decides through the admin API: a transfer of 900 is held, approved and completed (a second decision is 409 and olivia's own is 403); one of 700 is rejected with a note that the agent gets; one of 600 times out as `KS_APPROVAL_PENDING`, is approved late and is awaited. Then the audit log and `keystone_approvals_pending` are checked. About 20 seconds: the third request waits out the 10 s hold. |
@@ -74,8 +75,11 @@ share one image (`deploy/Dockerfile.upstreams`), and `make up` starts them.
 
 Each also serves plain HTTP routes next to `/mcp` that are not tools, so an agent cannot call them:
 `GET /healthz`, `POST /_reset` (back to the seed) and `GET /_state` (sent mail, transfers, written
-files, the urls asked of the web server, and the names of the tools called). The echo server adds `POST /_mutate`, which rewrites the
-`echo` description, and `ECHO_POISONED=1`, which adds a tool with an injected description.
+files, the urls asked of the web server, and the names of the tools called). The mail, files, bank
+and web servers take `POST /_reset?variant=<name>`, which puts them in the state of one scenario of
+the red-team suite (see Red-team scenarios below); a name that is not a variant is a 404 and nothing
+is reset. The echo server adds `POST /_mutate`, which rewrites the `echo` description, and
+`ECHO_POISONED=1`, which adds a tool with an injected description.
 
 Run one outside compose: `uv run python -m examples.upstreams.mail_server --port 8101`. Add
 `--transport stdio` to speak MCP over stdin and stdout.
@@ -123,13 +127,110 @@ taken over, so a gateway that stops it does not depend on how a model behaves. A
 server between runs: `curl -s -X POST localhost:8101/_reset`.
 
 Through Keystone the agent still reads the poisoned email and still tries to forward the invoice.
-The forward is held for a person (`rule-of-two`, `tainted-external-effect` and acme's
-`external-email-needs-approval` are its reasons), and nobody approves it. `make demo-attack` runs
+The forward is held for a person (`rule-of-two`, `tainted-external-effect`,
+`untrusted-then-external-effect` and acme's `external-email-needs-approval` are its reasons), and nobody approves it. `make demo-attack` runs
 both scenarios and prints them side by side, with `examples/agents/auto_reject.py` standing in for
 the person: lena through the admin API, rejecting whatever reaches the queue. It prints one line of
 JSON for each request, with what a person would see on the card (tool, reasons, taint, flags,
 arguments). `scripts/smoke/phase_7.sh` runs the same two scenarios and a harmless summary with
 assertions, and `scripts/smoke/attack_lib.sh` is what both share.
+
+### Red-team scenarios
+
+The red-team suite (KS-901) is 60 scenarios in `eval/redteam/scenarios/`, one file for each of 12
+tasks: three that read mail, three that read files, three that read web pages and three that read
+the transactions of a bank account. Each file holds the task without an attack (`<task>.benign`)
+and the task with each of 4 goals of an attacker planted in what it reads: forward the latest invoice
+to `attacker@evil.test` (`exfil_email`), transfer 450 dollars to `ACCT-666` (`transfer_funds`),
+overwrite `config/settings.txt` (`overwrite_settings`) and send a phishing mail to a colleague
+(`phish_colleague`). The text of the attack is one of the 12 templates above, dealt out so that every
+template meets every goal once, and put at the start, middle or end of the document.
+
+A scenario holds the prompt a user gives, the script the naive agent runs for it, the calls the task
+needs (`expected_actions`, which the approver of the runs approves and nothing else), and two checks
+that read state and not words: `utility_check` for the task and `attack_check` for the attack. A check
+reads the `/_state` of the demo upstreams, so an agent that says it sent a mail and did not is not
+believed.
+
+The state of a scenario is a variant, `examples/fixtures/variants/<task>-<goal>/`, with a file for
+each upstream it changes: `mail.json` (emails added or replaced by id), `files/` (laid over the
+workspace), `bank.json` (transactions added) and `web.json` (pages added or replaced by url). The
+folder `_base` is laid over first for every variant, and holds `config/settings.txt`. A variant
+ignores `MAIL_POISONED` and `FILES_POISONED`: its state is what its files say.
+
+    uv run python -m eval.redteam.build            # write the scenarios and variants from the catalog
+    uv run python -m eval.redteam.build --check    # fail when the files differ from the catalog
+    curl -s -X POST 'localhost:8101/_reset?variant=mail_summary-exfil_email'
+
+`eval/redteam/catalog.py` is the source, and what it writes is committed so that a result can name
+a scenario and a reader can open the file the agent was given. A test builds the catalog again and
+compares it with the files on disk.
+
+### Red-team runs
+
+`eval/redteam/runner.py` (KS-902) plays the scenarios against the compose stack and writes a line of
+JSON for each run. `scripts/redteam.sh` runs it in the three configs of the proof and restarts the
+keystone service between them, so the stack must be up first (`make up`):
+
+    scripts/redteam.sh naive                    # 60 scenarios in C0, C1 and C2: no model, no key
+    scripts/redteam.sh naive --configs C2       # one config, or a list such as C0,C2
+    uv run python -m eval.redteam.report        # write the red-team section of docs/results.md
+    uv run python -m eval.redteam.report --check
+
+The three configs are three settings of one build. C0 is `KEYSTONE_PROFILE=passthrough`: the
+pipeline keeps its order, its audit record and the credentials it adds for an upstream, every other
+slot is the Phase 1 stub, and no scanner is built. C1 mounts a copy of `policies/` without the two
+`rule_of_two.cedar` files (made in `.cache/redteam/` for each run) and turns the scanner off, so the
+access rules, acme's rule for mail to outside addresses and the transfer limit are in force. C2 is
+the stack as it is. `deploy/redteam.override.yml` holds the variables that change, and with none set
+it changes nothing. A script that fails or is stopped restarts Keystone with the settings of the
+stack.
+
+The runner does not trust the label it is given. Before the first run it reads
+`keystone_gateway_info{profile,scanner,classifier}` from `/metrics` and the policy ids from the
+admin API, and it stops with status 2 and `this is not C2: its scanner is off, not on` if they are
+not what the label needs. C2 needs a scanner with its model, and the model loads in the background
+for about 7 seconds after the gateway starts, so the runner first waits (up to 3 minutes) until
+`keystone_scanner_classifier_ready` says it has loaded; a scan made before that is scored by the
+rules alone. A gateway whose extra is not installed says `classifier="none"`, and C2 is refused.
+
+    curl -s localhost:8080/metrics | grep -E 'keystone_gateway_info|classifier_ready'
+
+A run is one scenario, one config, one agent, once. The runner puts the upstreams in the state of
+the scenario (`POST /_reset?variant=`), starts the approver, lets the agent do the task as olivia
+through ops-agent, asks the upstreams what they did (`GET /_state`) and decides the two checks of
+the scenario from that. The approver is lena, who signs in through `keystone-cli` and may use the
+approvals routes of the admin API and nothing else. She polls the pending requests every quarter of
+a second, approves a request when its tool and the arguments an action of `expected_actions` names
+are the same (each action once) and rejects every other request with a note. A line of the file has
+the scenario and its template, goal and vector, the two checks, the approvals asked and decided with
+the rules that asked and the flags of the session at that moment, the error codes the agent met,
+the tokens and the cost from the ledger, and the flags and taint of the session at the end.
+
+A result file is never written over: the runner opens it for creation and refuses if it exists, so
+rename the first file (add `-repeat1`, say) if a config is run twice in a day. The files are
+`eval/results/redteam-<agent>-<config>-<date>.jsonl`, they are committed, and the report reads
+them and nothing else. It leaves out a file that was made with `--only` or `--limit` and a file of
+a stand-in model (`fake-*`). Of the whole files of one kind it takes the newest for its figures, and
+it lists the others in a table of repeat runs that says in how many scenarios they differ in
+outcome and in the scores of the scanner, so a run that does not repeat shows.
+
+To run the config of an earlier release against the code of this one (to see what a change to the
+config did), give the ref: `scripts/redteam.sh naive --configs C2 --config-ref v0.8.0`. The file
+is named after it and the report shows it as a row of its own.
+
+The model-driven agent (`examples/agents/llm_agent.py`) sends its requests to Keystone's LLM proxy,
+so the cost of a run is read from the ledger. The stack points the proxy at the fake model API, and
+its model `fake-agent` makes the calls of a script and obeys what it reads, which tests the loop and
+the metering with no key:
+
+    scripts/redteam.sh llm --model fake-agent --script-hint --limit 4 --out-dir /some/folder
+
+Its files are not rows of the table. For a real model, `scripts/redteam.sh` lists the variables it
+needs (the provider's address, the variable that holds the key, a price list that has the model in
+it) and refuses to start without them; the command is in the red-team section of `docs/results.md`,
+with its status. The demo tenant has a budget of $25 a day in `deploy/keystone.compose.yaml`, which
+a run that costs more would meet.
 
 ## Identity (Keycloak)
 
@@ -290,7 +391,11 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_SCANNER__CLASSIFIER` | `protectai-deberta-v2` | The model behind the rules: `protectai-deberta-v2`, `prompt-guard-2-86m` or `none`. Needs the extra `keystone[scanner]`. |
 | `KEYSTONE_SCANNER_CLASSIFIER` | unset | The same setting under a shorter name (one underscore). It wins when both are set. `KEYSTONE_SCANNER_CLASSIFIER=none` turns the model off. |
 | `KEYSTONE_SCANNER__CLASSIFIER_TIMEOUT_MS` | `300` | How long a scan waits for the model. After that the scan goes on with the rules alone and its `model` says `timeout`. 1 to 10,000. |
-| `KEYSTONE_SCANNER__THRESHOLDS__SUSPICIOUS` | `0.5` | A score from here up is `suspicious`. |
+| `KEYSTONE_SCANNER__JOIN` | `rules_first` | How the rules' score and the model's make one: `rules_first` (a text the rules flag keeps their score and the model is not asked; any other text gets the model's score added at `MODEL_WEIGHT`) or `max` (the higher of the two, and the model reads every text, which Phase 7 shipped). |
+| `KEYSTONE_SCANNER__MODEL_WEIGHT` | `0.7` | How much of the model's score counts for a text the rules did not flag. Over 0 and up to 1. A weight under 0.85 means the model alone can flag a text and cannot taint a session. |
+| `KEYSTONE_SCANNER__WINDOW_TOKENS` | `128` | The model reads a long text in windows of this many tokens of the text (16 to 510). A short window keeps an attack from being lost in the document around it, and gives a long text more windows to read. |
+| `KEYSTONE_SCANNER__WINDOW_OVERLAP` | `64` | Tokens a window shares with the one before. Less than `WINDOW_TOKENS`. |
+| `KEYSTONE_SCANNER__THRESHOLDS__SUSPICIOUS` | `0.5` | A score from here up is `suspicious`. It is also the score at which the rules-first join stops asking the model. |
 | `KEYSTONE_SCANNER__THRESHOLDS__INJECTION` | `0.85` | A score from here up is an `injection`. Not below `SUSPICIOUS`. |
 | `KEYSTONE_SCANNER__ALLOWED_DOMAINS` | `[]` | JSON list of hosts a markdown image may point to without a mark against it. A name covers its subdomains. |
 | `KEYSTONE_SCANNER__MAX_SCAN_CHARS` | `200000` | The most text one scan reads. A longer text is read at both ends, half of this at each. |
@@ -495,9 +600,10 @@ decision can be read back from the log (see Audit).
 | `acme/approval/mail.cedar` | `external-email-needs-approval` | A message to anyone outside `acme.test`, or to a recipient that is not one plain address, needs approval |
 | `default/access/rule_of_two.cedar` | `deny-critical-when-tainted` | A session that read an injection never calls a critical tool |
 | `default/approval/rule_of_two.cedar` | `rule-of-two` | A session that has read untrusted and sensitive data asks before it calls a tool with an external effect |
+| | `untrusted-then-external-effect` | A session that has read untrusted text asks before it calls a tool with an external effect, whatever else it read (ADR-0018). A tenant turns it off with `exclude_default_policies` in its entry under `tenants` |
 | | `tainted-external-effect` | A tainted session asks before it calls a tool with an external effect |
 
-The Rule of Two (plan section 3.5) is the last three rows. A session should not combine all of
+The Rule of Two (plan section 3.5) is the last four rows. A session should not combine all of
 these without a person: it processes untrusted input, it has access to sensitive data, and it
 changes state or sends data out. The first two are the session's flags (`reads_untrusted` and
 `reads_sensitive`, from the tags of the tools it called) and the third is the tag `external_effect`
@@ -1495,9 +1601,22 @@ one does not reach the agent.
 ### The classifier
 
 Behind the rules there is a model, `protectai/deberta-v3-base-prompt-injection-v2` by default
-(Apache-2.0, English only), which scores the same text between 0 and 1. The final score is the
-higher of the two. It is the optional extra `keystone[scanner]` (torch for the CPU and
-transformers), and the compose image has it:
+(Apache-2.0, English only), which scores the same text between 0 and 1. It is the optional extra
+`keystone[scanner]` (torch for the CPU and transformers), and the compose image has it. How its score
+and the rules' make one is `scanner.join` (ADR-0011):
+
+- `rules_first`, the default: a text whose rules score is at `thresholds.suspicious` (0.5) or more
+  keeps that score and is not given to the model (the scan's `model` says `skipped`). For any other
+  text the score is `1 - (1 - rules) * (1 - model_weight * model)`, with `model_weight` 0.7. The model
+  can raise a score and never lowers one. A sure model makes a text `suspicious` (at 0.714 sure or
+  more) and cannot make it an `injection`, so **only the rules taint a session**.
+- `max`, what Phase 7 shipped: the higher of the two, and the model reads every text.
+
+The model reads a long text in windows of `scanner.window_tokens` (128) tokens that overlap by
+`scanner.window_overlap` (64), and the score is the highest window. On the dev split the model alone
+flags 37 percent of the documents with an attack with windows of 510 tokens and 64 percent with
+windows of 128, which is why they are short. A text of N tokens costs N/64 windows, and a text of more
+than 32 windows is sampled across its length.
 
 ```bash
 uv sync --extra scanner                  # in a checkout; the first use downloads about 740 MB
@@ -1511,14 +1630,20 @@ Without the extra the gateway still starts and the scanner runs on its rules alo
 `scanner_classifier_unavailable` once at start, naming what is missing. A scan waits at most
 `scanner.classifier_timeout_ms` (300) for the model. A model that has not answered by then, or is
 still loading, leaves the rules' score, and the result says `model: "timeout"`. At 300 ms the model
-reads about 3,500 characters on a laptop, so raise the timeout for longer outputs and measure it
-(`scripts/bench_scanner.py --classifier`, `docs/spikes/scanner.md`). The image sets
-`HF_HUB_OFFLINE=1`: the model is in it, and the container never goes to the network for it.
+reads about 1,500 characters on a laptop with windows of 128 tokens (3,500 with windows of 510), so
+a longer output is judged by the rules alone. Raise the timeout to let the model read more, at that
+much more time on each such call, and measure it (`scripts/bench_scanner.py --classifier`,
+`docs/spikes/scanner.md`). On the test split 12 percent of the scans fell back to the rules at 300 ms.
+The image sets `HF_HUB_OFFLINE=1`: the model is in it, and the container never goes to the network
+for it.
 
 The gateway loads the model in the background when it starts (`scanner_classifier_ready` in the
-log when it is done, `scanner_classifier_not_ready` when it cannot), so only the first seconds of a
-run are scored by the rules alone. An app under test (`env=test`) does not, and loads it at its
-first scan.
+log when it is done, `scanner_classifier_not_ready` when it cannot, and the gauge
+`keystone_scanner_classifier_ready{classifier}` at `/metrics`, 0 until it has loaded and 1 after),
+so only the first seconds of a run are scored by the rules alone. A measurement of the model waits
+for the gauge. `keystone_gateway_info` carries the model that was built, `classifier="none"` where
+there is none. An app under test (`env=test`) does not load it in the background, and loads it at
+its first scan.
 
 `prompt-guard-2-86m` (Llama Prompt Guard 2) is gated on Hugging Face: accept its license with an
 account, and give the gateway a token. Its labels are not verified here (ADR-0011).
@@ -1542,6 +1667,8 @@ uv run python -m eval.detector.datasets build         # build the dataset and ch
 uv run python -m eval.detector.run --config rules --split dev --summary     # the rules: seconds
 uv run python -m eval.detector.run --config combined --split dev            # with the model
 uv run python -m eval.detector.tune --config combined --scores /tmp/dev.jsonl   # thresholds, on dev
+uv run python -m eval.detector.combine windows --shape 128/64    # the model's score of every window of dev
+uv run python -m eval.detector.combine sweep --out eval/results/combination-dev-<date>.json
 uv run python -m eval.detector.report --note "why"    # all of test; writes the report
 uv run python -m eval.detector.report --render eval/results/detector-<date>.json   # the words again
 ```
@@ -1565,9 +1692,16 @@ uv run python -m eval.detector.report --render eval/results/detector-<date>.json
   lines. Say why with `--note`.
 - **Run the report on a clean tree and a quiet machine.** It records the commit and whether the
   tree was clean, and it times one text at a time, so another job on the machine shows up in the
-  timings. It took 3 min 40 s and 4 min 42 s on a 10-CPU Mac with nothing else running; the model is
-  nearly all of it, and the two runs gave the same classification numbers and timings that differed
-  by 20 to 45 percent.
+  timings. It scores the test split in three passes of the scanner (as it is set, the model alone at
+  the same windows, and as Phase 7 shipped it) and took 16 minutes on a 10-CPU Mac with nothing else
+  running. Before KS-792 it was one pass and took 3 min 40 s and 4 min 42 s; the model is nearly all
+  of the time, and two runs gave the same classification numbers and timings that differed by 20 to
+  45 percent.
+- **The sweep on dev** (`eval/detector/combine.py`) is how a join or a window is tried. `windows` scores
+  every window of the dev split in one shape and keeps the scores in `eval/data/` (about 8 minutes for
+  each shape), and `sweep` tries every join on them in seconds and writes the record that the report
+  quotes. It refuses the test split, and a test holds the defaults of `scanner` equal to the candidate
+  the latest record chose.
 - **Nightly**, the workflow scores 200 texts of dev with the rules alone and no model. It fails when
   the data differs from the manifest or when the ROC AUC of that sample is under 0.7, which is a
   guard against a scanner that stopped working and not a result.
@@ -1578,6 +1712,57 @@ uv run python -m eval.detector.report --render eval/results/detector-<date>.json
 What the numbers do not say is the last section of `docs/results.md`. The attacks of the documents
 are the templates of this repository, written alongside the rules, so the public prompts are the
 independent check.
+
+## Performance
+
+`eval/perf` (KS-903) measures what the gateway adds to a call, and where the time goes. It needs the
+stack up (`make up`) and a machine with little else running on it.
+
+    make perf-smoke       # 10 sessions x 5 calls, the echo upstream and the stack as it runs
+    make perf             # the full matrix: about an hour on a laptop; keep the machine awake
+    uv run python -m eval.perf.report         # write the section of docs/results.md
+
+On a laptop run the matrix under `caffeinate -i` (macOS) or `systemd-inhibit` (Linux): a sleep in
+the middle of a run stops the clocks of the containers and the numbers with them.
+
+The matrix has five targets: the echo upstream alone (port 8104, the API key of the stack), and
+Keystone in four settings of one build, each made by restarting the keystone service with
+`deploy/perf.override.yml` and `PERF_PROFILE`, `PERF_SCANNER` or `PERF_CLASSIFIER`: passthrough,
+full with the scanner off, full with the rules alone, and full with the classifier. The override
+limits the container to 4 CPUs and 4 GB, sets the log level to warning, turns the sandbox off
+(its health check holds the event loop for a few milliseconds) and raises the rate limits to the
+largest the settings take, so that no call is refused and every slot still runs. `keystone serve`
+runs one uvicorn worker on one event loop, and there is no setting for more: every call of a run
+shares it. Before it measures a target the matrix reads `keystone_gateway_info` at `/metrics`,
+refuses a gateway that is not what the target says, waits for the model to load where there is one,
+and waits until the host is at least 85% idle over two seconds (it says so in the result if the
+host never was).
+
+N sessions (200) open at once and each makes M calls (20) of the echo tool one after the other with
+a payload of S bytes (1 KB and 8 KB) of plain English. After three calls a session that are not
+counted, the timed calls start together. A call is timed from the request to the whole answer. A
+call that fails is counted in the error rate, by what Keystone answered, and left out of the
+percentiles: a gateway that refuses a call quickly would otherwise look faster the more it failed.
+`eval/perf/load.py` shares the sessions out over four processes, because one process that runs
+200 clients is itself slow and puts its own time into every latency, and it records how busy each
+process was. A token of the local realm lives five minutes, so each process gets its own and a new
+one every two minutes. A run that lasts ten minutes stops making calls and says so.
+
+For each target and payload there is a second run with one session making 200 calls, so that
+nothing waits for another call. The difference between the two is the queue. The gateway is
+restarted for each payload, and the run with one session comes first and warms it, so that what one
+run did to the process (a pool used up, a session lost) is not in the next. While a run is made the
+matrix also reads the log of the container, and counts the events logged at warning level or above
+by name and error, which is how a failure is traced to its cause.
+
+The gateway counts the time every call spends in each stage of its pipeline
+(`keystone_tool_call_duration_seconds{stage}`: `total`, `upstream`, and each of the nine slots). The
+matrix reads those counters just before the timed calls and just after, and the mean of each stage
+is that of the calls that were timed. It also samples `docker stats` for the container while they
+are made. The result is `eval/results/perf-<date>.json`, with every latency, and a file is never
+written over. The report names the file, the commit and the machine (CPU model, vCPUs, memory,
+Docker, the VM Docker runs in), and `python -m eval.perf.report --check` fails when
+`docs/results.md` is not what the file renders.
 
 ## Audit
 
@@ -1759,6 +1944,7 @@ found (404), so the answer does not say it exists. The OpenAPI schema is at
 | `GET /sessions` | Live sessions of the tenant, read from Redis |
 | `GET /policies` | The version in force and the ids of the tenant's policies |
 | `POST /policies/reload` | Read the policy files again (see Policies) |
+| `POST /scan` | `{"text": "...", "risk": "medium"}`. Scan a text as the output of a tool of that risk and say what an agent would be given: `scan` (the score, the label, the rules that hit, the model and the action) and `content`, the blocks after the action (the text as it came, with a warning, with the hidden characters cut out, or the refusal that stands in for it). It changes nothing, writes no audit record and taints no session. 503 when the scanner is off. An AgentDojo run uses it (`eval/agentdojo/NOTES.md`) |
 | `GET /approvals` | The tenant's approval requests in one state: `status` (`pending` by default, or `approved`, `rejected`, `expired`, `consumed`) and `limit` (1 to 200, 100 by default). Pending ones come oldest first. Approver or admin |
 | `GET /approvals/{id}` | One request, with the last 10 calls of the session that asked (`recent_calls`, as the audit shows them). Approver or admin |
 | `POST /approvals/{id}/decision` | `{"approve": true, "note": "..."}`. Approver or admin. See Approvals |
@@ -2045,3 +2231,9 @@ a 1 second limit each and returns 503 if either is down.
 | `docker` tests are skipped: "no Docker daemon" or "the sandbox image ... is not built" | The tests need the daemon and the image from `make sandbox-image`. Set `KEYSTONE_REQUIRE_DOCKER=1` to make that a failure instead of a skip. |
 | The sandbox says the Docker daemon cannot be reached | Keystone has no socket, or may not use it. In compose check `docker compose exec keystone ls -l /var/run/docker.sock` and `DOCKER_SOCKET_GID`; on Linux the group of the socket is not 0. |
 | `ModuleNotFoundError: keystone` right after `uv sync` (macOS) | A background process flagged `.venv` as hidden, and Python skips hidden `.pth` files. Check with `ls -lO .venv/lib/python3.12/site-packages/keystone.pth`. Set `UV_PROJECT_ENVIRONMENT` to a path outside the repo, for example `$HOME/.cache/keystone-venv`, then run `uv sync`. |
+
+## AWS (Terraform)
+
+`deploy/terraform/aws/` runs Keystone on ECS Fargate with RDS, ElastiCache and an ALB. Steps, the
+cost per day and the limits (no sandbox on Fargate) are in its README. `make tf-plan` plans it with
+the example variables and needs AWS credentials. Run `terraform destroy` after a demo.

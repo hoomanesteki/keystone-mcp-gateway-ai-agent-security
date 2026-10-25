@@ -147,6 +147,7 @@ def create_app(
         [t.id for t in settings.tenants],
         include_demo=settings.policy.include_demo,
         recorder=PolicyVersionRepo(sessions),
+        exclusions={t.id: t.exclude_default_policies for t in settings.tenants},
     )
     policies.start()
     # What holds a new tool whose description, or the description of a field of its schema, reads
@@ -268,14 +269,19 @@ def create_app(
             now=budget_clock,
         )
     # The scanner reads every output (KS-704). Its model is not loaded here: the lifespan starts
-    # that in the background, and until it is ready a scan is answered by the rules alone.
-    classifier = load_classifier(settings.scanner) if settings.scanner.enabled else None
+    # that in the background, and until it is ready a scan is answered by the rules alone. The
+    # passthrough profile (KS-902) builds no scanner at all.
+    scanning = settings.scanner.enabled and settings.profile == "full"
+    classifier = load_classifier(settings.scanner) if scanning else None
+    # What was built, and not what was asked for: with the extra missing the scanner runs on its
+    # rules alone, and the info says "none" so that a measurement of the model is not made of it.
+    metrics.set_info(settings.profile, scanning, classifier.name if classifier else "none")
     # Not in env=test: the tests start hundreds of apps and none of them wants a 700 MB model
     # loaded on its behalf. In a test the model loads at the first scan, if the test scans at all.
     warmed = classifier if settings.env != "test" else None
     scanner = (
         build_scanner_guard(settings.scanner, classifier, on_error=metrics.scan_failed)
-        if settings.scanner.enabled
+        if scanning
         else None
     )
     pipeline = build_pipeline(
@@ -356,7 +362,15 @@ def create_app(
                     log.info("startup_sync", **report.model_dump())
                 await stack.enter_async_context(
                     background_tasks(
-                        registry, health, settings, policies, approvals, notifier, warmed, sandbox
+                        registry,
+                        health,
+                        settings,
+                        policies,
+                        approvals,
+                        notifier,
+                        warmed,
+                        sandbox,
+                        metrics.classifier_loaded,
                     )
                 )
                 await stack.enter_async_context(manager.run())
@@ -409,6 +423,7 @@ def create_app(
             else None,
             approvals=approvals,
             budgets=budgets,
+            scanner=scanner,
         )
     )
     app.mount(PREFIX, admin_api)
@@ -463,6 +478,7 @@ async def background_tasks(
     notifier: ApprovalNotifier | None = None,
     classifier: Classifier | None = None,
     sandbox: SandboxRunner | None = None,
+    on_classifier_ready: Callable[[str], None] | None = None,
 ) -> AsyncIterator[None]:
     """Run the periodic sync (unless its interval is 0), the watch for changes made by other
     processes, the health probes (unless their interval is 0), the policy reload on SIGHUP, the
@@ -472,7 +488,7 @@ async def background_tasks(
         group.start_soon(registry.run_watch)
         group.start_soon(reload_on_sighup, policies)
         if classifier is not None:
-            group.start_soon(warm_up, classifier)
+            group.start_soon(warm_up, classifier, on_classifier_ready)
         if approvals is not None:
             group.start_soon(approvals.run_sweeper)
         if notifier is not None:

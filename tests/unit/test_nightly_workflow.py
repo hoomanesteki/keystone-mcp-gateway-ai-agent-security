@@ -117,3 +117,13 @@ def test_the_detector_job_fails_when_the_rules_rank_worse_than_the_guard() -> No
     assert match is not None
     assert 0.5 < float(match.group(1)) < 0.9
     assert "set -o pipefail" in evaluation  # the pipe to the summary must not hide a failure
+
+
+@pytest.mark.phase(9)
+def test_it_runs_the_performance_smoke_after_the_stack_is_up_and_the_e2e_tests_pass() -> None:
+    steps = commands()
+
+    assert steps.index("make test-e2e") < steps.index("make perf-smoke")
+    assert steps.index("make up") < steps.index("make perf-smoke")
+    # It is a step of the job that already has the stack, and before the stack is stopped.
+    assert steps.index("make perf-smoke") < steps.index("make down")
