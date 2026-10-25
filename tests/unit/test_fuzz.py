@@ -38,7 +38,7 @@ SECRETISH = st.sampled_from(
         "4111 1111 1111 1111",
         "123-45-6789",
         "Bearer abcdefghijklmnop",
-        "AKIAABCDEFGHIJKLMNOP",
+        "AKIA" + "ABCDEFGHIJKLMNOP",
         "-----BEGIN RSA PRIVATE KEY-----\nabc",
         "x" * 3000,
     ]
