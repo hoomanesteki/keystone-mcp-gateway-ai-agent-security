@@ -1,6 +1,128 @@
 # Runbook
 
-How to run the local stack and what each part listens on. This file grows with the phases.
+How to run Keystone, and what to do on an ordinary day. The first two sections are the short
+version. Everything after them is reference: every setting, port, command and error, by topic.
+
+## Getting started
+
+You need Docker with Compose v2 (I run Docker Desktop with 8 GB for its VM), GNU make and uv 0.12.
+The console also needs Node 26 and pnpm 12.
+
+1. Install the Python dependencies: `uv sync`. uv installs Python 3.12 if it is missing.
+2. Start the stack: `make up`. It builds the images, starts every service and returns when all of
+   them report healthy. The first build took 20 minutes on a laptop; a cold start after that takes
+   about 30 seconds (see Local stack).
+3. Check it: `bash scripts/smoke/phase_0.sh` prints one health row per service.
+4. Watch an agent work through Keystone: `make demo`. It ends with
+   `audit records added: 3, tool calls made: 3, steps ok: 4 of 4`.
+5. Watch an attack fail: `make demo-attack` runs the same poisoned email without Keystone and
+   through it.
+6. Open the console: `cd console && pnpm install && pnpm dev`, then `http://localhost:5173`. Sign
+   in as `lena` (approver) or `root` (admin).
+
+No `.env` is needed. The defaults in `.env.example` apply when it is absent; copy it to `.env` to
+move a port or change a password. Every user's password is `<name>-dev-password`, and all of these
+values are public, so use them on your own machine only.
+
+To point your own MCP client at Keystone, use `http://localhost:8080/mcp` with
+`Authorization: Bearer <token>`. `scripts/get_token.sh olivia ops-agent` prints a token, and it
+expires after five minutes.
+
+## Day-to-day operations
+
+The commands below shorten `docker compose -f deploy/docker-compose.yml` to `dc`:
+
+```bash
+alias dc='docker compose -f deploy/docker-compose.yml'
+```
+
+The `keystone` CLI runs inside the Keystone container (`dc exec keystone keystone ...`), where the
+database and the vault key are already set. `keystone policy reload` is the exception: it talks to
+the admin API, so it runs on the host with `uv run`.
+
+| Task | Command | What you should see |
+|---|---|---|
+| Start | `make up` | one `Healthy` line per container |
+| Stop, keep the data | `make down` | the containers removed, the volumes kept |
+| Reset everything | `make reset && make up` | an empty database, the Keycloak realm imported again |
+| Status | `dc ps` | every service `healthy` |
+| Logs | `dc logs -f keystone` (or `keycloak`, `postgres`, ...) | JSON lines, one per event |
+| Restart Keystone only | `dc restart keystone` | it reads `deploy/keystone.compose.yaml` again |
+
+### Decide a held call
+
+A call the policy sends to approval waits for a person. Sign in to the console as `lena` (or any
+user with the `approver` or `admin` role) and use the Approvals page. A person cannot decide their
+own request. The API route is in Approvals, below.
+
+### Reload the policies
+
+The compose stack mounts `policies/` from this checkout, so edit the files on the host, then:
+
+```bash
+uv run keystone policy test policies tests/policy_cases --coverage    # check them first
+export KEYSTONE_ADMIN_TOKEN=$(scripts/get_token.sh root keystone-cli)
+uv run keystone policy reload
+```
+
+It prints `policies reloaded: version <hash> (changed)`, or `(unchanged)`. A set with any problem
+is refused, every problem is printed, the command exits 1 and the old rules stay in force.
+
+### Verify the audit log
+
+```bash
+dc exec keystone keystone audit verify
+```
+
+`OK, N records` and exit 0 means the chain is whole. `broken at seq N: hash mismatch` or
+`broken at seq N: gap` and exit 2 names the first record that was edited or removed. The console's
+Audit page checks the newest records; this command checks all of them.
+
+### Approve a changed tool
+
+A tool whose description or schema changed is quarantined and refused until someone approves the
+change.
+
+```bash
+dc exec keystone keystone tool list --status quarantined
+dc exec keystone keystone tool show echo__echo            # the diff and a fingerprint
+dc exec keystone keystone tool approve-change echo__echo --expect <fingerprint>
+```
+
+`--expect` refuses the approval if the definition changed again after you read it. The Tools page
+of the console (as `root`) does the same.
+
+### Add or replace a credential
+
+The key goes in on standard input, never as an argument, so a process list cannot show it:
+
+```bash
+printf '%s' "$CRM_API_KEY" | dc exec -T keystone keystone cred set --upstream crm --header X-Api-Key
+dc exec keystone keystone cred list                        # who, which key id, when; no values
+```
+
+Add `--user alice` for a per-user credential. `cred set` replaces the credential it finds for that
+upstream and user.
+
+### Rotate the vault key
+
+The vault key is `KEYSTONE_MASTER_KEYS`: the first key encrypts, every listed key decrypts.
+
+1. Make a new key:
+   `uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+2. In `.env`, set `KEYSTONE_MASTER_KEYS=<new>,<old>` and run `make up` to restart Keystone with it.
+3. Re-encrypt: `dc exec keystone keystone cred rotate-keys` prints
+   `rotated N, already under the first key 0`.
+4. Set `KEYSTONE_MASTER_KEYS=<new>` alone and run `make up` again.
+
+If step 3 exits 1, it names the rows it could not decrypt: they were written under a key that is
+no longer listed. Keep the old key until it exits 0.
+
+### Add a tool server
+
+List it under `upstreams` in `deploy/keystone.compose.yaml`, with a `risk` and tags for each tool
+(see Upstreams), store its key with `cred set` if it needs one, then `dc restart keystone`.
+`dc exec keystone keystone upstream list` shows it, and its tools appear after the first sync.
 
 ## Local stack
 
