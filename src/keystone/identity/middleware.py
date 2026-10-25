@@ -97,6 +97,7 @@ class Authenticator:
                 settings.oidc_issuer,
                 settings.oidc_audience,
                 discovery_url=settings.oidc_discovery_url,
+                max_age_s=settings.oidc_jwks_max_age_s,
             )
 
     async def principal(self, headers: Headers) -> Principal:

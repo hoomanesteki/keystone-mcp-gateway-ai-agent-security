@@ -8,8 +8,8 @@ from typing import Any
 import anyio
 import jwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric import rsa
-from jwt.algorithms import RSAAlgorithm
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from jwt.algorithms import ECAlgorithm, RSAAlgorithm
 from structlog.testing import capture_logs
 
 from keystone.core.types import Principal
@@ -370,6 +370,78 @@ async def test_a_token_signed_before_a_rotation_is_refused_afterwards(fake_idp: 
 
 
 @pytest.mark.phase(3)
+async def test_a_withdrawn_key_stops_validating_when_the_set_reaches_its_max_age(
+    fake_idp: FakeIdp,
+) -> None:
+    # The provider withdraws a key (a compromised one, say) and nobody sends a token under the
+    # new kid: nothing misses the cache, so only the age of the set can bring the fetch.
+    clock = Clock()
+    check = validator(fake_idp, clock=clock, max_age_s=600)
+    old = fake_idp.token_for("alice")
+    await check.validate(old)
+    fake_idp.rotate()
+
+    clock.now += 599
+    assert (await check.validate(old))["sub"] == "alice"
+    assert fake_idp.jwks_requests == 1
+    clock.now += 1
+    error = await refused(check, old)
+
+    assert error.reason == "unknown_key"
+    assert fake_idp.jwks_requests == 2
+
+
+@pytest.mark.phase(3)
+async def test_an_aged_set_is_kept_while_the_idp_is_down(fake_idp: FakeIdp) -> None:
+    clock = Clock()
+    check = validator(fake_idp, clock=clock, max_age_s=600)
+    token = fake_idp.token_for("alice")
+    await check.validate(token)
+    fake_idp.jwks_status = 503
+    clock.now += 600
+
+    assert (await check.validate(token))["sub"] == "alice"
+    assert (await check.validate(token))["sub"] == "alice"
+    assert fake_idp.jwks_requests == 2  # one try, not one per request
+    clock.now += 60
+    assert (await check.validate(token))["sub"] == "alice"
+    assert fake_idp.jwks_requests == 3  # and again a minute later
+
+
+@pytest.mark.phase(3)
+async def test_a_shorter_cache_control_max_age_is_honoured(fake_idp: FakeIdp) -> None:
+    fake_idp.jwks_cache_control = "public, max-age=120, must-revalidate"
+    clock = Clock()
+    check = validator(fake_idp, clock=clock)
+    old = fake_idp.token_for("alice")
+    await check.validate(old)
+    fake_idp.rotate()
+
+    clock.now += 119
+    assert (await check.validate(old))["sub"] == "alice"
+    clock.now += 1
+    assert (await refused(check, old)).reason == "unknown_key"
+    assert fake_idp.jwks_requests == 2
+
+
+@pytest.mark.phase(3)
+async def test_a_cache_control_that_forbids_caching_means_a_fetch_a_minute_at_most(
+    fake_idp: FakeIdp,
+) -> None:
+    fake_idp.jwks_cache_control = "no-store, max-age=0"
+    clock = Clock()
+    check = validator(fake_idp, clock=clock)
+    token = fake_idp.token_for("alice")
+
+    for _ in range(5):
+        await check.validate(token)
+    assert fake_idp.jwks_requests == 1
+    clock.now += 60
+    await check.validate(token)
+    assert fake_idp.jwks_requests == 2
+
+
+@pytest.mark.phase(3)
 async def test_many_requests_with_a_new_kid_cause_one_refresh(fake_idp: FakeIdp) -> None:
     check = validator(fake_idp, clock=Clock())
     await check.validate(fake_idp.token_for("alice"))
@@ -400,6 +472,55 @@ async def test_cached_keys_keep_working_while_the_idp_is_down(fake_idp: FakeIdp)
     assert fake_idp.jwks_requests == 1
 
 
+# A published key Keystone never uses: EC, but on P-384.
+P384_JWK = {
+    **ECAlgorithm.to_jwk(ec.generate_private_key(ec.SECP384R1()).public_key(), as_dict=True),
+    "kid": "p384",
+    "use": "sig",
+}
+
+
+@pytest.mark.phase(3)
+@pytest.mark.parametrize(
+    "document",
+    [{"keys": []}, {"error": "starting"}, {"keys": [P384_JWK]}],
+    ids=["no keys", "no keys field", "no usable key"],
+)
+async def test_a_jwks_answer_without_a_usable_key_keeps_the_cached_keys(
+    fake_idp: FakeIdp, document: dict[str, Any]
+) -> None:
+    # A provider that is restarting can answer 200 with an empty set for a moment. That must not
+    # empty the cache: every caller would be refused until the next refresh is allowed.
+    check = validator(fake_idp, clock=Clock())
+    token = fake_idp.token_for("alice")
+    await check.validate(token)
+    fake_idp.jwks_document = document
+
+    with capture_logs() as logs:
+        await refused(check, fake_idp.make_token("alice", "acme", kid="never-published"))
+
+    assert (await check.validate(token))["sub"] == "alice"
+    assert fake_idp.jwks_requests == 2
+    assert "jwks_without_usable_keys" in [entry["event"] for entry in logs]
+
+
+@pytest.mark.phase(3)
+async def test_a_provider_that_publishes_no_usable_key_is_keys_unavailable(
+    fake_idp: FakeIdp,
+) -> None:
+    clock = Clock()
+    check = validator(fake_idp, clock=clock)
+    fake_idp.jwks_document = {"keys": []}
+    token = fake_idp.token_for("alice")
+
+    error = await refused(check, token)
+
+    assert isinstance(error, KeysUnavailable)
+    fake_idp.jwks_document = None
+    clock.now += 3
+    assert (await check.validate(token))["sub"] == "alice"
+
+
 @pytest.mark.phase(3)
 async def test_an_idp_that_cannot_be_asked_is_keys_unavailable(fake_idp: FakeIdp) -> None:
     fake_idp.jwks_status = 500
@@ -420,6 +541,11 @@ async def test_a_jwks_fetch_that_is_too_slow_gives_up(fake_idp: FakeIdp) -> None
 
     assert error.reason == "keys_unavailable"
     assert time.monotonic() - started < 2.0
+
+
+@pytest.mark.phase(3)
+async def test_the_max_age_defaults_to_ten_minutes(fake_idp: FakeIdp) -> None:
+    assert validator(fake_idp).max_age_s == 600.0
 
 
 @pytest.mark.phase(3)

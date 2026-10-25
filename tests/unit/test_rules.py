@@ -371,6 +371,26 @@ def ten_kb() -> str:
     return text[:10_240]
 
 
+def test_rules_latency_is_nowhere_near_the_budget() -> None:
+    # The unit job's smoke: ten times the budget, so a shared runner under load passes and a
+    # rule that goes quadratic still fails here. The 5 ms budget itself is checked by the test
+    # below, in `make gate` and by scripts/bench_scanner.py.
+    text = ten_kb()
+    for _ in range(20):
+        find_hits(text, RULES)
+
+    runs = []
+    for _ in range(50):
+        started = time.perf_counter()
+        find_hits(text, RULES)
+        runs.append((time.perf_counter() - started) * 1000)
+
+    runs.sort()
+    p95 = runs[int(len(runs) * 0.95)]
+    assert p95 < 50.0, f"p95 {p95:.2f} ms, median {statistics.median(runs):.2f} ms"
+
+
+@pytest.mark.slow  # a wall-clock budget: measured by the gate and the bench, not on a shared runner
 def test_rules_latency_budget() -> None:
     text = ten_kb()
     for _ in range(20):  # warm the regex caches and the interpreter before anything is timed

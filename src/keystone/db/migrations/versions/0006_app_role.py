@@ -9,7 +9,8 @@ import os
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
+from alembic.config import Config
 
 revision: str = "0006"
 down_revision: str | None = "0005"
@@ -22,13 +23,16 @@ ROLE = "keystone_app"
 DEV_PASSWORD = "keystone-app-dev-password"  # noqa: S105 - development only
 
 
-def password() -> str:
+def password(config: Config) -> str:
     """KEYSTONE_APP_DB_PASSWORD, or the development password. A prod deployment must set its own,
-    or the role would be created with a password that is public."""
+    or the role would be created with a password that is public. Whether this is prod is
+    settings.env as `keystone db upgrade` passes it (`env` may come from the YAML file alone, as
+    for every other prod guard), or KEYSTONE_ENV for a plain `alembic upgrade head`."""
     given = os.environ.get("KEYSTONE_APP_DB_PASSWORD")
     if given:
         return given
-    if os.environ.get("KEYSTONE_ENV") == "prod":
+    env = config.attributes.get("env") or os.environ.get("KEYSTONE_ENV")
+    if env == "prod":
         raise RuntimeError(
             "set KEYSTONE_APP_DB_PASSWORD before the migration that creates the keystone_app role"
         )
@@ -47,7 +51,7 @@ def upgrade() -> None:
             sa.text(
                 "SELECT format('CREATE ROLE keystone_app LOGIN PASSWORD %L', CAST(:pw AS text))"
             ),
-            {"pw": password()},
+            {"pw": password(context.config)},
         ).scalar_one()
         bind.exec_driver_sql(statement)
     op.execute(f"GRANT USAGE ON SCHEMA public TO {ROLE}")

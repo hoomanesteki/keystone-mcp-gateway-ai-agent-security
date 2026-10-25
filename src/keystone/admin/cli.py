@@ -119,14 +119,30 @@ def migration_url(settings: Settings) -> str:
     return (settings.migrate_database_url or settings.database_url).get_secret_value()
 
 
-def migrate_database(url: str) -> None:
+def migrate_database(url: str, env: str) -> None:
     """Bring the schema to the latest revision. Alembic runs its own event loop, so call this
-    before any other loop starts."""
+    before any other loop starts. `env` is settings.env: a migration that behaves differently in
+    prod (0006, the app role) reads it from here, the same value every other prod guard reads,
+    and not from KEYSTONE_ENV alone, which a YAML-only prod deployment does not set."""
     config = Config()
     config.set_main_option("script_location", "keystone.db:migrations")
     config.attributes["url"] = url
+    config.attributes["env"] = env
     config.attributes["configure_logging"] = False
     command.upgrade(config, "head")
+
+
+def run_migrations(settings: Settings) -> None:
+    """`migrate_database` for a command: a migration that refuses (RuntimeError, with a message
+    for the operator) or a database that cannot be used is an `error:` line and exit 1."""
+    try:
+        migrate_database(migration_url(settings), settings.env)
+    except RuntimeError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    except (OSError, SQLAlchemyError) as exc:
+        typer.echo(f"error: cannot use the database ({type(exc).__name__})", err=True)
+        raise typer.Exit(1) from None
 
 
 @app.command()
@@ -154,7 +170,7 @@ def serve(
             typer.echo(f"  {problem}", err=True)
         raise typer.Exit(1) from None
     if migrate:
-        migrate_database(migration_url(settings))
+        run_migrations(settings)
     uvicorn.run(gateway_app, host=host, port=port)
 
 
@@ -165,11 +181,7 @@ app.add_typer(db_app, name="db")
 @db_app.command("upgrade")
 def db_upgrade() -> None:
     """Apply database migrations. Running it twice changes nothing."""
-    try:
-        migrate_database(migration_url(Settings()))
-    except (OSError, SQLAlchemyError) as exc:
-        typer.echo(f"error: cannot use the database ({type(exc).__name__})", err=True)
-        raise typer.Exit(1) from None
+    run_migrations(Settings())
     typer.echo("database is up to date")
 
 
