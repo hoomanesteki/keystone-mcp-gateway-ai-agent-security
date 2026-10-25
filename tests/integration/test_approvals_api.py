@@ -193,6 +193,25 @@ async def test_a_request_that_expired_is_a_409_and_a_decided_one_stays_decided(
     assert call(app, "GET", "/approvals", lena).json() == []
 
 
+async def test_a_session_that_cannot_be_read_is_not_shown_as_clean(
+    keystone_app_factory: Factory,
+    mcp_client: McpConnect,
+    fake_idp: FakeIdp,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = keystone_app_factory(globex=True)
+    [first] = await hold_transfers(app, mcp_client, 900)
+
+    async def broken(self: RedisSessionStore, session_id: str) -> None:
+        raise ConnectionError("redis is down")
+
+    monkeypatch.setattr(RedisSessionStore, "peek", broken)
+    [item] = call(app, "GET", "/approvals", person(fake_idp, "lena", "approver")).json()
+
+    assert item["id"] == first
+    assert item["session_state"] == "unavailable"
+
+
 async def test_the_detail_has_the_context_an_approver_needs(
     keystone_app_factory: Factory, mcp_client: McpConnect, fake_idp: FakeIdp, redis: Any
 ) -> None:

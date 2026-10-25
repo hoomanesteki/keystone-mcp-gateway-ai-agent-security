@@ -123,7 +123,13 @@ export function ApprovalCard({
                     <span className="font-mono">{flag}</span>
                   </Badge>
                 ))}
-                {!item.tainted && item.flags.length === 0 ? (
+                {item.session_state !== "live" ? (
+                  <span className="text-fg-muted">
+                    {item.session_state === "ended"
+                      ? "The session has ended: its flags are not known."
+                      : "The session store did not answer: its flags are not known."}
+                  </span>
+                ) : !item.tainted && item.flags.length === 0 ? (
                   <span className="text-fg-muted">No flags on this session.</span>
                 ) : null}
               </div>

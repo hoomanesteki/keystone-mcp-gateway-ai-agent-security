@@ -175,6 +175,15 @@ test("lists the recent calls of the session when the card is opened", async () =
   expect(within(table).getByText("KS_APPROVAL_PENDING")).toBeVisible();
 });
 
+test("does not say a session is clean when its flags could not be read", async () => {
+  const api = approvalsApi([approval({ session_state: "unavailable" })]);
+  renderApp({ path: "/approvals", session: PEOPLE.lena, api });
+
+  const card = await cardFor();
+  expect(within(card).getByText(/session store did not answer/)).toBeVisible();
+  expect(within(card).queryByText("No flags on this session.")).toBeNull();
+});
+
 test("shows what the scanner made of the calls the session has read", async () => {
   const api = approvalsApi([approval({ tainted: true, flags: ["reads_untrusted"] })], {
     recent: [
