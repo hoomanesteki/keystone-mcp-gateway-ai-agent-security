@@ -20,7 +20,7 @@ import structlog
 
 from keystone.core.types import ScanResult, ToolRef, ToolResult
 from keystone.defense import actions
-from keystone.defense.classifier import Classifier
+from keystone.defense.classifier import Classifier, ClassifierBusy
 from keystone.defense.rules import Rule, analyze, combine, default_rules, prepare, reveal_tags
 from keystone.settings import ScannerSettings, ScannerThresholds
 
@@ -33,6 +33,7 @@ MAX_JSON_CHARS = 5_000_000
 # What `model` says when the classifier was asked and gave no answer in time, and when it raised.
 TIMEOUT = "timeout"
 FAILED = "error"
+BUSY = "busy"
 # What it says when the rules had already flagged the text and the model was not asked (KS-792).
 SKIPPED = "skipped"
 
@@ -247,6 +248,8 @@ class CompositeScanner:
             with anyio.move_on_after(self._cfg.classifier_timeout_ms / 1000):
                 answer = await classifier.score(view)
                 return (answer, classifier.name) if answer is not None else (None, TIMEOUT)
+        except ClassifierBusy:
+            return None, BUSY
         except Exception as error:
             # Cancellation is not an Exception, so it goes through. What the model was asked is
             # not logged: it is the content of a tool output.

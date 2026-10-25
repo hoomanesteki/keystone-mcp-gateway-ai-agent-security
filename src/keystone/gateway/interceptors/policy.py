@@ -26,6 +26,7 @@ from redis.asyncio import Redis
 from keystone.core.canonical import canonical_json, sha256_hex
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, Decision, Effect, Principal, SessionState, ToolRef
+from keystone.gateway.hooks import noop_hook
 from keystone.policy.engine import PolicyEngine
 from keystone.policy.entities import build_context
 from keystone.policy.extractors import extract
@@ -67,6 +68,7 @@ class PolicyInterceptor:
                 {"keystone/reasons": list(decision.reasons)},
             )
 
+    @noop_hook
     async def after_call(self, ctx: CallContext) -> None:
         return None
 

@@ -22,6 +22,7 @@ throwaway one) is changed in the call's copy alone.
 from __future__ import annotations
 
 from keystone.core.types import CallContext, ToolTag
+from keystone.gateway.hooks import noop_hook
 from keystone.gateway.sessions import SessionStore, catch_up
 from keystone.registry.naming import is_virtual
 
@@ -35,6 +36,7 @@ class SessionFlagsInterceptor:
     def __init__(self, sessions: SessionStore | None = None) -> None:
         self._sessions = sessions
 
+    @noop_hook
     async def before_call(self, ctx: CallContext) -> None:
         return None
 

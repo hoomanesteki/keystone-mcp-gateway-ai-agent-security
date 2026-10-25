@@ -18,9 +18,11 @@ Rules the code below keeps:
 
 from __future__ import annotations
 
+import contextlib
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Collection
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 import anyio
 import structlog
@@ -30,8 +32,9 @@ from jsonschema.exceptions import best_match
 from keystone.core.canonical import canonical_json
 from keystone.core.errors import Code, Reject, to_tool_result
 from keystone.core.types import CallContext, Effect, ToolResult
+from keystone.gateway.hooks import is_noop
 from keystone.telemetry.metrics import Metrics
-from keystone.telemetry.tracing import SpanHandle, Tracer
+from keystone.telemetry.tracing import NO_SPAN, SpanHandle, Tracer
 
 log = structlog.get_logger()
 
@@ -72,6 +75,33 @@ class _Crash(Reject):
     """A Reject standing in for an interceptor that raised something else."""
 
 
+MAX_VALIDATORS = 1024
+# schema hash -> (the schema the validator was built from, the validator)
+_validators: OrderedDict[str, tuple[dict[str, Any], Draft202012Validator]] = OrderedDict()
+
+
+def _validator(ctx: CallContext) -> Draft202012Validator:
+    """The validator of the tool's input schema, made once for each schema hash. Building one is
+    most of what validating a small argument costs (KS-992). The hash only finds the entry: it is
+    used only if the schema it was built from is the schema in hand (the same object, which is the
+    usual case, or an equal one), so a hash that does not match its schema cannot validate a call
+    against another tool's schema. A tool with no hash (one that does not exist) is not kept."""
+    schema = ctx.tool.input_schema
+    key = ctx.tool.schema_hash
+    if not key:
+        return Draft202012Validator(schema)
+    kept = _validators.get(key)
+    if kept is not None and (kept[0] is schema or kept[0] == schema):
+        _validators.move_to_end(key)
+        return kept[1]
+    validator = Draft202012Validator(schema)
+    _validators[key] = (schema, validator)
+    _validators.move_to_end(key)
+    while len(_validators) > MAX_VALIDATORS:
+        _validators.popitem(last=False)
+    return validator
+
+
 def validate_arguments(ctx: CallContext) -> None:
     """Raise Reject(INVALID_ARGUMENTS) unless the arguments fit the size limit and the schema."""
     try:
@@ -83,7 +113,7 @@ def validate_arguments(ctx: CallContext) -> None:
             Code.INVALID_ARGUMENTS, f"arguments are {size} bytes, the limit is {MAX_ARGUMENT_BYTES}"
         )
     try:
-        error = best_match(Draft202012Validator(ctx.tool.input_schema).iter_errors(ctx.arguments))
+        error = best_match(_validator(ctx).iter_errors(ctx.arguments))
     except Exception:
         # A broken schema is the upstream's fault, and the agent cannot fix it.
         log.error("tool_schema_unusable", call_id=ctx.call_id, tool=ctx.tool.name, exc_info=True)
@@ -207,12 +237,32 @@ class Pipeline:
         started = time.perf_counter()
         with self.tracer.tool_call(ctx) as span:
             try:
+                reject = await self._charged(ctx, reject)
                 ctx.result = to_tool_result(reject, ctx.call_id)
                 return ctx.result
             finally:
                 self._describe(span, ctx, "rejected", reject)
                 self._count(ctx, "rejected", reject, started)
                 await self._audit(ctx, "rejected", reject)
+
+    async def _charged(self, ctx: CallContext, reject: Reject) -> Reject:
+        """A call to a tool that does not exist costs the principal a token of the rate limit, as
+        any call does; without that, a loop of made-up names was audited and never limited. When a
+        bucket is empty the agent is told to slow down, not that the tool is missing. A limiter
+        that fails leaves the refusal as it was: the call is refused either way."""
+        if reject.code is not Code.TOOL_NOT_FOUND:
+            return reject
+        for interceptor in self.interceptors:
+            charge = getattr(interceptor, "charge_principal", None)
+            if charge is None:
+                continue
+            try:
+                await charge(ctx)
+            except Reject as refused:
+                return refused
+            except Exception:
+                log.error("reject_charge_failed", call_id=ctx.call_id, exc_info=True)
+        return reject
 
     def _count(
         self, ctx: CallContext, outcome: Outcome, reject: Reject | None, started: float
@@ -265,8 +315,13 @@ class Pipeline:
     ) -> None:
         started = time.perf_counter()
         try:
-            with self.tracer.span(
-                f"keystone.interceptor.{interceptor.name}", {"keystone.hook": hook.__name__}
+            # A hook marked `noop_hook` has no span: it has nothing to show (KS-992).
+            with (
+                contextlib.nullcontext(NO_SPAN)
+                if is_noop(hook)
+                else self.tracer.span(
+                    f"keystone.interceptor.{interceptor.name}", {"keystone.hook": hook.__name__}
+                )
             ) as span:
                 try:
                     await hook(ctx)

@@ -424,8 +424,12 @@ def test_the_committed_document_is_what_the_report_renders_from_the_committed_fi
     # A hand edit of the document, or of the file, or of the code that words it, shows here.
     # `python -m eval.perf.report` writes the document again.
     newest = files[-1]
-    rendered = render_section(load(newest), Path(report.short(newest)))
+    before = load(files[-2]) if len(files) > 1 else None
+    rendered = render_section(load(newest), Path(report.short(newest)), before)
     assert section_in(text) == rendered.strip()
+    if before is not None:
+        kept = report.render_previous(before, Path(report.short(files[-2])))
+        assert section_in(text, report.PREVIOUS_START, report.PREVIOUS_END) == kept.strip()
 
 
 def test_what_failed_is_listed_with_where_it_began_and_the_events_the_gateway_logged() -> None:
@@ -461,3 +465,110 @@ def test_the_commonest_kinds_of_failure_are_shown_and_the_rest_counted() -> None
     assert kinds_text(kinds) == "9 b; 5 a; 3 e; 3 of 2 other kinds"
     assert kinds_text({"x": 1}) == "1 x"
     assert kinds_text({}) == "none"
+
+
+# -- KS-992: the single-session rows, the model's share, and the measurement before
+
+
+def test_the_verdicts_also_judge_one_session_with_no_queue() -> None:
+    # The scanner-off gateway adds 9 ms at one session and 8 ms at ten; the classifier 117 ms.
+    doc = document()
+
+    [table] = verdicts(doc)
+    rows = {line.split("|")[1].strip(): line for line in table.splitlines()[2:]}
+
+    assert list(rows) == ["M5", "M6", "M5, one session", "M6, one session"]
+    assert (
+        "1 KB: p50 +6.0 ms, p95 +6.0 ms; 8 KB: p50 +6.0 ms, p95 +6.0 ms" in rows["M5, one session"]
+    )
+    assert rows["M5, one session"].endswith("| met |")
+    assert (
+        "1 KB (197 tokens): p95 +117.0 ms; 8 KB (1580 tokens): p95 +196.0 ms"
+        in rows["M6, one session"]
+    )
+    assert rows["M6, one session"].endswith("| not met |")
+
+
+def test_what_the_model_did_is_shown_when_the_build_counted_it() -> None:
+    doc = document()
+    run_ = runs_of(doc, "classifier")[1024]
+    run_["models"] = {"answered": 25.0, "busy": 70.0, "timeout": 5.0}
+
+    section = render_section(doc)
+
+    assert "### What the model did" in section
+    assert "| 10 sessions | 1 KB | 25% | 0 | 5% | 70% | 0 | 100 |" in section
+    assert "the model scored 25% of the scans and was left out of 70%" in section
+    assert "### What the model did" not in render_section(document())
+
+
+def test_the_section_compares_the_calls_a_second_of_one_process_with_the_measurement_before() -> (
+    None
+):
+    before = document()
+    before["machine"]["commit"] = "fedcba9876543210"
+    # Before, the gateway served 50 calls a second at ten sessions and 40 with one.
+    runs_of(before, "scanner-off")[1024]["summary"]["wall_s"] = 2.0
+    runs_of(before, "scanner-off", sequential=True)[1024]["summary"]["wall_s"] = 1.25
+    doc = document()
+
+    section = render_section(doc, previous=before)
+
+    assert (
+        "serves 50.0 calls a second with one session and 100.0 with 10 sessions. In the "
+        "measurement before this one (commit `fedcba987654`) it was 40.0 and 50.0." in section
+    )
+    # 10 sessions, a median of 10 ms for the upstream alone and 10 ms allowed on top of it.
+    assert "the gateway would have to serve about 500 calls a second" in section
+    assert "which is one core" in section
+
+
+def test_the_measurement_before_is_kept_with_its_commit_and_its_headline_tables() -> None:
+    before = document()
+    before["machine"]["commit"] = "fedcba9876543210"
+
+    kept = report.render_previous(before, Path("eval/results/perf-2026-10-24.json"))
+
+    assert "### The measurement before this one (commit `fedcba987654`, 2026-10-25)" in kept
+    assert "`eval/results/perf-2026-10-24.json`" in kept
+    assert "| M5 |" in kept and "| M6 |" in kept
+    assert "10 sessions, 10 calls each, 1 KB payload:" in kept
+    assert "One session, 50 calls, 1 KB payload:" in kept
+    assert "8 KB payload" not in kept
+
+
+def test_the_check_and_the_writer_keep_both_measurements_in_the_document(tmp_path: Path) -> None:
+    older = tmp_path / "perf-2026-10-24.json"
+    newer = tmp_path / "perf-2026-10-25.json"
+    first = document()
+    first["machine"]["commit"] = "fedcba9876543210"
+    older.write_text(json.dumps(first), encoding="utf-8")
+    newer.write_text(json.dumps(document()), encoding="utf-8")
+    doc = tmp_path / "results.md"
+    doc.write_text("# Results\n\nBefore.\n", encoding="utf-8")
+
+    assert report.main([str(newer), "--doc", str(doc)]) == 0
+
+    text = doc.read_text(encoding="utf-8")
+    assert text.startswith("# Results\n\nBefore.\n")
+    assert text.index(START) < text.index(END) < text.index(report.PREVIOUS_START)
+    assert report.PREVIOUS_END in text and "fedcba987654" in text
+
+
+def test_m6_is_not_measured_when_the_model_scored_almost_none_of_the_scans() -> None:
+    # A fast p95 from a run where every place was busy is the time of the rules, not the model's.
+    doc = document(classifier={1024: 100.0, 8192: 120.0})
+    for sequential in (False, True):
+        run_ = runs_of(doc, "classifier", sequential)[1024]
+        run_["models"] = {"answered": 2.0, "busy": 98.0}
+
+    rows = verdicts(doc)[0].splitlines()
+
+    m6 = next(row for row in rows if row.startswith("| M6 |"))
+    assert m6.endswith("| not measured: the model scored 2% of the scans |")
+    one = next(row for row in rows if row.startswith("| M6, one session"))
+    assert one.endswith("| not measured: the model scored 2% of the scans |")
+    for sequential in (False, True):
+        runs_of(doc, "classifier", sequential)[1024]["models"] = {"answered": 90.0, "busy": 10.0}
+    scored = verdicts(doc)[0].splitlines()
+    assert next(row for row in scored if row.startswith("| M6 |")).endswith("| met |")

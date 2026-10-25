@@ -9,6 +9,7 @@ from opentelemetry.trace import SpanKind, StatusCode
 from keystone.audit.sink import InMemoryAuditSink
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, Decision, Effect, ToolResult
+from keystone.gateway.hooks import is_noop
 from keystone.gateway.wiring import INTERCEPTOR_ORDER, PipelineDeps, build_pipeline
 from keystone.settings import Settings
 from keystone.telemetry.tracing import (
@@ -101,25 +102,31 @@ async def test_tool_call_span_attributes(settings: Settings) -> None:
 @pytest.mark.phase(5)
 async def test_interceptor_child_spans(settings: Settings) -> None:
     tracer, exporter = traced()
+    pipeline = pipeline_with(settings, tracer, policy=Allows())
 
-    await pipeline_with(settings, tracer, policy=Allows()).run(make_ctx({"text": "hi"}))
+    await pipeline.run(make_ctx({"text": "hi"}))
 
     spans = exporter.get_finished_spans()
     [root] = named(spans, "keystone.tool_call")
-    for slot in INTERCEPTOR_ORDER:
-        hooks = named(spans, f"keystone.interceptor.{slot}")
-        # One span for the hook before the call and one for the hook after it.
-        assert sorted(str((s.attributes or {})["keystone.hook"]) for s in hooks) == [
-            "after_call",
-            "before_call",
-        ], slot
+    expected = 0
+    for slot in pipeline.interceptors:
+        # A span for each hook that does something. A hook marked `noop_hook` has none (KS-992),
+        # and a slot that has no hook that works would be the one to look at.
+        works = sorted(
+            hook for hook in ("after_call", "before_call") if not is_noop(getattr(slot, hook))
+        )
+        hooks = named(spans, f"keystone.interceptor.{slot.name}")
+        assert sorted(str((s.attributes or {})["keystone.hook"]) for s in hooks) == works, slot.name
         assert all(s.kind is SpanKind.INTERNAL for s in hooks)
+        expected += len(works)
+    assert [slot.name for slot in pipeline.interceptors] == list(INTERCEPTOR_ORDER)
     [upstream] = named(spans, "keystone.upstream.call")
     assert upstream.kind is SpanKind.CLIENT
     assert dict(upstream.attributes or {}) == {"keystone.upstream": "echo"}
     # Every other span is a child of the root, in the root's trace.
     others = [s for s in spans if s is not root]
-    assert len(others) == 2 * len(INTERCEPTOR_ORDER) + 1
+    assert len(others) == expected + 1
+    assert expected < 2 * len(INTERCEPTOR_ORDER)  # the idle hooks have no spans
     assert all(s.parent is not None and s.parent.span_id == root.context.span_id for s in others)
     assert {s.context.trace_id for s in spans} == {root.context.trace_id}
 

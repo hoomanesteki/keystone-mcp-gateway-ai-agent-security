@@ -37,6 +37,7 @@ from keystone.approvals.service import ApprovalRecord, Outcome
 from keystone.audit.redact import args_digest
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, Effect
+from keystone.gateway.hooks import noop_hook
 
 log = structlog.get_logger()
 
@@ -151,6 +152,7 @@ class ApprovalInterceptor:
             raise Reject(Code.APPROVAL_EXPIRED, "the request expired before it was decided")
         raise pending_rejection(record)
 
+    @noop_hook
     async def after_call(self, ctx: CallContext) -> None:
         return None
 

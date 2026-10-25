@@ -66,3 +66,15 @@ def stage_means_ms(
                 "calls": made,
             }
     return means
+
+
+def model_totals(page: str) -> dict[str, float]:
+    """What the scanner's model did for each scan since the gateway started, by outcome
+    (`keystone_scan_model_total`: answered, skipped, timeout, busy, error, none). A gateway built
+    before the counter existed has none, and the result is empty."""
+    totals: dict[str, float] = {}
+    for family in text_string_to_metric_families(page):
+        for sample in family.samples:
+            if sample.name == "keystone_scan_model_total":
+                totals[sample.labels["model"]] = sample.value
+    return totals

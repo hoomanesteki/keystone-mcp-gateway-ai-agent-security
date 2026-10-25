@@ -6,6 +6,7 @@ from typing import Protocol
 
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, ToolStatus
+from keystone.gateway.hooks import noop_hook
 from keystone.registry.naming import is_virtual
 from keystone.registry.pinning import reason_category
 from keystone.registry.repo import ToolState
@@ -50,5 +51,6 @@ class PinningInterceptor:
             {"keystone/reason": why or status.value},
         )
 
+    @noop_hook
     async def after_call(self, ctx: CallContext) -> None:
         return None

@@ -23,6 +23,7 @@ STRUCTURAL = {
     "0010",
     "0018",  # ADR numbers, checked against docs/adr below
     "0.88",  # the scan score of the poisoned email, docs/progress.md KS-701 and the demo script
+    "1.0",  # the right end of the axis of the recall chart, a scale and not a measurement
     "1",
     "2",
     "3",

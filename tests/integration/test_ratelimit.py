@@ -109,6 +109,25 @@ async def test_burst_over_capacity_rejected(
     )
 
 
+async def test_made_up_tool_names_are_limited_through_the_gateway(
+    keystone_app_factory: Factory, mcp_client: McpConnect
+) -> None:
+    """KS-992: a call to a tool that does not exist took no token, so a loop of made-up names was
+    audited and never limited."""
+    app = keystone_app_factory(settings=limited(per_user=(3, 0.5)), clock=Clock())
+
+    async with mcp_client(app) as client:
+        answers = [await client.call_tool(f"echo__made_up_{n}", ECHO) for n in range(5)]
+        real = await client.call_tool("echo__echo", ECHO)
+
+    assert codes(answers) == ["KS_TOOL_NOT_FOUND"] * 3 + ["KS_RATE_LIMITED"] * 2
+    # The bucket is the user's, so the tool that does exist is out of tokens as well.
+    assert codes([real]) == ["KS_RATE_LIMITED"]
+    app.audit.wait()
+    refused = [r for r in app.audit.records if r["reject_code"] == "KS_RATE_LIMITED"]
+    assert len(refused) == 3 and all(r["dispatched"] is False for r in refused)
+
+
 async def test_refill_allows_again(keystone_app_factory: Factory, mcp_client: McpConnect) -> None:
     clock = Clock()
     app = keystone_app_factory(settings=limited(per_user=(5, 0.5)), clock=clock)

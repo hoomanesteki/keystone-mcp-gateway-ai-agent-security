@@ -49,7 +49,7 @@ from typing import Any
 
 import httpx
 
-from eval.gateway_info import read_info, stage_means_ms, stage_totals
+from eval.gateway_info import model_totals, read_info, stage_means_ms, stage_totals
 from eval.perf.load import MAX_RUN_S, Spec, payload, run_load
 from eval.redteam.suite import REPO
 
@@ -408,11 +408,14 @@ async def measure(
     else:
         spec = Spec(f"{KEYSTONE}/mcp", "echo__echo", {}, sessions, calls, size, user="olivia")
     counted: dict[str, dict[str, tuple[float, float]]] = {}
+    modelled: dict[str, dict[str, float]] = {}
 
     async def read_before() -> None:
         if not target.direct:
             async with httpx.AsyncClient(timeout=30) as http:
-                counted["before"] = stage_totals((await http.get(f"{KEYSTONE}/metrics")).text)
+                page = (await http.get(f"{KEYSTONE}/metrics")).text
+            counted["before"] = stage_totals(page)
+            modelled["before"] = model_totals(page)
 
     began = datetime.now(UTC)
     name = None if target.direct else container()
@@ -425,10 +428,18 @@ async def measure(
         if watched:
             watched.__exit__()
     stages: dict[str, Any] = {}
+    models: dict[str, float] = {}
     if not target.direct and "before" in counted:
         async with httpx.AsyncClient(timeout=30) as http:
-            after = stage_totals((await http.get(f"{KEYSTONE}/metrics")).text)
-        stages = stage_means_ms(counted["before"], after)
+            page = (await http.get(f"{KEYSTONE}/metrics")).text
+        stages = stage_means_ms(counted["before"], stage_totals(page))
+        # What the model did for the scans of the timed calls (KS-992), by outcome.
+        was = modelled.get("before", {})
+        models = {
+            kind: n - was.get(kind, 0.0)
+            for kind, n in model_totals(page).items()
+            if n - was.get(kind, 0.0) > 0
+        }
     return {
         "size": size,
         "sessions": sessions,
@@ -439,6 +450,7 @@ async def measure(
         "stopped_early": result["stopped_early"],
         "generator": result["generator"],
         "stages": stages,
+        "models": models,
         "log_events": log_events(name, began) if name else None,
         "limits": limits() if name else None,
         "container": watched.summary() if watched else None,

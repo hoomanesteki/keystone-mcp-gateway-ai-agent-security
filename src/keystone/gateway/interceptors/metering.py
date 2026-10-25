@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from keystone.core.types import CallContext
+from keystone.gateway.hooks import noop_hook
 from keystone.gateway.sessions import SessionStore, catch_up
 from keystone.metering.budgets import money
 from keystone.metering.ledger import LedgerEntry
@@ -40,6 +41,7 @@ class MeteringInterceptor:
         self._budgets = budgets
         self._sessions = sessions
 
+    @noop_hook
     async def before_call(self, ctx: CallContext) -> None:
         return None
 
