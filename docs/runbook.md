@@ -199,51 +199,35 @@ model again.
 | `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), olivia's 20 tools, bob's 3 globex tools and Keystone's 2, and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
 | `bash scripts/smoke/phase_2.sh` | Lists the 20 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
 
-## Make targets
+### Other make targets
 
-Every target of the `Makefile`; `make help` prints the same list. Run `export UV_PROJECT_ENVIRONMENT=...` first on a Mac where a background process hides `.venv` (see Troubleshooting).
+`make help` prints every target that has a description. These are the ones the table above leaves out. `make check`, `make ci-local` and `make gate` start Postgres and Redis themselves, so do not run them while another run uses the stack.
 
 | Target | What it does |
 |---|---|
-| `make help` | List the targets |
-| `make setup` | `uv sync` and the pre-commit hook |
-| `make lint` | `ruff check` and the format check |
-| `make fmt` | Apply ruff fixes and formatting |
-| `make type` | mypy (strict on core, gateway, policy and audit) |
-| `make prose` | The voice rules: banned words and em dashes (`scripts/lint_prose.py`) |
-| `make commits` | Check the commit subjects since `origin/main` |
-| `make policy` | The policy cases, and that every shipped policy is matched by a case |
-| `make test-unit` | Unit tests and invariants that need no services |
-| `make test-int` | Integration tests. Needs Postgres, Redis and Docker; builds the sandbox and echo images first |
-| `make test-e2e` | End-to-end tests against the running compose stack |
-| `make test` | `test-unit` plus `test-int` |
-| `make check` | `up-core`, lint, type, unit, integration and the console checks |
-| `make ci-local` | The steps of CI, run locally |
-| `make gate PHASE=N` | Everything a phase gate runs. `PHASE=9` runs the smokes of phases 0 to 8 inside `phase_9.sh` |
-| `make migrate` | Apply the database migrations to `KEYSTONE_DATABASE_URL` |
-| `make up`, `make up-core`, `make down`, `make reset` | Start the stack, start Postgres and Redis only, stop it, stop it and delete its volumes |
-| `make demo`, `make demo-attack` | The scripted agent through Keystone, and the poisoned email with and without Keystone |
-| `make sandbox-image`, `make echo-image` | Build the sandbox image and the echo server as a stdio image |
-| `make console-types`, `make console-check`, `make console-e2e` | Regenerate the console's API types, run its lint, tests and build, run its Playwright test |
-| `make perf`, `make perf-smoke` | The performance matrix (5 targets, 200 sessions, about an hour), and 10 sessions of 5 calls as the nightly job runs it |
-| `make tf-plan` | `terraform plan` for `deploy/terraform/aws` with the example variables. Needs AWS credentials |
-| `make github-setup` | Protect `main` and `dev` and import the backlog. Needs a signed-in `gh` |
+| `make setup` | `uv sync` and `pre-commit install` (the plain hook, not the `commit-msg` or `pre-push` types) |
+| `make lint` | `ruff check` and `ruff format --check` |
+| `make fmt` | `ruff check --fix` and `ruff format`, which change files |
+| `make type` | mypy, strict for `core`, `gateway`, `policy` and `audit` |
+| `make policy` | `keystone policy test policies tests/policy_cases --coverage`: the cases, and every policy matched by a case |
+| `make test-unit`, `make test-int`, `make test` | Unit tests and invariants; integration tests (Postgres, Redis and Docker); both |
+| `make check` | `up-core`, lint, types, unit, integration and the console check |
+| `make ci-local` | The steps of CI, in order, and a check that `console/src/api/schema.d.ts` is up to date |
+| `make prose` | `scripts/lint_prose.py`: banned words and em dashes in the docs and the code |
+| `make commits` | Check the subjects of the commits since `origin/main` |
+| `make migrate` | `alembic upgrade head` against `KEYSTONE_DATABASE_URL` |
+| `make gate PHASE=N` | Everything a phase gate runs, against the stack (`make gate PHASE=9` runs phases 0 to 8 inside `phase_9.sh`) |
+| `make github-setup` | Protect `main` and `dev` and import the backlog. It needs a signed-in `gh` |
 
-`scripts/fresh_clone_test.sh` clones the repository into a temporary directory, runs `make demo` there and prints the seconds it took. It is the measurement behind target M9. It needs the ports of the stack, so stop any running stack first.
+### Compose variables
 
-## Compose variables
+These are read by `deploy/docker-compose.yml` from the shell or from `.env` (the file `.env.example` is the template). The Keystone settings the container receives are in the table under "Keystone settings".
 
-The compose stack reads these from `.env`, or from the defaults in `deploy/docker-compose.yml`. They are for the local stack and are public in this repository. A variable already set in the shell wins.
-
-| Variable | Default | Purpose |
+| Variable | Default | Meaning |
 |---|---|---|
-| `POSTGRES_PORT`, `REDIS_PORT`, `KEYCLOAK_PORT`, `JAEGER_UI_PORT`, `OTLP_GRPC_PORT`, `OTLP_HTTP_PORT`, `PROMETHEUS_PORT`, `GRAFANA_PORT`, `KEYSTONE_PORT` | see Host ports | Host ports of the services |
-| `MAIL_PORT`, `FILES_PORT`, `BANK_PORT`, `ECHO_PORT`, `WEB_PORT`, `FILES_GLOBEX_PORT`, `FAKE_LLM_PORT` | see Host ports | Host ports of the demo upstreams and the fake model API |
-| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | `keystone` each | The Postgres container's database and its owner role. They are fixed in the compose file, not read from `.env` |
-| `KEYSTONE_CLI_SECRET` | `keystone-cli-dev-secret` | Secret of the confidential Keycloak client `keystone-cli`, which `scripts/get_token.sh` uses for the approver and admin tokens |
-| `KEYSTONE_HEALTH_INTERVAL_S` | `30` | Compose name for `KEYSTONE_HEALTH__INTERVAL_S`, the seconds between upstream health probes |
-| `KEYSTONE_RATE_LIMIT_USER_CAPACITY`, `KEYSTONE_RATE_LIMIT_USER_REFILL` | `300`, `50` | Compose names for `KEYSTONE_RATE_LIMITS__PER_USER__CAPACITY` and `KEYSTONE_RATE_LIMITS__PER_USER__REFILL_PER_S`: the per-user burst and calls a second |
-| `DOCKER_SOCKET_GID` | `0` | Group of the Docker socket, for the sandbox. On Linux use `stat -c %g /var/run/docker.sock` |
+| `KEYSTONE_PORT` | `8080` | Host port of Keystone. `KEYSTONE_PUBLIC_BASE_URL` in the container is built from it |
+| `KEYSTONE_CLI_SECRET` | `keystone-cli-dev-secret` | Secret of the `keystone-cli` client in the Keycloak realm (the client the CLI and the approvers use). Also read by the realm import, so change it before the first `make up` or reset the stack |
+| `KEYSTONE_HEALTH_INTERVAL_S` | `30` | Seconds between health probes of the upstreams, passed to the container as `KEYSTONE_HEALTH__INTERVAL_S`. 0 turns the probes off |
 
 ## Host ports
 
@@ -2449,11 +2433,6 @@ a 1 second limit each and returns 503 if either is down.
 | The console shows "No console access yet" | The user has neither the `approver` nor the `admin` role. Lena is an approver and root is an admin; see Identity. |
 | The audit page shows "Audit chain not checked" | `/audit/verify` failed (a 5xx or no answer). That is not a clean result: read the Keystone log, and run `keystone audit verify` for the whole log. |
 | The `console` job of CI says `schema.d.ts` is out of date with the admin API | A route or a model changed and `console/src/api/schema.d.ts` did not. Run `make console-types` and commit the result. `make console-check` does not look for this. |
-| `docker compose build` fails with `lookup registry-1.docker.io: no such host` | Docker Desktop's DNS went stale after the machine slept. Restart Docker Desktop, then run `make up` again. |
-| The first `make up` seems stuck for many minutes | The Keystone image downloads torch and a 738 MB model. The first build took 20 minutes on a laptop; later builds use the cache. `docker builder prune` empties it. |
-| Many calls fail under load with `KS_DENIED` and "session state is unavailable" | Redis could not answer in time, usually because the one event loop is saturated. Check `keystone_tool_call_duration_seconds` and the CPU of the container. One process serves about 88 calls a second ([performance](results.md#performance)). |
-| The scan metrics show the model as `busy` or `timed out` and never `answered` | The classifier did not finish inside the 300 ms the scan waits, so the rules decided. Check `keystone_scan_model_total`. A scan of about 850 characters took 0.6 to 1.5 s on a 4-CPU container ([results](results.md#performance)). |
-| A removed credential still works for up to a minute | The gateway keeps an opened credential for `KEYSTONE_CREDENTIAL_CACHE_TTL_S` (60 s). Set it to 0 to turn the cache off ([ADR-0019](adr/0019-load-fixes.md)). |
 | Port already in use | Another process holds the port. Set a different one in `.env`. |
 | `make check` cannot reach Postgres | Run `make up-core`, then `docker compose -f deploy/docker-compose.yml ps`. |
 | `docker` tests are skipped: "no Docker daemon" or "the sandbox image ... is not built" | The tests need the daemon and the image from `make sandbox-image`. Set `KEYSTONE_REQUIRE_DOCKER=1` to make that a failure instead of a skip. |
