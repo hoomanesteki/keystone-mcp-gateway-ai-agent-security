@@ -2,7 +2,7 @@
 
 Commit subjects since v0.0.1, grouped by release tag, with the short hash at the end of each line. Merge and release commits are left out.
 
-## Unreleased
+## v1.0.1 (2026-10-25)
 
 ### Features
 
