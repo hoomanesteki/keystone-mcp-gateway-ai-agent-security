@@ -2,6 +2,41 @@
 
 Commit subjects since v0.0.1, grouped by release tag, with the short hash at the end of each line. Merge and release commits are left out.
 
+## v1.0.1 (2026-10-25)
+
+### Features
+
+- settings: accept the config YAML as text in the environment (`e401ee8`)
+
+### Fixes
+
+- deploy: classify the drive tools in the example config (`ef55ae7`)
+- audit: mask a card number followed by an expiry or a code (`17b4a8d`)
+- metering: give a whole answer the provider timeout, not the drain (`7149870`)
+- sandbox: keep the read timeout when stdin is fed (`9301c0f`)
+- gateway: close a session that opened after its client was closed (`12bfc97`)
+- telemetry: keep a made-up tool name out of the labels (`a310c7f`)
+- gateway: refuse and charge the calls the pipeline never saw (`9e6f327`)
+- db: decide prod for the app role migration from settings.env (`5464b37`)
+- console: keep polling the approvals in a background tab (`878c474`)
+- defense: redact on the text the rules read (`0dd2b57`)
+- deploy: publish the compose ports on loopback (`2e53a41`)
+- admin: keep why sync disabled a tool when an operator disables it (`495cf98`)
+- deploy: keep the ALB open for an approval wait and a sandbox run (`1371616`)
+- identity: fetch the signing keys again when the cached set is old (`ac13735`)
+- deploy: deliver keystone_config_yaml to the task as a parameter (`9ebbf91`)
+- registry: keep a held tool held through a change and its reversal (`3f02e00`)
+- deploy: run the task in dev mode when the ALB has no certificate (`f8407f6`)
+- identity: keep the cached keys when a JWKS answer has no usable key (`140c9b5`)
+
+### Tests
+
+- collect the redis burst tests and ease the budgets in the unit job (`ca9b1e0`)
+
+### Documentation
+
+- repo: record that v1.0.0 is released (`df00522`)
+
 ## v1.0.0 (2026-10-25)
 
 ### Features
