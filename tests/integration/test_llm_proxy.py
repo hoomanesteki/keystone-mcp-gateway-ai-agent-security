@@ -10,6 +10,7 @@ import asyncio
 import io
 import json
 import logging
+import socket
 import time
 from collections.abc import Callable, Iterator
 from decimal import Decimal
@@ -118,15 +119,27 @@ def leave_after_the_first_chunk(app: KeystoneApp, token: str, payload: Any) -> b
     return b""
 
 
-def give_up_on(app: KeystoneApp, token: str, payload: Any, *, after_s: float) -> None:
-    """Send a request and hang up if no answer has come in `after_s` seconds."""
-    with pytest.raises(httpx.ReadTimeout):
-        httpx.post(
-            f"{app.base}{ANTHROPIC}",
-            json=payload,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=after_s,
-        )
+def give_up_on(
+    app: KeystoneApp, fake_llm: FakeLlm, token: str, payload: Any, *, seen_within_s: float = 15
+) -> None:
+    """Send a request and hang up once the provider has it, before any answer has come back.
+
+    The caller must leave after Keystone has sent the request on, not after a fixed time: on a slow
+    host the sign-in check, the vault and the budget read can take longer than any fixed wait, and
+    a caller that leaves before the request goes out is rightly not charged (KS-997)."""
+    body = json.dumps(payload).encode()
+    head = (
+        f"POST {ANTHROPIC} HTTP/1.1\r\nHost: {app.base.split('//', 1)[1]}\r\n"
+        f"Authorization: Bearer {token}\r\nContent-Type: application/json\r\n"
+        f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
+    ).encode()
+    host, port = app.base.split("//", 1)[1].rsplit(":", 1)
+    deadline = time.monotonic() + seen_within_s
+    with socket.create_connection((host, int(port)), timeout=10) as connection:
+        connection.sendall(head + body)
+        while not fake_llm.requests():
+            assert time.monotonic() < deadline, "the provider never got the request"
+            time.sleep(0.02)
 
 
 async def sql(app: KeystoneApp, statement: str, **values: Any) -> list[Any]:
@@ -445,9 +458,9 @@ async def test_a_caller_that_gives_up_on_a_whole_answer_is_still_charged_for_it(
 ) -> None:
     app = start(keystone_app_factory, fake_llm, fake_prices)
 
-    # The fake takes half a second to answer; the caller hangs up after a fifth of one. Keystone
-    # has already sent the request, so the provider finishes it and charges for it.
-    give_up_on(app, fake_idp.token_for("olivia"), body("fake-slow"), after_s=0.2)
+    # The fake takes half a second to answer; the caller hangs up as soon as the provider has the
+    # request, so the provider finishes it and charges for it.
+    give_up_on(app, fake_llm, fake_idp.token_for("olivia"), body("fake-slow"))
 
     (row,) = await ledger_after(app, 1)
     assert (row["input_tokens"], row["output_tokens"], row["cost_usd"]) == (4, 12, ONE_CALL)

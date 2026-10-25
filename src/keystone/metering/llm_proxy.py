@@ -751,12 +751,30 @@ class LlmProxy:
         async def settle(ended: str) -> None:
             await self._settle(call, answer, ended)
 
+        async def whole() -> list[bytes]:
+            # The provider finished this answer before it sent the first byte. A caller that leaves
+            # makes the server cancel the task that is reading it, and a read cut in the middle
+            # closes the connection with the usage unread, so the request is booked without a cost
+            # (KS-997). The read is shielded and the answer is handed on from memory.
+            chunks: list[bytes] = []
+            with anyio.CancelScope(shield=True), anyio.fail_after(DRAIN_S):
+                async for chunk in answer.chunks:
+                    reader.feed(chunk)
+                    chunks.append(chunk)
+            return chunks
+
         async def body() -> AsyncIterator[bytes]:
             try:
+                if not sse:
+                    held = await whole()
+                    await settle(COMPLETE)
+                    for chunk in held:
+                        yield chunk
+                    return
                 async for chunk in answer.chunks:
                     reader.feed(chunk)
                     yield chunk
-            except httpx2.HTTPError:
+            except (httpx2.HTTPError, TimeoutError):
                 await settle(CUT)
                 raise StreamBroken from None
             await settle(COMPLETE)
