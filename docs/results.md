@@ -2,6 +2,26 @@
 
 What Keystone was measured to do, with the date and the commit of every measurement. A section is written by the tool that measured it, and a number that was not measured is not in this file.
 
+## Scorecard
+
+The nine metrics of the plan (section 1.7), with the value and the verdict. Each value is repeated from the section named in the last column, and `tests/unit/test_results_doc.py` recomputes the red team, performance and detector values from the raw files.
+
+| ID | Metric | Target | Measured | Verdict | Where |
+|---|---|---|---|---|---|
+| M1 | Attack success, scripted agent, C2 | 0% | 0.0% (0.0% to 7.4%), 0 of 48 | pass | [Red team](#red-team) |
+| M2 | Attack success, LLM agent, C0 to C2 | at least 80% lower | not run: needs an API key | not run | [The LLM agent](#the-llm-agent) |
+| M3 | Benign utility drop, C0 to C2 | at most 10 points | 0.0 points (12 of 12 in both) | pass | [Red team](#red-team) |
+| M4 | Detector recall at a false positive rate of 5% or less | at least 0.90 | 0.71 (0.67 to 0.74) | fail | [Detector](#detector) |
+| M5 | Added latency, scanner off, 200 sessions, 1 KB | p50 at most 10 ms, p95 at most 25 ms | p50 +1987.9 ms, p95 +2731.4 ms | fail | [Performance](#performance) |
+| M5 | The same with one session, 1 KB | the same | p50 +8.6 ms, p95 +11.7 ms | pass | [Performance](#performance) |
+| M5 | The same with one session, 8 KB | the same | p50 +11.0 ms, p95 +15.6 ms | fail (p50 by 1.0 ms) | [Performance](#performance) |
+| M6 | Added latency, classifier, up to 2,000 tokens | p95 at most 150 ms | not measured: the model scored none of the scans | not measured | [Performance](#performance) |
+| M7 | Calls with a recorded decision | 100% | invariant I1 passes at every gate | pass | `docs/gates/phase-8.md` |
+| M8 | One edited audit row is detected | yes | `keystone audit verify` exits 2 and names the row | pass | `docs/gates/phase-5.md` |
+| M9 | Fresh clone to `make demo` | at most 10 minutes | measured at release | not run | `scripts/fresh_clone_test.sh` |
+
+M5 and M6 are from the latest performance run, `eval/results/perf-2026-10-24b.json`, made after the load fixes of ADR-0019. The run before them is under "The measurement before this one". The M6 row would be the classifier's row of the performance tables if the model had answered; it answered none, so the classifier rows measure the rules, and I do not call them M6.
+
 <!-- detector:start -->
 ## Detector
 
