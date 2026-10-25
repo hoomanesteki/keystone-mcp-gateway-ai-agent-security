@@ -1913,6 +1913,7 @@ Edit the file, not the UI: the provisioned dashboard is read-only.
 | `keystone_scan_score` | `tenant` | A histogram of the score of each output the scanner read, in tenths from 0.1 to 1.0. A scan that failed has no score and is not in it |
 | `keystone_sessions_tainted_total` | `tenant` | Outputs that scored as an injection in a session that was not tainted yet (see Scanner) |
 | `keystone_scan_errors_total` | `stage` | A scan that failed and was worked around: `classifier`, `rules` or `action` (see Scanner) |
+| `keystone_scan_model_total` | `model` | What the model did for each scan: `answered`, `skipped` (the rules had flagged the text), `timeout`, `busy` (every place for a scan was taken), `error` or `none` (no model) |
 
 The labels are bounded on purpose. There is no label for a user, a session or an argument: a label
 whose values come from callers would give Prometheus a series for each of them, and metrics are

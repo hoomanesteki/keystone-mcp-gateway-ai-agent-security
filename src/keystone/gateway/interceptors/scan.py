@@ -100,6 +100,7 @@ class OutputScanInterceptor:
     def _observe(self, ctx: CallContext, scan: ScanResult) -> None:
         if self._metrics is not None:
             self._safely(self._metrics.scan_scored, ctx.principal.tenant_id, scan.score)
+            self._safely(self._metrics.scan_modelled, scan.model)
 
     def _count_failure(self, stage: str) -> None:
         if self._metrics is not None:

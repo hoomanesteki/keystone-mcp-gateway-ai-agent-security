@@ -58,6 +58,9 @@ LATENCY_BUCKETS = (
 # The policy engine decides in well under a millisecond.
 POLICY_BUCKETS = (0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.1)
 SCORE_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+# What a scan did with the model (KS-992): "answered" when it scored the text, the others when it
+# did not ("skipped": the rules had flagged the text already), "none" for a gateway with no model.
+SCAN_MODELS = ("answered", "skipped", "timeout", "busy", "error", "none")
 # What can fail in a scan: the classifier, the rules, and the action on a flagged output.
 SCAN_STAGES = ("rules", "classifier", "action")
 PROFILES = ("full", "passthrough")
@@ -206,6 +209,11 @@ class Metrics:
             "Scans that failed and were worked around, by stage",
             ["stage"],
         )
+        self.scan_model = self._counter(
+            "keystone_scan_model",
+            "Scans by what the model did: answered, skipped, timeout, busy, error or none",
+            ["model"],
+        )
         # Set by the rate limit slot (KS-804), for each call it refuses.
         self.rate_limited = self._counter(
             "keystone_rate_limited",
@@ -262,6 +270,17 @@ class Metrics:
         """The score of one output that was scanned. A scan that failed has no score and is not
         observed: it is counted by `scan_failed`."""
         self.scan_score.labels(tenant=self._tenant(tenant)).observe(score)
+
+    def scan_modelled(self, model: str | None) -> None:
+        """What the model did for one scan. A name that is not one of the words is the model's own
+        and means it answered."""
+        if model is None:
+            kind = "none"
+        elif model in SCAN_MODELS:
+            kind = model
+        else:
+            kind = "answered"
+        self.scan_model.labels(model=kind).inc()
 
     def rate_limit_refused(self, tenant: str, scope: str) -> None:
         """A call that a rate limit refused. `scope` is one of RATE_SCOPES."""
