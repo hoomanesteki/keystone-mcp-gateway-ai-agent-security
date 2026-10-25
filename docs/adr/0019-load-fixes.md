@@ -72,3 +72,8 @@ CPU per call, the 200-session numbers and the share of scans the model skipped a
 `docs/results.md`. Nothing here moves the work off the event loop: one process is one core, so
 calls a second per process are bounded by CPU per call, and a second core needs a second process
 behind a router that keeps a session on the process that opened it.
+
+## Result
+
+Measured at the tip of the branch (`eval/results/perf-2026-10-24b.json`). With the scanner off at 1 KB one process serves 78.3 calls a second with one session (was 56.8) and 87.7 with 200 sessions (was 63.9), a call costs 11.1 ms of CPU (was 15.3), and no call of 4,000 failed at 200 sessions (was 130). M5 at 200 sessions is not met: 88 calls a second against the 1,020 the target needs. The scans did not reach the model, and ADR-0019 does not claim they did: on this host a scan took 0.6 to 1.5 s inside the container, against a wait of 300 ms, so the model answered none and M6 is not measured. The "busy" rule is what keeps that from costing a wait.
+

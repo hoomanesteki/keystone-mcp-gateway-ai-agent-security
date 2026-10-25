@@ -260,6 +260,33 @@ def failed_share(document: Mapping[str, Any], key: str, size: int) -> str:
     return f" ({summary_of(run)['error_rate'] * 100:.1f}% of the calls failed)"
 
 
+def model_answered(
+    document: Mapping[str, Any], size: int, sequential: bool = False
+) -> float | None:
+    """The share of the classifier run's scans that the model scored, or None if the build did not
+    count them. An M6 figure from a run where the model scored almost nothing is the rules' time."""
+    run = runs_of(document, "classifier", sequential).get(size)
+    counted = (run or {}).get("models") or {}
+    total = sum(counted.values())
+    if not total:
+        return None
+    return counted.get("answered", 0) / total
+
+
+def m6_verdict(
+    document: Mapping[str, Any], sizes: list[int], passed: list[bool], sequential: bool
+) -> str:
+    """met or not met, unless the model scored less than half the scans of a run: then the latency
+    is not the classifier's and the target is not measured."""
+    if not passed:
+        return ""
+    shares = [model_answered(document, size, sequential) for size in sizes]
+    low = [share for share in shares if share is not None and share < 0.5]
+    if low:
+        return f"not measured: the model scored {min(low) * 100:.0f}% of the scans"
+    return "met" if all(passed) else "not met"
+
+
 def verdicts(document: Mapping[str, Any]) -> list[str]:
     """M5 and M6 against their targets, with the values this run measured."""
     rows: list[list[str]] = []
@@ -289,7 +316,7 @@ def verdicts(document: Mapping[str, Any]) -> list[str]:
             ("met" if all(passed) else "not met") if passed else "",
         ]
     )
-    shown, passed = [], []
+    shown, passed, m6_sizes = [], [], []
     for size in sizes:
         if tokens_of(document, size) > M6_TOKENS:
             continue
@@ -297,6 +324,7 @@ def verdicts(document: Mapping[str, Any]) -> list[str]:
         if extra is None:
             continue
         label = f"{kb(size)} ({tokens_of(document, size)} tokens)"
+        m6_sizes.append(size)
         if extra["p95_ms"] is None:
             shown.append(f"{label}: no call succeeded")
             passed.append(False)
@@ -313,7 +341,7 @@ def verdicts(document: Mapping[str, Any]) -> list[str]:
             f"{sessions} sessions",
             f"p95 at most {M6_P95_MS:.0f} ms",
             "; ".join(shown) or NOT,
-            ("met" if all(passed) else "not met") if passed else "",
+            m6_verdict(document, m6_sizes, passed, False),
         ]
     )
     rows += one_session_rows(document)
@@ -345,13 +373,14 @@ def one_session_rows(document: Mapping[str, Any]) -> list[list[str]]:
                 "met" if all(passed) else "not met",
             ]
         )
-    shown, passed = [], []
+    shown, passed, m6_sizes = [], [], []
     for size in sizes:
         if tokens_of(document, size) > M6_TOKENS:
             continue
         extra = added(document, "classifier", size, sequential=True)
         if extra is None or extra["p95_ms"] is None:
             continue
+        m6_sizes.append(size)
         shown.append(
             f"{kb(size)} ({tokens_of(document, size)} tokens): p95 {signed(extra['p95_ms'])} ms"
         )
@@ -364,7 +393,7 @@ def one_session_rows(document: Mapping[str, Any]) -> list[list[str]]:
                 "session, no queue",
                 f"p95 at most {M6_P95_MS:.0f} ms",
                 "; ".join(shown),
-                "met" if all(passed) else "not met",
+                m6_verdict(document, m6_sizes, passed, True),
             ]
         )
     return rows

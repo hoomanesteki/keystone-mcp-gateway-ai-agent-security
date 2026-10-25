@@ -553,3 +553,22 @@ def test_the_check_and_the_writer_keep_both_measurements_in_the_document(tmp_pat
     assert text.startswith("# Results\n\nBefore.\n")
     assert text.index(START) < text.index(END) < text.index(report.PREVIOUS_START)
     assert report.PREVIOUS_END in text and "fedcba987654" in text
+
+
+def test_m6_is_not_measured_when_the_model_scored_almost_none_of_the_scans() -> None:
+    # A fast p95 from a run where every place was busy is the time of the rules, not the model's.
+    doc = document(classifier={1024: 100.0, 8192: 120.0})
+    for sequential in (False, True):
+        run_ = runs_of(doc, "classifier", sequential)[1024]
+        run_["models"] = {"answered": 2.0, "busy": 98.0}
+
+    rows = verdicts(doc)[0].splitlines()
+
+    m6 = next(row for row in rows if row.startswith("| M6 |"))
+    assert m6.endswith("| not measured: the model scored 2% of the scans |")
+    one = next(row for row in rows if row.startswith("| M6, one session"))
+    assert one.endswith("| not measured: the model scored 2% of the scans |")
+    for sequential in (False, True):
+        runs_of(doc, "classifier", sequential)[1024]["models"] = {"answered": 90.0, "busy": 10.0}
+    scored = verdicts(doc)[0].splitlines()
+    assert next(row for row in scored if row.startswith("| M6 |")).endswith("| met |")
