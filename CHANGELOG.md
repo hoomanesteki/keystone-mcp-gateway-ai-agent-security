@@ -53,6 +53,7 @@ Grouped by release tag, from the conventional commit subjects since v0.0.1. Merg
 
 ### Documentation
 
+- repo: give the readme the numbers of the run after KS-992 (`3722d8b`)
 - eval: publish the detector numbers of the rules-first join (`163c547`)
 - eval: describe the red-team scenarios and mark KS-901 done (`38e4aac`)
 - eval: publish the red-team numbers of the naive agent (`186fe7e`)
