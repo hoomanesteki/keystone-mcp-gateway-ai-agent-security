@@ -15,7 +15,7 @@ Keystone is one MCP endpoint in front of all your tool servers: each call passes
 
 **Measured:** 48 attacks planted in mail, files, web pages and bank transactions, run by a scripted agent (not a language model) that obeys every instruction it reads. Straight at the tools, 48 of 48 landed. Through Keystone, 0 of 48 landed (95% interval 0% to 7.4%), and 12 of 12 harmless tasks still completed ([docs/results.md, Red team](docs/results.md#red-team), 2026-10-24, commit `050b15fd102a`). The approver in that run was an oracle: it approved what each task needed and rejected every other held call.
 
-**Not met:** detector recall is 0.71 against a target of 0.90, and the load targets fail badly. Keystone is one process that serves about 64 calls a second. At 200 sessions it adds 2.7 s at the median with the scanner off, and with the classifier on 57% to 76% of the calls failed ([performance](docs/results.md#performance)).
+**Not met:** detector recall is 0.71 against a target of 0.90, and the load target fails badly. Keystone is one process that serves about 88 calls a second, so at 200 sessions it adds 2.0 s at the median with the scanner off. The classifier target is not measured: in the container under load the model scored none of the scans, and the rules decided all of them ([performance](docs/results.md#performance)).
 
 ```mermaid
 flowchart LR
@@ -35,7 +35,7 @@ The mechanism is under [How it works](#how-it-works).
 
 ## Results
 
-The targets are those of the plan ([docs/PLAN.md](docs/PLAN.md), section 1.7). Every value comes from a file in [eval/results/](eval/results/), rendered into [docs/results.md](docs/results.md) with its date and commit. All runs: one Apple M4 laptop (10 CPUs), 2026-10-24.
+The targets are those of the plan ([docs/PLAN.md](docs/PLAN.md), section 1.7). Every value comes from a file in [eval/results/](eval/results/), rendered into [docs/results.md](docs/results.md) with its date and commit. All runs: one Apple M4 laptop (10 CPUs), 2026-10-24 and 2026-10-25.
 
 | ID | Target | Measured | Verdict | Source |
 |---|---|---|---|---|
@@ -43,8 +43,8 @@ The targets are those of the plan ([docs/PLAN.md](docs/PLAN.md), section 1.7). E
 | M2 | Attack success, real model agent: at least 80% lower than no gateway | not run: needs an API key | not run | [the LLM agent](docs/results.md#the-llm-agent) |
 | M3 | Harmless task drop: at most 10 points | 0.0 points (12 of 12 with and without Keystone) | met | [red team](docs/results.md#red-team) |
 | M4 | Detector recall at a false positive rate of 5% or less: at least 0.90 | 0.71 (95% CI 0.67 to 0.74) | not met | [detector](docs/results.md#detector) |
-| M5 | Added latency, scanner off, 200 sessions: p50 at most 10 ms, p95 at most 25 ms | 1 KB: p50 +2695.0 ms, p95 +3686.9 ms, 3.2% of calls failed. 8 KB: p50 +2941.7 ms, p95 +3816.9 ms, 4.0% failed. One session, 1 KB: p50 +13.8 ms, p95 +23.8 ms | not met | [performance](docs/results.md#performance) |
-| M6 | Added latency, classifier on, up to 2,000 tokens: p95 at most 150 ms | 200 sessions, 8 KB (1,581 tokens): p95 +56045.5 ms, 75.8% failed. 1 KB (197 tokens): p95 +40963.9 ms, 57.1% failed. One session: p95 +1315.5 ms at 8 KB, +895.4 ms at 1 KB | not met | [performance](docs/results.md#performance) |
+| M5 | Added latency, scanner off, 200 sessions: p50 at most 10 ms, p95 at most 25 ms | 1 KB: p50 +1987.9 ms, p95 +2731.4 ms. 8 KB: p50 +2185.4 ms, p95 +2683.8 ms. 0 of 4,000 calls failed at each size. One session: p50 +8.6 ms, p95 +11.7 ms at 1 KB; p50 +11.0 ms, p95 +15.6 ms at 8 KB | not met |
+| M6 | Added latency, classifier on, up to 2,000 tokens: p95 at most 150 ms | the model scored 0% of the scans, so these are the rules' times. 200 sessions: p95 +6716.1 ms at 8 KB (1,581 tokens), +7071.9 ms at 1 KB. One session: p95 +115.8 ms at 8 KB, +47.8 ms at 1 KB | not measured |
 | M7 | Every tool call has a recorded decision | invariant test I1 passes at every gate | met | [tests/invariants/](tests/invariants/) |
 | M8 | One edited audit row is detected | `keystone audit verify` exits 2 and names the row | met | [phase 5 gate](docs/gates/phase-5.md) |
 | M9 | Fresh clone to `make demo` in 10 minutes or less | not measured yet; I expect a miss on a build without cache (20 minutes here) | not run | [KS-907](docs/progress.md) |
@@ -53,10 +53,10 @@ Why the misses:
 
 - **M2.** The real-model run needs a model API key, and this project has none. The command for it is in [docs/results.md](docs/results.md#the-llm-agent).
 - **M4.** The classifier was trained on direct prompts and is weak on documents with an attack buried inside (0.28 alone on documents). The rules alone reach 0.59.
-- **M5.** `keystone serve` is one process on one event loop. It serves 64 calls a second against the echo server's 676, so at 200 sessions the added time is the wait in that queue, not the work of a call. The calls that failed were refused because the Redis connection pool ran out (`MaxConnectionsError`), almost all of them first calls in the first 2 s.
-- **M6.** With the classifier the container used 380% of its 400% CPU, the event loop starved and the health probes of the upstreams timed out. Most failures were Keystone reporting the echo server down (1,982 at 1 KB, 2,493 at 8 KB) or a 30 s timeout (204 and 440). The Redis pool caused 100 in each run ([What failed](docs/results.md#what-failed)).
+- **M5.** `keystone serve` is one process on one event loop. It serves 88 calls a second, and 200 sessions calling one after the other would need about 1,020 to stay within 10 ms. So at 200 sessions the added time is the wait in that queue, not the work of a call; one session at 1 KB meets the target. Before the KS-992 fixes, 3.2% to 4.0% of the calls failed because the Redis connection pool ran out; after them none did.
+- **M6.** A scan of about 850 characters took 0.6 to 1.5 s inside the container, against the 300 ms the gateway waits. The caller moves on at 300 ms, the scan keeps its place in the model until it ends, and the scans that follow find the model busy and use the rules. Before KS-992 the model took every core instead: the event loop starved and 57% to 76% of the calls failed. The choice left is mine: a longer wait, a smaller model, the model in a process of its own, or the rules alone in the container ([docs/progress.md](docs/progress.md), Found).
 - **M9.** The first build took 20 minutes because the Keystone image holds torch and a 738 MB model. A fresh clone that pulls a prebuilt image instead could fit in 10 minutes; KS-907 builds the timing script and records the number.
-- **KS-992** is in progress: a larger Redis pool that waits, a cap on scans running in the model at once, and a credential cache are merged into `dev` ([ADR-0019](docs/adr/0019-load-fixes.md)). They are not measured yet.
+- **KS-992** (the load fixes) is done: a Redis pool that waits, a cap on scans running in the model at once, and a credential cache ([ADR-0019](docs/adr/0019-load-fixes.md)). One failure is not explained yet: the passthrough run (every slot a stub) at 1 KB answered 195 of 4,000 calls with `upstream_protocol_error`.
 
 ## Quick start
 
@@ -198,12 +198,12 @@ Every call, refused or not, writes exactly one row through a batched writer that
 - **Out of scope:** a signed-in user injecting their own agent, a compromised identity provider, side channels and timing attacks.
 - **Untagged tools are invisible to the Rule of Two.** The v0.8.0 config left the files tools and `bank__list_transactions` untagged, and with it 29 of 48 attacks landed.
 - **The approver in every measurement was an oracle.** A person who approves by habit gives the protection back. That is not measured.
-- **Only the rules can taint a session**; the classifier can only flag. The model card says English only, and images are not scanned. The gateway waits 300 ms for the model and then scores by the rules alone, which happened to 12% of the test scans.
+- **Only the rules can taint a session**; the classifier can only flag. The model card says English only, and images are not scanned. The gateway waits 300 ms for the model and then scores by the rules alone, which happened to 12% of the test scans. In the container under load it happened to all of them (see M6).
 - **Taint belongs to one MCP session.** A client that opens a new session starts clean.
 - **The audit chain cannot see** the newest rows deleted, or a chain rewritten from the first row. Publishing the latest hash somewhere out of reach would close that, and it is not built.
 - **Model requests through the LLM proxy** are budgeted and traced, but not rate limited, not checked by policy and not audited ([ADR-0016](docs/adr/0016-llm-proxy.md)).
 - **The sandbox uses the Docker socket**, which gives Keystone root on the host. Local and single-host use only ([ADR-0012](docs/adr/0012-sandbox.md)).
-- **Throughput is one process:** about 64 calls a second with the scanner off, and no high availability.
+- **Throughput is one process:** about 88 calls a second with the scanner off, and no high availability.
 - **No real-model results yet.** M2 and the AgentDojo rows need an API key.
 
 ## Design decisions
@@ -307,7 +307,7 @@ I built Keystone one phase at a time. Each phase ended with a gate report and a 
 | 8 Sandbox, rate limits, budgets, LLM proxy | v0.8.0 | [phase-8](docs/gates/phase-8.md) |
 | 9 Proof and release | v1.0.0, not released | |
 
-Phase 9 so far: the red team, the detector join, the performance harness, the AgentDojo adapter, the untrusted-then-external rule and the Terraform module are done. Still open: the rest of the load fixes and their measurement (KS-992, in progress), a hardening pass with fuzz tests (KS-906), the fresh-clone check (KS-907) and the release (KS-908). Status per story: [docs/progress.md](docs/progress.md).
+Phase 9 so far: the red team, the detector join, the performance harness, the AgentDojo adapter, the untrusted-then-external rule, the load fixes (KS-992) and the Terraform module are done. Still open: a decision on the classifier in the container (M6), a hardening pass with fuzz tests (KS-906), the fresh-clone check (KS-907) and the release (KS-908). Status per story: [docs/progress.md](docs/progress.md).
 
 After v1:
 
