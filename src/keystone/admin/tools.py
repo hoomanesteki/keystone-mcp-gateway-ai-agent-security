@@ -94,6 +94,13 @@ class ToolAdmin:
                 else "it was not disabled by an operator"
             )
             raise ToolConflict(f"{name} cannot be enabled by hand: {why}")
+        if found.pending_description is not None:
+            # Sync saw a new definition while the tool was off. Enabling it would put that
+            # definition into service without anyone reading it.
+            raise ToolConflict(
+                f"{name} changed while it was disabled: review it with tool show, "
+                "then use approve-change"
+            )
         await self._tools.set_status(tenant_id, name, ToolStatus.ACTIVE)
         self._changed()
         return await self.get(tenant_id, name), True

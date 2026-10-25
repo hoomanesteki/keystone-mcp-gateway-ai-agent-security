@@ -1285,14 +1285,17 @@ When a sync finds a different description or schema, the tool is `quarantined`, 
 one. A quarantined tool is left out of `tools/list`, and a call to it returns `KS_QUARANTINED`
 without reaching the upstream. The check reads the tool's status from Postgres on every call, so a
 quarantine made by the CLI in another process stops the very next call. If an upstream takes the
-change back, the tool is released by the next sync. A newer offer replaces an older pending one.
+change back, the tool is released by the next sync. A newer offer replaces an older pending one. A
+tool held at first sight (below) is not released that way: the definition the upstream went back to
+was never accepted by anyone, so the offer is dropped and the tool waits for `approve-change` as
+before.
 
 | Command | What it does |
 |---|---|
 | `keystone tool list [--status S] [--json]` | Every tool with its status and reason. |
 | `keystone tool show NAME` | The pinned definition, the pending one, a diff, and a fingerprint of the pending definition. |
 | `keystone tool approve-change NAME [--expect FP] [--note TEXT]` | Make the pending definition the pinned one, recompute the hashes and set the tool `active`. With `--expect`, refuses if the pending definition is no longer the one with that fingerprint. The note goes in the log. |
-| `keystone tool disable NAME` / `enable NAME` | Take a tool out of service by hand. Sync never re-enables a tool you disabled. `disable` and `enable` both refuse a quarantined tool (review it and approve it instead), and `enable` refuses one the upstream stopped listing. |
+| `keystone tool disable NAME` / `enable NAME` | Take a tool out of service by hand. Sync never re-enables a tool you disabled. `disable` and `enable` both refuse a quarantined tool (review it and approve it instead), and `enable` refuses one the upstream stopped listing. A tool whose definition changed while it was disabled is not enabled by hand either: `tool show` prints the offer, and `approve-change` is what puts it live. |
 
 A tool seen for the first time is screened too (`keystone.defense.description_check`), in two
 passes over its description and over the `description` of every field of its input schema, at any
