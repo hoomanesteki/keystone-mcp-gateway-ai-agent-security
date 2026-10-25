@@ -1,6 +1,9 @@
 """KS-801 without a daemon: the parts of the runner that are code and not Docker."""
 
+import socket
 import struct
+import threading
+import time
 from typing import Any
 
 import anyio
@@ -10,10 +13,12 @@ from docker.errors import NotFound
 from keystone.sandbox.runner import (
     CALL_LABEL,
     MAX_OUTPUT_BYTES,
+    POLL_S,
     SANDBOX_LABEL,
     OutputCollector,
     SandboxRunner,
     _created_at,
+    _feed,
     container_config,
 )
 from keystone.settings import Settings
@@ -272,3 +277,59 @@ def test_the_nested_spelling_works_and_the_short_one_wins(
 def test_bad_sandbox_settings_are_refused(field: str, value: object) -> None:
     with pytest.raises(ValueError, match=field):
         Settings(sandbox={field: value})  # type: ignore[arg-type]
+
+
+# -- the attach socket, which the reader and the stdin feeder share (KS-998)
+
+
+def test_the_feeder_writes_the_input_and_leaves_the_readers_timeout_alone() -> None:
+    ours, theirs = socket.socketpair()
+    try:
+        ours.settimeout(POLL_S)
+
+        _feed(ours, b"input")
+
+        # A timeout belongs to the socket, not to a thread: the reader polls under this one.
+        assert ours.gettimeout() == POLL_S
+        assert theirs.recv(100) == b"input"
+        assert theirs.recv(100) == b""  # the write side was closed: the script sees the end
+    finally:
+        ours.close()
+        theirs.close()
+
+
+def test_a_run_given_input_that_then_goes_quiet_is_killed_when_its_time_is_up() -> None:
+    """The reader wakes every POLL_S to look at the clock and at a cancellation. A feeder that set
+    its own timeout took the reader's away, so a script that read its input and hung was never
+    killed, and its container stood until the reaper took it ten minutes later."""
+    ours, theirs = socket.socketpair()
+    killed = threading.Event()
+
+    class Container:
+        def kill(self) -> None:
+            killed.set()
+            theirs.close()  # the daemon ends the stream when the container dies
+
+    outcome: list[bool] = []
+
+    def read() -> None:
+        outcome.append(
+            SandboxRunner()._read(
+                ours, Container(), OutputCollector(), time.monotonic() + 0.3, threading.Event()
+            )
+        )
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    # Once the reader polls, the input goes in, as it does at the start of a run.
+    waited = time.monotonic() + 2
+    while ours.gettimeout() != POLL_S and time.monotonic() < waited:
+        time.sleep(0.01)
+    threading.Thread(target=_feed, args=(ours, b"input"), daemon=True).start()
+    reader.join(timeout=3)
+
+    try:
+        assert outcome == [True]
+        assert killed.is_set()
+    finally:
+        ours.close()

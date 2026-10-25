@@ -342,3 +342,43 @@ def test_the_names_of_models_a_metric_can_carry_are_the_ones_the_settings_allow(
     metrics.set_info("full", True, "a-model-somebody-made-up")
     other = {"profile": "full", "scanner": "on", "classifier": "other"}
     assert metrics.registry.get_sample_value("keystone_gateway_info", other) == 1
+
+
+@pytest.mark.phase(5)
+async def test_a_made_up_name_the_rate_limit_refused_is_still_unknown() -> None:
+    """A call to a made-up name takes a token (KS-992), and once the bucket is empty the refusal
+    is the rate limit's. The name must not become a label value for that: two hundred of them
+    would make every real tool first called afterwards "other" for the life of the process."""
+    from keystone.gateway.server import unknown_tool
+    from keystone.metering.ratelimit import MemoryLimiter
+    from keystone.settings import RateLimit, RateLimitSettings
+    from tests.fixtures.calls import OLIVIA
+
+    metrics = Metrics(tenants=["acme"])
+    limited = Settings(
+        env="test",
+        rate_limits=RateLimitSettings(per_user=RateLimit(capacity=1, refill_per_s=0.001)),
+    )
+    deps = PipelineDeps(
+        Dispatching(), InMemoryAuditSink(), metrics=metrics, rate_limiter=MemoryLimiter()
+    )
+    pipeline = build_pipeline(limited, deps)
+
+    for name in ("made_up_a", "made_up_b", "made_up_c"):
+        ctx = make_ctx({}, unknown_tool(name, OLIVIA))
+        await pipeline.reject(ctx, Reject(Code.TOOL_NOT_FOUND, "no such tool"))
+
+    calls = {
+        effect: value(
+            metrics,
+            "keystone_tool_calls_total",
+            tenant="acme",
+            tool="unknown",
+            effect=effect,
+            outcome="rejected",
+        )
+        for effect in ("none", "deny")
+    }
+    assert calls == {"none": 1, "deny": 2}
+    assert value(metrics, "keystone_rejections_total", tenant="acme", code="KS_RATE_LIMITED") == 2
+    assert "made_up" not in metrics.render().decode()

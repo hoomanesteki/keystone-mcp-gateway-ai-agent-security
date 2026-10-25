@@ -229,10 +229,15 @@ class _SessionClient:
         return True
 
     async def aclose(self) -> None:
+        # Set before the lock is taken: a connect that holds the lock sees it when it comes back
+        # from `_open`, and closes what it opened instead of keeping it. Without that, a session
+        # that opened after this point was kept by nobody, and its task kept the pool's task
+        # group, and the app's shutdown, from ending (KS-998).
         self._closed = True
-        connection, self._connection = self._connection, None
-        if connection is not None:
-            await connection.close()
+        async with self._lock:
+            connection, self._connection = self._connection, None
+            if connection is not None:
+                await connection.close()
 
     @staticmethod
     async def _first_page(client: Client) -> None:
@@ -294,7 +299,7 @@ class _SessionClient:
         (default: all of the backoff schedule)."""
         async with self._lock:
             if self._closed:
-                raise Reject(Code.UPSTREAM_ERROR, "the connection to the upstream server is closed")
+                raise Reject(Code.UPSTREAM_ERROR, _CLOSED_MESSAGE)
             connection = self._connection
             if connection is not None and connection.client is not None and connection.usable:
                 return connection.client
@@ -305,6 +310,11 @@ class _SessionClient:
                 if attempt:
                     await anyio.sleep(self._backoff_s[attempt - 1])
                 opened = await self._open()
+                if self._closed:
+                    # Closed while this was connecting: the session is not kept, and `aclose`,
+                    # waiting for the lock, finds nothing left to close.
+                    await opened.close()
+                    raise Reject(Code.UPSTREAM_ERROR, _CLOSED_MESSAGE)
                 if opened.client is not None:
                     self._connection = opened
                     return opened.client
@@ -479,6 +489,7 @@ def container_environment(env: Mapping[str, str]) -> dict[str, str]:
 
 _MCP_ERROR_MESSAGE = "the upstream server rejected the request"
 _DROPPED_MESSAGE = "the upstream server dropped the connection"
+_CLOSED_MESSAGE = "the connection to the upstream server is closed"
 
 
 def convert_result(result: Any) -> ToolResult:

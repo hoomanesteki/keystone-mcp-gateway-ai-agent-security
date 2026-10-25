@@ -755,9 +755,12 @@ class LlmProxy:
             # The provider finished this answer before it sent the first byte. A caller that leaves
             # makes the server cancel the task that is reading it, and a read cut in the middle
             # closes the connection with the usage unread, so the request is booked without a cost
-            # (KS-997). The read is shielded and the answer is handed on from memory.
+            # (KS-997). The read is shielded and the answer is handed on from memory. It gets the
+            # time a whole answer may take, the same as the connection's read timeout: DRAIN_S is
+            # for the rest of an answer whose caller has left, and under it a body that took longer
+            # was cut after the 200 had gone out and booked at nothing (KS-998).
             chunks: list[bytes] = []
-            with anyio.CancelScope(shield=True), anyio.fail_after(DRAIN_S):
+            with anyio.CancelScope(shield=True), anyio.fail_after(self._config.timeout_s):
                 async for chunk in answer.chunks:
                     reader.feed(chunk)
                     chunks.append(chunk)

@@ -37,6 +37,18 @@ def is_virtual(tool: ToolRef) -> bool:
     return tool.upstream_id == VIRTUAL_UPSTREAM
 
 
+# The upstream of the stand-in the gateway audits a call under when the tool it names does not
+# exist, or cannot be looked up (`gateway.server.unknown_tool`). The name in it is the caller's, so
+# nothing keyed by name may be made from such a tool: the metrics count it as "unknown" and the
+# rate limit charges no bucket of its own for it (KS-998).
+UNKNOWN_UPSTREAM = "unknown"
+
+
+def is_unknown(tool: ToolRef) -> bool:
+    """True for the stand-in of a tool that does not exist."""
+    return tool.upstream_id == UNKNOWN_UPSTREAM
+
+
 def check_upstream_id(upstream_id: str) -> None:
     """Raise ValueError unless `upstream_id` can be the first half of an exposed tool name."""
     if upstream_id in LLM_UPSTREAM_IDS:

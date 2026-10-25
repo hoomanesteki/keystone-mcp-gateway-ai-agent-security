@@ -98,12 +98,13 @@ class RateLimitInterceptor:
             return
         raise self._refusal(ctx, verdict)
 
-    async def charge_principal(self, ctx: CallContext) -> None:
-        """Take a token from the principal's buckets for a call that never reached the pipeline,
-        because the tool it names does not exist (KS-992). The tool's own bucket is left alone: the
-        tool is not one. Raises the same Reject as `before_call` when a bucket is empty. An agent
-        that makes up tool names in a loop is audited on every call and is now limited as well."""
-        buckets = self._buckets(ctx, with_tool=False)
+    async def charge_principal(self, ctx: CallContext, *, with_tool: bool = False) -> None:
+        """Take a token from the principal's buckets, and with `with_tool` from the tool's, for a
+        call refused before this slot ran: the tool it names does not exist (KS-992), its arguments
+        fit no schema, its session cannot be read (KS-998). The tool's bucket is left alone for a
+        name that is no tool. Raises the same Reject as `before_call` when a bucket is empty. An
+        agent that loops on such calls is audited on every one and is limited as well."""
+        buckets = self._buckets(ctx, with_tool=with_tool)
         if not buckets:
             return
         verdict = await self._limiter.check(buckets, self._clock())
