@@ -9,11 +9,13 @@ Project page: <https://hoomanesteki.github.io/keystone-mcp-gateway-ai-agent-secu
 
 ## In one minute
 
-An agent that reads email, web pages or files reads text a stranger wrote, and an agent that obeys that text can forward an invoice or move money. Most setups have no single place to stop that call and no record of who allowed it.
+An agent that reads email, web pages or files reads text a stranger wrote, and an agent that obeys that text can forward an invoice or move money. An MCP client that connects straight to each tool server has no single place to stop that call and no record of who allowed it.
 
 Keystone is one MCP endpoint in front of all your tool servers: each call passes identity, Cedar policy, approval and an injection scanner before it runs, and leaves one hash-chained audit row after.
 
-**Measured:** 48 attacks planted in mail, files, web pages and bank transactions, run by an agent that obeys every instruction it reads. Straight at the tools, 48 of 48 landed. Through Keystone, 0 of 48 landed (95% interval 0% to 7.4%), and 12 of 12 harmless tasks still completed ([docs/results.md, Red team](docs/results.md#red-team), 2026-10-24, commit `050b15fd102a`). That agent is a script, not a language model.
+**Measured:** 48 attacks planted in mail, files, web pages and bank transactions, run by a scripted agent (not a language model) that obeys every instruction it reads. Straight at the tools, 48 of 48 landed. Through Keystone, 0 of 48 landed (95% interval 0% to 7.4%), and 12 of 12 harmless tasks still completed ([docs/results.md, Red team](docs/results.md#red-team), 2026-10-24, commit `050b15fd102a`). The approver in that run was an oracle: it approved what each task needed and rejected every other held call.
+
+**Not met:** detector recall is 0.71 against a target of 0.90, and the load targets fail badly. Keystone is one process that serves about 64 calls a second. At 200 sessions it adds 2.7 s at the median with the scanner off, and with the classifier on 57% to 76% of the calls failed ([performance](docs/results.md#performance)).
 
 ```mermaid
 flowchart LR
@@ -22,6 +24,14 @@ flowchart LR
   K -->|"held calls"| P["Approver in the console"]
   K -->|"one row per call"| L[("Audit log in Postgres")]
 ```
+
+## How it stops the demo attack
+
+1. The agent reads a poisoned email. The scanner scores it at 0.85 or more and taints the session, and the inbox tool adds the flag `reads_untrusted`.
+2. The email tells the agent to forward an invoice to an outside address. That tool is tagged `external_effect`. Four Cedar rules match, among them `tainted-external-effect` and `untrusted-then-external-effect`, and each sends the call to a person.
+3. The call waits in the console. The approver rejects it, the mail server never sees it, and the agent gets `KS_APPROVAL_REJECTED` as a tool result.
+
+The mechanism is under [How it works](#how-it-works).
 
 ## Results
 
@@ -33,17 +43,20 @@ The targets are those of the plan ([docs/PLAN.md](docs/PLAN.md), section 1.7). E
 | M2 | Attack success, real model agent: at least 80% lower than no gateway | not run: needs an API key | not run | [the LLM agent](docs/results.md#the-llm-agent) |
 | M3 | Harmless task drop: at most 10 points | 0.0 points (12 of 12 with and without Keystone) | met | [red team](docs/results.md#red-team) |
 | M4 | Detector recall at a false positive rate of 5% or less: at least 0.90 | 0.71 (95% CI 0.67 to 0.74) | not met | [detector](docs/results.md#detector) |
-| M5 | Added latency, scanner off, 200 sessions: p50 at most 10 ms, p95 at most 25 ms | p50 +2695.0 ms, p95 +3686.9 ms, 3.2% of calls failed. One session: p50 +13.8 ms, p95 +23.8 ms | not met | [performance](docs/results.md#performance) |
-| M6 | Added latency, classifier on, up to 2,000 tokens: p95 at most 150 ms | 200 sessions: p95 +40963.9 ms, 57.1% failed. One session: p95 +895.4 ms | not met | [performance](docs/results.md#performance) |
+| M5 | Added latency, scanner off, 200 sessions: p50 at most 10 ms, p95 at most 25 ms | 1 KB: p50 +2695.0 ms, p95 +3686.9 ms, 3.2% of calls failed. 8 KB: p50 +2941.7 ms, p95 +3816.9 ms, 4.0% failed. One session, 1 KB: p50 +13.8 ms, p95 +23.8 ms | not met | [performance](docs/results.md#performance) |
+| M6 | Added latency, classifier on, up to 2,000 tokens: p95 at most 150 ms | 200 sessions, 8 KB (1,581 tokens): p95 +56045.5 ms, 75.8% failed. 1 KB (197 tokens): p95 +40963.9 ms, 57.1% failed. One session: p95 +1315.5 ms at 8 KB, +895.4 ms at 1 KB | not met | [performance](docs/results.md#performance) |
 | M7 | Every tool call has a recorded decision | invariant test I1 passes at every gate | met | [tests/invariants/](tests/invariants/) |
 | M8 | One edited audit row is detected | `keystone audit verify` exits 2 and names the row | met | [phase 5 gate](docs/gates/phase-5.md) |
-| M9 | Fresh clone to `make demo` in 10 minutes or less | not measured yet | not run | |
+| M9 | Fresh clone to `make demo` in 10 minutes or less | not measured yet; I expect a miss on a build without cache (20 minutes here) | not run | [KS-907](docs/progress.md) |
 
 Why the misses:
 
 - **M2.** The real-model run needs a model API key, and this project has none. The command for it is in [docs/results.md](docs/results.md#the-llm-agent).
 - **M4.** The classifier was trained on direct prompts and is weak on documents with an attack buried inside (0.28 alone on documents). The rules alone reach 0.59.
-- **M5, M6.** `keystone serve` is one process on one event loop. It serves 64 calls a second against the echo server's 676, so at 200 sessions the added time is the queue, not the work. The failures were the Redis connection pool running out. The fixes are story KS-992, not merged or measured yet.
+- **M5.** `keystone serve` is one process on one event loop. It serves 64 calls a second against the echo server's 676, so at 200 sessions the added time is the wait in that queue, not the work of a call. The calls that failed were refused because the Redis connection pool ran out (`MaxConnectionsError`), almost all of them first calls in the first 2 s.
+- **M6.** With the classifier the container used 380% of its 400% CPU, the event loop starved and the health probes of the upstreams timed out. Most failures were Keystone reporting the echo server down (1,982 at 1 KB, 2,493 at 8 KB) or a 30 s timeout (204 and 440). The Redis pool caused 100 in each run ([What failed](docs/results.md#what-failed)).
+- **M9.** The first build took 20 minutes because the Keystone image holds torch and a 738 MB model. A fresh clone that pulls a prebuilt image instead could fit in 10 minutes; KS-907 builds the timing script and records the number.
+- **KS-992** is in progress: a larger Redis pool that waits, a cap on scans running in the model at once, and a credential cache are merged into `dev` ([ADR-0019](docs/adr/0019-load-fixes.md)). They are not measured yet.
 
 ## Quick start
 
@@ -55,7 +68,10 @@ Why the misses:
 | GNU make, git, curl | any recent | the commands below |
 | [uv](https://docs.astral.sh/uv/) | 0.12 | the demo scripts, the CLI and the tests |
 | Python | 3.12 (`uv python install 3.12`) | installed and run by uv |
-| Node and pnpm | Node 26, pnpm 12 | the console only |
+| `python3` on PATH | any 3.x | the shell scripts (`get_token.sh`, `demo_attack.sh`, the smokes) call it directly. On a Mac it comes with the Xcode command line tools |
+| Node and pnpm | Node 26, pnpm 12 | the console and `make check` |
+
+`make check` also builds two Docker images, so the Docker daemon must be running for it.
 
 ### Start the stack
 
@@ -79,33 +95,14 @@ Why the misses:
 
    ```bash
    bash scripts/smoke/phase_0.sh
+   curl -fsS http://localhost:8080/healthz
    ```
 
-   It prints one health row per service.
+   The smoke script prints one row for each of the six infrastructure services (Postgres, Redis, Keycloak, Jaeger, Prometheus, Grafana). It does not check Keystone or the demo tool servers; the `curl` checks Keystone.
 
-No `.env` is needed: the defaults in [.env.example](.env.example) apply when it is absent. Copy it to `.env` only to move a port or change a password.
+No `.env` is needed on a Mac: the defaults in [.env.example](.env.example) apply when it is absent. Copy it to `.env` only to move a port or change a password. On Linux, put `DOCKER_SOCKET_GID=$(stat -c %g /var/run/docker.sock)` in `.env` before `make up`, or the sandbox calls fail while the stack still reports healthy.
 
-| Address | What |
-|---|---|
-| `http://localhost:8080/mcp` | Keystone's MCP endpoint (the admin API is under `/admin/api/v1`) |
-| `http://localhost:8180` | Keycloak, admin console `admin` / `admin` |
-| `http://localhost:16686` | Jaeger traces |
-| `http://localhost:9090` | Prometheus |
-| `http://localhost:3000` | Grafana, `admin` / `admin` |
-| `http://localhost:5173` | the console, once you start it (below) |
-| ports 8101 to 8105, 8112, 8199 | demo tool servers (mail, files, bank, echo, web, globex files) and a fake model API |
-
-Demo users, all in tenant `acme` except `bob`:
-
-| User | Role | Used for |
-|---|---|---|
-| `olivia` | operator | the demo agent, may call high-risk tools |
-| `alice` | support | an agent user with low and medium tools only |
-| `lena` | approver | decides held calls in the console |
-| `root` | admin | every console page, policy reloads |
-| `bob` | tenant `globex` | shows tenant isolation |
-
-Each password is `<name>-dev-password`. They are set in [.env.example](.env.example) (`ALICE_PASSWORD` and so on), and compose passes them into the realm in [deploy/keycloak/realm-keystone.json](deploy/keycloak/realm-keystone.json). These values are public: use them on your own machine only. `scripts/get_token.sh alice support-agent` prints an access token for a user.
+The address of every service is in the [runbook, Host ports](docs/runbook.md#host-ports), and the demo users and their passwords are in the [runbook, Getting started](docs/runbook.md#getting-started).
 
 ### See the attack demo
 
@@ -121,29 +118,11 @@ Each password is `<name>-dev-password`. They are set in [.env.example](.env.exam
 
 The script exits 0 only when the first run was robbed and the second was not. `make demo` is the plain version: a scripted agent works as `olivia` through Keystone, and the script ends with `audit records added: 3, tool calls made: 3, steps ok: 4 of 4`.
 
-On a warm stack all nine smoke scripts together took 74 s ([docs/progress.md](docs/progress.md)). I have not timed these two on their own.
+Against one stack, the smoke scripts of phases 0 to 8 in a row took about 3 minutes, and 74 s on a second run ([docs/progress.md](docs/progress.md)). I have not timed these two demos on their own.
 
 ### Open the console
 
-1. With the stack up, install and start the dev server.
-
-   ```bash
-   cd console
-   pnpm install
-   pnpm dev
-   ```
-
-2. Open `http://localhost:5173`. Use `localhost`, not `127.0.0.1`: Keycloak allows only that redirect address.
-3. Sign in as `lena` to see the Approvals page, or as `root` to see Approvals, Audit, Tools, Budgets and Sessions.
-4. To make a card appear, run olivia's agent from the repository root in another terminal. It asks for a transfer of 900, which policy sends to a person.
-
-   ```bash
-   export KEYSTONE_TOKEN=$(scripts/get_token.sh olivia ops-agent)
-   uv run python -m examples.agents.scripted_agent --url http://localhost:8080/mcp \
-     --script examples/agents/scripts/approval_demo.yaml --format text
-   ```
-
-There is no production image of the console yet. It runs on Vite's dev server.
+The console is a Vite dev server for approvers and admins. The steps, and how to make an approval card appear, are in the [runbook, Open the console](docs/runbook.md#open-the-console).
 
 ## How it works
 
@@ -153,20 +132,18 @@ Every `tools/call` goes through nine slots in a fixed order ([src/keystone/gatew
 
 ```mermaid
 flowchart TD
-  IN["tools/call with a valid token"] --> S1["1 rate_limit"]
-  S1 --> S2["2 pinning"]
-  S2 --> S3["3 budget"]
-  S3 --> S4["4 policy"]
-  S4 --> S5["5 approval"]
-  S5 --> S6["6 credential"]
-  S6 --> D["dispatch to the tool server or the sandbox"]
-  D --> S7["7 output_scan"]
-  S7 --> S8["8 session_flags"]
+  IN["tools/call with a valid token"] -->|"call"| S1
+  subgraph pre ["slots 1 to 6, before the dispatch"]
+    S1["1 rate_limit"] --> S2["2 pinning"] --> S3["3 budget"] --> S4["4 policy"] --> S5["5 approval"] --> S6["6 credential"]
+  end
+  S6 -->|"call with the credential header"| D["dispatch to the tool server or the sandbox"]
+  D -->|"tool result"| S7["7 output_scan"]
+  S7 -->|"result, annotated, redacted or withheld"| S8["8 session_flags"]
   S8 --> S9["9 metering"]
-  S9 --> OUT["result to the agent"]
-  S4 -.->|"any slot 1 to 6 refuses"| REF["refusal as a tool result"]
-  OUT --> AUD["audit row, always written"]
-  REF --> AUD
+  S9 -->|"result"| OUT["result to the agent"]
+  pre -.->|"refusal from any of slots 1 to 6"| REF["refusal as a tool result"]
+  OUT -->|"decision and reasons"| AUD["audit row, always written"]
+  REF -->|"decision and reasons"| AUD
 ```
 
 | Slot | What it does |
@@ -216,7 +193,7 @@ Every call, refused or not, writes exactly one row through a batched writer that
 
 ## What it does not do
 
-- **It does not stop every injection.** It limits what a session may do after it reads untrusted text. The detector finds 0.71 of injections at a 5% false positive rate, and flags 15 of 15 security articles that quote attacks.
+- **It does not stop every injection.** It limits what a session may do after it reads untrusted text. At a 5% false positive rate the detector finds 0.71 of injections offline and 0.66 with the gateway's 300 ms wait for the model ([detector](docs/results.md#detector)). It also wrongly flags every security article that quotes an attack (15 of 15) and a third of the instruction-like harmless texts (22 of 66).
 - **It sees tool traffic only.** A model that leaks data in its reply to the user is out of reach.
 - **Out of scope:** a signed-in user injecting their own agent, a compromised identity provider, side channels and timing attacks.
 - **Untagged tools are invisible to the Rule of Two.** The v0.8.0 config left the files tools and `bank__list_transactions` untagged, and with it 29 of 48 attacks landed.
@@ -330,7 +307,7 @@ I built Keystone one phase at a time. Each phase ended with a gate report and a 
 | 8 Sandbox, rate limits, budgets, LLM proxy | v0.8.0 | [phase-8](docs/gates/phase-8.md) |
 | 9 Proof and release | v1.0.0, not released | |
 
-Phase 9 so far: the red team, the detector join, the performance harness, the AgentDojo adapter, the untrusted-then-external rule and the Terraform module are done. Still open: the load fixes (KS-992), a hardening pass with fuzz tests (KS-906), the fresh-clone check (KS-907) and the release (KS-908). Status per story: [docs/progress.md](docs/progress.md).
+Phase 9 so far: the red team, the detector join, the performance harness, the AgentDojo adapter, the untrusted-then-external rule and the Terraform module are done. Still open: the rest of the load fixes and their measurement (KS-992, in progress), a hardening pass with fuzz tests (KS-906), the fresh-clone check (KS-907) and the release (KS-908). Status per story: [docs/progress.md](docs/progress.md).
 
 After v1:
 

@@ -12,17 +12,58 @@ The console also needs Node 26 and pnpm 12.
 2. Start the stack: `make up`. It builds the images, starts every service and returns when all of
    them report healthy. The first build took 20 minutes on a laptop; a cold start after that takes
    about 30 seconds (see Local stack).
-3. Check it: `bash scripts/smoke/phase_0.sh` prints one health row per service.
+3. Check it: `bash scripts/smoke/phase_0.sh` prints one row for each of the six infrastructure
+   services (Postgres, Redis, Keycloak, Jaeger, Prometheus, Grafana). It does not check Keystone or
+   the demo upstreams: `curl -fsS http://localhost:8080/healthz` checks Keystone.
 4. Watch an agent work through Keystone: `make demo`. It ends with
    `audit records added: 3, tool calls made: 3, steps ok: 4 of 4`.
 5. Watch an attack fail: `make demo-attack` runs the same poisoned email without Keystone and
    through it.
-6. Open the console: `cd console && pnpm install && pnpm dev`, then `http://localhost:5173`. Sign
-   in as `lena` (approver) or `root` (admin).
+6. Open the console (below).
 
-No `.env` is needed. The defaults in `.env.example` apply when it is absent; copy it to `.env` to
-move a port or change a password. Every user's password is `<name>-dev-password`, and all of these
-values are public, so use them on your own machine only.
+No `.env` is needed on a Mac. The defaults in `.env.example` apply when it is absent; copy it to
+`.env` to move a port or change a password. The console and the CLI do not read `.env`: after
+moving Keycloak or Keystone, also set `VITE_OIDC_AUTHORITY` and `KEYSTONE_URL` for `pnpm dev`, and
+`KEYSTONE_ADMIN_URL` for `keystone policy reload`. On Linux, put
+`DOCKER_SOCKET_GID=$(stat -c %g /var/run/docker.sock)` in `.env` before `make up`. The default (0)
+is the group of the socket under Docker Desktop, and with the wrong group the stack still reports
+healthy while every sandbox call fails (see Sandbox).
+
+Demo users, all in tenant `acme` except `bob`:
+
+| User | Role | Used for |
+|---|---|---|
+| `olivia` | operator | the demo agent, may call high-risk tools |
+| `alice` | support | an agent user with low and medium tools only |
+| `lena` | approver | decides held calls in the console |
+| `root` | admin | every console page, policy reloads |
+| `bob` | tenant `globex` | shows tenant isolation |
+
+Every user's password is `<name>-dev-password`. They are set in `.env.example` (`ALICE_PASSWORD`
+and so on), and compose passes them into the realm in `deploy/keycloak/realm-keystone.json`. All
+of these values are public, so use them on your own machine only.
+
+### Open the console
+
+1. With the stack up, start the dev server: `cd console && pnpm install && pnpm dev`.
+2. Open `http://localhost:5173`. Use `localhost`, not `127.0.0.1`: Keycloak allows only that
+   redirect address.
+3. Sign in as `lena` to see the Approvals page, or as `root` to see Approvals, Audit, Tools,
+   Budgets and Sessions.
+4. To make a card appear, run olivia's agent from the repository root in another terminal. It asks
+   for a transfer of 900, which policy sends to a person.
+
+   ```bash
+   export KEYSTONE_TOKEN=$(scripts/get_token.sh olivia ops-agent)
+   uv run python -m examples.agents.scripted_agent --url http://localhost:8080/mcp \
+     --script examples/agents/scripts/approval_demo.yaml --format text
+   ```
+
+   Sign in as `lena` before you start it, and approve within about a minute: Keystone holds the
+   call for 10 s and the agent's `keystone__await_approval` waits 60 s more, then the run ends
+   without the transfer. The token lasts five minutes; run the `export` again for a new one.
+
+There is no production image of the console yet. It runs on Vite's dev server.
 
 To point your own MCP client at Keystone, use `http://localhost:8080/mcp` with
 `Authorization: Bearer <token>`. `scripts/get_token.sh olivia ops-agent` prints a token, and it
@@ -161,7 +202,8 @@ model again.
 ## Host ports
 
 The defaults are in `.env.example`. Copy it to `.env` to move a port, then run `make up` again.
-Tests never use these ports. They start their own services on free ports.
+Integration tests use the Postgres and Redis of `make up-core` on these ports (a separate
+`keystone_test` database). Every other server a test starts listens on a free port.
 
 | Service | Host port | Notes |
 |---|---|---|
