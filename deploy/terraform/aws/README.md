@@ -102,6 +102,12 @@ Fargate time when you turn it on, plus X-Ray's own charges.
   `terraform.tfstate` as well as in Secrets Manager. The state stays local here. Use an encrypted S3
   backend with locking before sharing it.
 - **Redis has no AUTH token.** Traffic is encrypted and the security group admits only the task.
+- **The ALB idle timeout is 360 s.** A `tools/call` that waits for an approval sends nothing for
+  `approvals.wait_seconds` (60 s by default, 300 s at most), and a sandbox run may take
+  `sandbox.timeout_s` (300 s at most). The ALB default of 60 s would close the connection first,
+  and the agent would get a 504 instead of `KS_APPROVAL_PENDING` with the approval id. Raise one
+  of those caps and the timeout has to follow; lower the timeout and set
+  `KEYSTONE_APPROVALS__WAIT_SECONDS` well under it.
 - **One NAT gateway, one task, no Multi-AZ database.** A second of each is the first change for
   production.
 - **The task role holds nothing** except X-Ray write access when `enable_adot` is on. Keystone

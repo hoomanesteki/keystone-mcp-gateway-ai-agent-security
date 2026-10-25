@@ -4,6 +4,10 @@ import re
 from pathlib import Path
 
 import pytest
+from annotated_types import Le
+from pydantic import BaseModel
+
+from keystone.settings import ApprovalSettings, SandboxSettings
 
 ROOT = Path(__file__).resolve().parents[2]
 TF_DIR = ROOT / "deploy" / "terraform" / "aws"
@@ -103,6 +107,25 @@ def test_the_config_yaml_reaches_the_task() -> None:
     assert re.search(
         r"KEYSTONE_ALLOW_PRIVATE_UPSTREAMS\s*=\s*tostring\(var\.allow_private_upstreams\)", ecs
     )
+
+
+@pytest.mark.phase(9)
+def test_the_load_balancer_outlives_an_approval_wait_and_a_sandbox_run() -> None:
+    # Both send no bytes while they run, and their settings cap them at 300 s. The ALB default of
+    # 60 s would turn either into a 504 from the load balancer.
+    alb = (TF_DIR / "alb.tf").read_text()
+    idle = re.search(r"idle_timeout\s*=\s*(\d+)", alb)
+
+    assert idle is not None
+    assert int(idle.group(1)) > max(
+        _cap(ApprovalSettings, "wait_seconds"), _cap(SandboxSettings, "timeout_s")
+    )
+
+
+def _cap(model: type[BaseModel], field: str) -> float:
+    (bound,) = [m for m in model.model_fields[field].metadata if isinstance(m, Le)]
+    assert isinstance(bound.le, int | float)
+    return float(bound.le)
 
 
 @pytest.mark.phase(9)
