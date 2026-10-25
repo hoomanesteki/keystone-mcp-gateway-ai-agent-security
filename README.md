@@ -45,9 +45,9 @@ The targets are those of the plan ([docs/PLAN.md](docs/PLAN.md), section 1.7). E
 | M4 | Detector recall at a false positive rate of 5% or less: at least 0.90 | 0.71 (95% CI 0.67 to 0.74) | not met | [detector](docs/results.md#detector) |
 | M5 | Added latency, scanner off, 200 sessions: p50 at most 10 ms, p95 at most 25 ms | 1 KB: p50 +1987.9 ms, p95 +2731.4 ms. 8 KB: p50 +2185.4 ms, p95 +2683.8 ms. 0 of 4,000 calls failed at each size. One session: p50 +8.6 ms, p95 +11.7 ms at 1 KB; p50 +11.0 ms, p95 +15.6 ms at 8 KB | not met | [performance](docs/results.md#performance) |
 | M6 | Added latency, classifier on, up to 2,000 tokens: p95 at most 150 ms | the model scored 0% of the scans, so these are the rules' times. 200 sessions: p95 +6716.1 ms at 8 KB (1,581 tokens), +7071.9 ms at 1 KB. One session: p95 +115.8 ms at 8 KB, +47.8 ms at 1 KB | not measured | [performance](docs/results.md#performance) |
-| M7 | Every tool call has a recorded decision | invariant test I1 passed at the gates of phases 1 to 8 (it did not exist at phase 0; the phase 9 gate has not run) | met | [tests/invariants/](tests/invariants/) |
+| M7 | Every tool call has a recorded decision | invariant test I1 passed at the gates of phases 1 to 9 (it did not exist at phase 0) | met | [tests/invariants/](tests/invariants/) |
 | M8 | One edited audit row is detected | `keystone audit verify` exits 2 and names the row | met | [phase 5 gate](docs/gates/phase-5.md) |
-| M9 | Fresh clone to `make demo` in 10 minutes or less | not measured yet; I expect a miss on a build without cache (20 minutes here) | not run | [KS-907](docs/progress.md) |
+| M9 | Fresh clone to `make demo` in 10 minutes or less | 51 s with a warm Docker cache; about 20 minutes for a cold first build | met warm, not met cold | [fresh clone run](eval/results/fresh-clone-2026-10-25.json) |
 
 Why the misses:
 
@@ -55,7 +55,7 @@ Why the misses:
 - **M4.** The classifier was trained on direct prompts and is weak on documents with an attack buried inside (0.28 alone on documents). The rules alone reach 0.59.
 - **M5.** `keystone serve` is one process on one event loop. It serves 88 calls a second, and 200 sessions calling one after the other would need about 1,020 to stay within 10 ms. So at 200 sessions the added time is the wait in that queue, not the work of a call; one session at 1 KB meets the target. Before the KS-992 fixes, 3.2% to 4.0% of the calls failed because the Redis connection pool ran out; after them none did.
 - **M6.** A scan of about 850 characters took 0.6 to 1.5 s inside the container, against the 300 ms the gateway waits. The caller moves on at 300 ms, the scan keeps its place in the model until it ends, and the scans that follow find the model busy and use the rules. Before KS-992 the model took every core instead: the event loop starved and 57% to 76% of the calls failed. The choice left is mine: a longer wait, a smaller model, the model in a process of its own, or the rules alone in the container ([docs/progress.md](docs/progress.md), Found).
-- **M9.** The first build took 20 minutes because the Keystone image holds torch and a 738 MB model. A fresh clone that pulls a prebuilt image instead could fit in 10 minutes; KS-907 builds the timing script and records the number.
+- **M9.** A fresh clone from GitHub reached the demo output in 51 s on a machine that had built the images before. The first build on a clean machine takes about 20 minutes, because the Keystone image holds torch and a 738 MB model. Publishing a prebuilt image would bring the cold case under 10 minutes; that is post-v1.
 - **KS-992** (the load fixes) is done: a Redis pool that waits, a cap on scans running in the model at once, and a credential cache ([ADR-0019](docs/adr/0019-load-fixes.md)). One failure is not explained yet: the passthrough run (every slot a stub) at 1 KB answered 195 of 4,000 calls with `upstream_protocol_error`.
 
 ## Quick start

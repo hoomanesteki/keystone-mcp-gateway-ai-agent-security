@@ -16,9 +16,9 @@ The nine metrics of the plan (section 1.7), with the value and the verdict. Each
 | M5, diagnostic | The same with one session, 1 KB (not the plan's condition, which is 200 sessions) | the same | p50 +8.6 ms, p95 +11.7 ms | meets the target at 1 KB; M5 itself stays fail | [Performance](#performance) |
 | M5, diagnostic | The same with one session, 8 KB | the same | p50 +11.0 ms, p95 +15.6 ms | fail (p50 by 1.0 ms) | [Performance](#performance) |
 | M6 | Added latency, classifier, up to 2,000 tokens | p95 at most 150 ms | not measured: the model scored none of the scans | not measured | [Performance](#performance) |
-| M7 | Calls with a recorded decision | 100% | invariant I1 passed at the gates of phases 1 to 8 (it did not exist at phase 0; the phase 9 gate has not run) | pass | `docs/gates/phase-8.md` |
+| M7 | Calls with a recorded decision | 100% | invariant I1 passed at the gates of phases 1 to 9 (it did not exist at phase 0) | pass | `docs/gates/phase-9.md` |
 | M8 | One edited audit row is detected | yes | `keystone audit verify` exits 2 and names the row | pass | `docs/gates/phase-5.md` |
-| M9 | Fresh clone to `make demo` | at most 10 minutes | measured at release | not run | `scripts/fresh_clone_test.sh` |
+| M9 | Fresh clone to `make demo` | at most 10 minutes | 51 s with a warm Docker cache; a cold first build takes about 20 minutes | met with a warm cache, not met cold | [`eval/results/fresh-clone-2026-10-25.json`](../eval/results/fresh-clone-2026-10-25.json) |
 
 M5 and M6 are from the latest performance run, `eval/results/perf-2026-10-24b.json`, made after the load fixes of ADR-0019. The run before them is under "The measurement before this one". The M6 row would be the classifier's row of the performance tables if the model had answered; it answered none, so the classifier rows measure the rules, and I do not call them M6.
 

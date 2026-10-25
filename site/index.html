@@ -323,7 +323,7 @@ when { resource.tags.contains("external_effect")
   <div class="wrap">
     <p class="kicker">8. Run it</p>
     <h2>Two commands and a console</h2>
-    <p>You need Docker and <a href="https://docs.astral.sh/uv/">uv</a>. The first build took 20 minutes on my laptop (the image holds torch and a classifier model); later starts take about 30 seconds. The 10-minute check is not run yet.</p>
+    <p>You need Docker and <a href="https://docs.astral.sh/uv/">uv</a>. The first build took 20 minutes on my laptop (the image holds torch and a classifier model); later starts take about 30 seconds. A fresh clone from GitHub reached the demo in 51 seconds on a machine that had built the images before.</p>
     <pre class="code" tabindex="0"><code>git clone https://github.com/hoomanesteki/keystone-mcp-gateway-ai-agent-security.git
 cd keystone-mcp-gateway-ai-agent-security
 make demo          # the stack, then a scripted agent through Keystone
