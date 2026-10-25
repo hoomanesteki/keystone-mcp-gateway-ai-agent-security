@@ -5,7 +5,7 @@ import json
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from keystone.registry.pinning import OPERATOR_DISABLED
+from keystone.registry.pinning import OPERATOR_DISABLED, REMOVED
 from tests.fixtures.cli import invoke
 from tests.fixtures.registry import FakeUpstream, RegistryEnv, running_registry, tool
 
@@ -151,6 +151,30 @@ async def test_enable_will_not_override_a_quarantine_or_a_removal(
 
     assert quarantined.exit_code == 1 and "use approve-change" in quarantined.output
     assert removed.exit_code == 1 and "no longer lists it" in removed.output
+
+
+async def test_disable_keeps_the_record_of_a_tool_the_upstream_dropped(
+    clean_env: None, test_database_url: str, sessionmaker: Sessions
+) -> None:
+    fleet = {"mail": FakeUpstream(tool("read"), tool("old"))}
+    async with running_registry(sessionmaker, fleet=fleet) as env:
+        await env.service.sync_all()
+        fleet["mail"].tools = [tool("read")]
+        await env.service.sync_all()
+
+        disabled = await invoke(test_database_url, ["tool", "disable", "mail__old"])
+        row = await env.tools.get("acme", "mail__old")
+        enabled = await invoke(test_database_url, ["tool", "enable", "mail__old"])
+        by_hand = await invoke(test_database_url, ["tool", "disable", "mail__read"])
+        twice = await invoke(test_database_url, ["tool", "disable", "mail__read"])
+
+    # Disabling by hand must not overwrite why sync disabled it: `enable` reads that reason to
+    # refuse reviving a tool the upstream no longer serves.
+    assert disabled.exit_code == 0 and "already disabled" in disabled.output
+    assert row is not None and (row.status, row.quarantine_reason) == ("disabled", REMOVED)
+    assert enabled.exit_code == 1 and "no longer lists it" in enabled.output
+    assert by_hand.exit_code == 0 and "disabled mail__read" in by_hand.output
+    assert twice.exit_code == 0 and "mail__read is already disabled" in twice.output
 
 
 async def test_a_quarantined_tool_cannot_be_disabled_into_an_enabled_one(

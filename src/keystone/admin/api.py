@@ -442,7 +442,8 @@ def create_admin_app(deps: AdminDeps) -> FastAPI:
 
     @app.post("/tools/{name}/disable", tags=["tools"], summary="Take a tool out of service")
     async def disable_tool(principal: admin, name: str) -> ToolSummary:
-        return _summary(await deps.tools.disable(principal.tenant_id, name))
+        row, _ = await deps.tools.disable(principal.tenant_id, name)
+        return _summary(row)
 
     @app.post("/tools/{name}/enable", tags=["tools"], summary="Put a tool you disabled back")
     async def enable_tool(principal: admin, name: str) -> ToolSummary:

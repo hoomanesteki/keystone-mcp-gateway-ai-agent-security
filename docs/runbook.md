@@ -1295,7 +1295,7 @@ before.
 | `keystone tool list [--status S] [--json]` | Every tool with its status and reason. |
 | `keystone tool show NAME` | The pinned definition, the pending one, a diff, and a fingerprint of the pending definition. |
 | `keystone tool approve-change NAME [--expect FP] [--note TEXT]` | Make the pending definition the pinned one, recompute the hashes and set the tool `active`. With `--expect`, refuses if the pending definition is no longer the one with that fingerprint. The note goes in the log. |
-| `keystone tool disable NAME` / `enable NAME` | Take a tool out of service by hand. Sync never re-enables a tool you disabled. `disable` and `enable` both refuse a quarantined tool (review it and approve it instead), and `enable` refuses one the upstream stopped listing. A tool whose definition changed while it was disabled is not enabled by hand either: `tool show` prints the offer, and `approve-change` is what puts it live. |
+| `keystone tool disable NAME` / `enable NAME` | Take a tool out of service by hand. Sync never re-enables a tool you disabled. `disable` and `enable` both refuse a quarantined tool (review it and approve it instead), and `enable` refuses one the upstream stopped listing; `disable` leaves such a tool as it is (it says `already disabled` and keeps the reason, which is what `enable` reads). A tool whose definition changed while it was disabled is not enabled by hand either: `tool show` prints the offer, and `approve-change` is what puts it live. |
 
 A tool seen for the first time is screened too (`keystone.defense.description_check`), in two
 passes over its description and over the `description` of every field of its input schema, at any
