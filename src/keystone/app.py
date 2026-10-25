@@ -128,7 +128,11 @@ def create_app(
     # to everybody.
     authenticator = Authenticator(settings)
     # The engine connects lazily, so building it needs no database. The lifespan disposes it.
-    engine = create_engine(settings.database_url.get_secret_value())
+    engine = create_engine(
+        settings.database_url.get_secret_value(),
+        connect_timeout_s=settings.db_connect_timeout_s,
+        command_timeout_s=settings.db_command_timeout_s,
+    )
     sessions = make_sessionmaker(engine)
     vault = vault_from_settings(settings, sessions)
     needing_a_vault = [
@@ -205,6 +209,8 @@ def create_app(
             settings.redis_url.get_secret_value(),
             pool_size=settings.redis_pool_size,
             pool_timeout_s=settings.redis_pool_timeout_s,
+            socket_timeout_s=settings.redis_socket_timeout_s,
+            connect_timeout_s=settings.redis_connect_timeout_s,
         )
         if settings.redis_url.get_secret_value()
         else None

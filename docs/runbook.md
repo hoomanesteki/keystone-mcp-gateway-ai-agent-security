@@ -1,7 +1,7 @@
 # Runbook
 
-How to run Keystone, and what to do on an ordinary day. The first two sections are the short
-version. Everything after them is reference: every setting, port, command and error, by topic.
+How to run Keystone and what to do on an ordinary day. The first two sections are the short
+version. The rest is reference by topic: settings, ports, commands and errors.
 
 ## Getting started
 
@@ -198,6 +198,36 @@ model again.
 | `bash scripts/smoke/phase_4.sh` | Alice's transfer is `KS_DENIED default-deny` and her tool list has 16 tools (14 of acme's and Keystone's 2); olivia's transfer of 900 is held for approval, lena rejects it through the admin API and olivia is told `KS_APPROVAL_REJECTED`, the audit shows `require_approval` / `approve-transfer-over-500` and one of 100 is dispatched; a policy file is broken on the host, the reload answers 422 with the version unchanged, and the file is put back. About 30 seconds. |
 | `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), olivia's 20 tools, bob's 3 globex tools and Keystone's 2, and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
 | `bash scripts/smoke/phase_2.sh` | Lists the 20 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
+
+### Other make targets
+
+`make help` prints every target that has a description. These are the ones the table above leaves out. `make check`, `make ci-local` and `make gate` start Postgres and Redis themselves, so do not run them while another run uses the stack.
+
+| Target | What it does |
+|---|---|
+| `make setup` | `uv sync` and `pre-commit install` (the plain hook, not the `commit-msg` or `pre-push` types) |
+| `make lint` | `ruff check` and `ruff format --check` |
+| `make fmt` | `ruff check --fix` and `ruff format`, which change files |
+| `make type` | mypy, strict for `core`, `gateway`, `policy` and `audit` |
+| `make policy` | `keystone policy test policies tests/policy_cases --coverage`: the cases, and every policy matched by a case |
+| `make test-unit`, `make test-int`, `make test` | Unit tests and invariants; integration tests (Postgres, Redis and Docker); both |
+| `make check` | `up-core`, lint, types, unit, integration and the console check |
+| `make ci-local` | The steps of CI, in order, and a check that `console/src/api/schema.d.ts` is up to date |
+| `make prose` | `scripts/lint_prose.py`: banned words and em dashes in the docs and the code |
+| `make commits` | Check the subjects of the commits since `origin/main` |
+| `make migrate` | `alembic upgrade head` against `KEYSTONE_DATABASE_URL` |
+| `make gate PHASE=N` | Everything a phase gate runs, against the stack (`make gate PHASE=9` runs phases 0 to 8 inside `phase_9.sh`) |
+| `make github-setup` | Protect `main` and `dev` and import the backlog. It needs a signed-in `gh` |
+
+### Compose variables
+
+These are read by `deploy/docker-compose.yml` from the shell or from `.env` (the file `.env.example` is the template). The Keystone settings the container receives are in the table under "Keystone settings".
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KEYSTONE_PORT` | `8080` | Host port of Keystone. `KEYSTONE_PUBLIC_BASE_URL` in the container is built from it |
+| `KEYSTONE_CLI_SECRET` | `keystone-cli-dev-secret` | Secret of the `keystone-cli` client in the Keycloak realm (the client the CLI and the approvers use). Also read by the realm import, so change it before the first `make up` or reset the stack |
+| `KEYSTONE_HEALTH_INTERVAL_S` | `30` | Seconds between health probes of the upstreams, passed to the container as `KEYSTONE_HEALTH__INTERVAL_S`. 0 turns the probes off |
 
 ## Host ports
 
@@ -519,6 +549,10 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_REDIS_URL` | `redis://localhost:56379/0` | Redis URL. Session state lives here. Set it to an empty string to keep session state in the gateway process instead (one process only, lost on restart). |
 | `KEYSTONE_REDIS_POOL_SIZE` | `500` | Connections in the one Redis pool that sessions, rate limits, budgets and approvals share. A caller that finds them all in use waits for one. |
 | `KEYSTONE_REDIS_POOL_TIMEOUT_S` | `2` | How long such a caller waits, in seconds. After that the call is refused as before (`session state is unavailable`), because a call that cannot read its session must not run. |
+| `KEYSTONE_REDIS_SOCKET_TIMEOUT_S` | `5` | How long one Redis command may take, in seconds. A store that accepts the connection and stops answering ends the call with a refusal after this, and not never. |
+| `KEYSTONE_REDIS_CONNECT_TIMEOUT_S` | `2` | How long opening a Redis connection may take. |
+| `KEYSTONE_DB_CONNECT_TIMEOUT_S` | `5` | How long opening a Postgres connection may take. |
+| `KEYSTONE_DB_COMMAND_TIMEOUT_S` | `60` | How long one Postgres statement may take. |
 | `KEYSTONE_CREDENTIAL_CACHE_TTL_S` | `60` | How long the gateway keeps an upstream's opened credential instead of reading and decrypting it on every call. `keystone cred set` and `rotate-keys` run in the CLI, another process, so the gateway sends the old credential until the entry expires: set `0` to read it every call. |
 | `KEYSTONE_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` |
 | `KEYSTONE_CONFIG` | unset | Path to a YAML file with the same keys |

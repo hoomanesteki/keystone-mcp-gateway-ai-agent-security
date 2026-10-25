@@ -1,0 +1,14 @@
+{
+  "measure": "M9",
+  "command": "scripts/fresh_clone_test.sh https://github.com/hoomanesteki/keystone-mcp-gateway-ai-agent-security.git dev",
+  "date": "2026-10-25",
+  "commit": "2c96c17",
+  "docker_cache": "warm (images built before on this machine)",
+  "python_environment": "new, empty",
+  "machine": "Apple M4, 10 CPUs, Docker Desktop with 8 GB",
+  "make_demo_exit_status": 0,
+  "demo_steps_ok": "4 of 4",
+  "elapsed_seconds": 51,
+  "target_seconds": 600,
+  "cold_build_note": "Not measured cold. The first build of the Keystone image with the scanner took about 20 minutes on this machine (torch and a 738 MB model)."
+}

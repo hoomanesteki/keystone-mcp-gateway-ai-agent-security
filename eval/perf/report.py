@@ -354,7 +354,7 @@ def one_session_rows(document: Mapping[str, Any]) -> list[list[str]]:
     rows above; these say what a call needs, apart from the queue."""
     rows: list[list[str]] = []
     sizes = document["settings"]["sizes"]
-    shown, passed = [], []
+    shown, passed, by_size = [], [], []
     for size in sizes:
         extra = added(document, "scanner-off", size, sequential=True)
         if extra is None or extra["p50_ms"] is None or extra["p95_ms"] is None:
@@ -363,6 +363,7 @@ def one_session_rows(document: Mapping[str, Any]) -> list[list[str]]:
             f"{kb(size)}: p50 {signed(extra['p50_ms'])} ms, p95 {signed(extra['p95_ms'])} ms"
         )
         passed.append(extra["p50_ms"] <= M5_P50_MS and extra["p95_ms"] <= M5_P95_MS)
+        by_size.append(f"{kb(size)} {'met' if passed[-1] else 'not met'}")
     if shown:
         rows.append(
             [
@@ -370,7 +371,9 @@ def one_session_rows(document: Mapping[str, Any]) -> list[list[str]]:
                 "Added latency per call, scanner off, one session, no queue",
                 f"p50 at most {M5_P50_MS:.0f} ms, p95 at most {M5_P95_MS:.0f} ms",
                 "; ".join(shown),
-                "met" if all(passed) else "not met",
+                ("met" if all(passed) else "not met")
+                if len(set(passed)) == 1
+                else "; ".join(by_size),
             ]
         )
     shown, passed, m6_sizes = [], [], []
@@ -799,7 +802,8 @@ def render_section(
         + " or ".join(f"{kb(size)} (about {tokens_of(document, size):,} tokens)" for size in sizes)
         + " of English text. The timed calls start together, after each session has made 3 calls "
         "that are not counted. A call is timed from the request to the whole answer, and a call "
-        "that fails is counted and timed like the others. The percentiles are nearest-rank: of "
+        "that fails is counted in the share of failures and left out of the percentiles. The "
+        "percentiles are nearest-rank: of "
         f"{settings['sessions'] * settings['calls_each']:,} calls the 95th is the "
         f"{int(settings['sessions'] * settings['calls_each'] * 0.95):,}th fastest. The generator "
         f"is {settings['processes']} processes, so that no one of them is the limit. The targets "

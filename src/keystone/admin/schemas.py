@@ -201,7 +201,16 @@ class ApprovalItem(BaseModel):
     decision_note: str | None
     decided_at: str | None
     flags: list[str] = Field(description="The session's flags (what it has read).")
-    tainted: bool = Field(description="The session has read untrusted content.")
+    tainted: bool = Field(
+        description="The session has read untrusted content. False when `session_state` is not "
+        "`live`: then the flags and the taint are not known."
+    )
+    session_state: Literal["live", "ended", "unavailable"] = Field(
+        default="live",
+        description="`live`: flags and taint were read. `ended`: the session expired or is not "
+        "this tenant's. `unavailable`: the session store did not answer. Do not read an empty "
+        "flag list as clean unless this is `live`.",
+    )
 
 
 class ApprovalDetail(ApprovalItem):

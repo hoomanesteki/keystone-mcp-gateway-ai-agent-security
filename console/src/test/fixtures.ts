@@ -33,6 +33,7 @@ export function approval(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
     decided_at: null,
     flags: [],
     tainted: false,
+    session_state: "live",
     ...overrides,
   };
 }

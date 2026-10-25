@@ -35,7 +35,7 @@ is newer than the plan: see "Console: where a pin differs" below.
 | grafana/grafana | 13.2.4 | `deploy/docker-compose.yml` |
 | python | 3.12.15-slim-trixie | `Dockerfile`, `deploy/Dockerfile.upstreams` and `deploy/sandbox/Dockerfile.python`, build and runtime stages |
 | ghcr.io/astral-sh/uv | 0.12.3 | `Dockerfile` and `deploy/Dockerfile.upstreams` (copy the uv binary) |
-| docker | 29.6.2-cli | `Dockerfile` (copies the `docker` binary, which starts the containerized stdio upstreams of KS-803; the version of the daemon on the machine I develop on) |
+| docker | 29.9.2-cli | `Dockerfile` (copies the `docker` binary, which starts the containerized stdio upstreams of KS-803; bumped from 29.6.2-cli in KS-906 because the Go standard library in 29.6.2 had 12 high findings with fixes) |
 | keystone | dev | built locally from `Dockerfile`, never pulled; compose names the built image |
 | keystone-upstreams | dev | built locally from `deploy/Dockerfile.upstreams`, never pulled; the tag is the compose service name for the build |
 | keystone-echo-stdio | dev | built locally from `examples/upstreams/Dockerfile.echo` (`make echo-image`), never pulled. The echo and probe servers of the demo upstreams, for the tests of the containerized stdio transport (KS-803) |
@@ -149,6 +149,7 @@ A model is pinned to a revision, which `keystone.defense.classifier.SPECS` holds
 | Package | Version | Used for |
 |---|---|---|
 | httpx | 0.28.1 | ASGI test client |
+| hypothesis | 6.170.9 | property tests (KS-906); 500 examples each |
 | mypy | 2.4.0 | type checking |
 | pip-audit | 2.10.1 | dependency vulnerability scan |
 | pre-commit | 4.7.0 | local commit hooks |

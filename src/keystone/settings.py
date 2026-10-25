@@ -509,6 +509,13 @@ class Settings(BaseSettings):
     credential_cache_ttl_s: float = Field(default=60.0, ge=0)
     redis_pool_size: int = Field(default=500, ge=1)
     redis_pool_timeout_s: float = Field(default=2.0, gt=0)
+    # How long one Redis command, or opening a connection, may take before it fails (KS-993). A
+    # store that accepts the connection and stops answering would otherwise hold a call for ever.
+    redis_socket_timeout_s: float = Field(default=5.0, gt=0)
+    redis_connect_timeout_s: float = Field(default=2.0, gt=0)
+    # The same for Postgres: opening a connection, and one statement.
+    db_connect_timeout_s: float = Field(default=5.0, gt=0)
+    db_command_timeout_s: float = Field(default=60.0, gt=0)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     # `passthrough` is the baseline of the red-team runs (KS-902, ADR-0017): the pipeline keeps its
     # order, its audit record and the credentials it adds for an upstream, and every other slot is

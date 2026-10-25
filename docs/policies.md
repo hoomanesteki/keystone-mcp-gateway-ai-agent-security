@@ -1,9 +1,7 @@
 # Policies
 
 Keystone decides every tool call and every tool listing with [Cedar](https://www.cedarpolicy.com)
-policies kept in files. This page says how a decision is made, what a policy can read, shows five
-policies to copy, and lists the mistakes that come up most. Settings and commands are in
-`docs/runbook.md` (the Policies section).
+policies kept in files. Settings and commands are in the Policies section of `docs/runbook.md`.
 
 ## How a decision is made
 

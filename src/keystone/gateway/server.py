@@ -37,6 +37,7 @@ from keystone.core.errors import (
 )
 from keystone.core.ids import new_id
 from keystone.core.types import CallContext, Principal, SessionState, ToolRef, ToolResult
+from keystone.gateway.limits import RequestLimitMiddleware
 from keystone.gateway.pipeline import Pipeline
 from keystone.gateway.sessions import SessionStore
 from keystone.gateway.virtual_tools import VirtualTools
@@ -370,12 +371,14 @@ def mount_mcp(
     (engineering note 2)."""
     security = transport_security(gateway.settings)
     manager = StreamableHTTPSessionManager(app=build_server(gateway), security_settings=security)
-    endpoint = McpAuthMiddleware(
-        StreamableHTTPASGIApp(manager),
-        authenticator=authenticator,
-        bindings=gateway.bindings,
-        sessions=lambda: gateway.sessions,
-        security=TransportSecurityMiddleware(security),
+    endpoint = RequestLimitMiddleware(
+        McpAuthMiddleware(
+            StreamableHTTPASGIApp(manager),
+            authenticator=authenticator,
+            bindings=gateway.bindings,
+            sessions=lambda: gateway.sessions,
+            security=TransportSecurityMiddleware(security),
+        )
     )
     # A Route, not a Mount: a Mount redirects /mcp to /mcp/.
     app.router.routes.append(Route("/mcp", endpoint=endpoint))
