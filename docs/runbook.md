@@ -199,6 +199,36 @@ model again.
 | `bash scripts/smoke/phase_3.sh` | Tokens for alice and bob, a request without a token (401), olivia's 20 tools, bob's 3 globex tools and Keystone's 2, and `KS_TOOL_NOT_FOUND` for an acme tool, the mail server's `api_key_received`, and a search of the Keystone logs for the demo keys and the master key. About 15 seconds. |
 | `bash scripts/smoke/phase_2.sh` | Lists the 20 tools, quarantines and approves a changed echo description, stops the bank server and checks the refusal. About 45 seconds. It restarts Keystone with a 2 s health probe (`SMOKE_HEALTH_INTERVAL_S`) and restores everything when it ends. |
 
+### Other make targets
+
+`make help` prints every target that has a description. These are the ones the table above leaves out. `make check`, `make ci-local` and `make gate` start Postgres and Redis themselves, so do not run them while another run uses the stack.
+
+| Target | What it does |
+|---|---|
+| `make setup` | `uv sync` and `pre-commit install` (the plain hook, not the `commit-msg` or `pre-push` types) |
+| `make lint` | `ruff check` and `ruff format --check` |
+| `make fmt` | `ruff check --fix` and `ruff format`, which change files |
+| `make type` | mypy, strict for `core`, `gateway`, `policy` and `audit` |
+| `make policy` | `keystone policy test policies tests/policy_cases --coverage`: the cases, and every policy matched by a case |
+| `make test-unit`, `make test-int`, `make test` | Unit tests and invariants; integration tests (Postgres, Redis and Docker); both |
+| `make check` | `up-core`, lint, types, unit, integration and the console check |
+| `make ci-local` | The steps of CI, in order, and a check that `console/src/api/schema.d.ts` is up to date |
+| `make prose` | `scripts/lint_prose.py`: banned words and em dashes in the docs and the code |
+| `make commits` | Check the subjects of the commits since `origin/main` |
+| `make migrate` | `alembic upgrade head` against `KEYSTONE_DATABASE_URL` |
+| `make gate PHASE=N` | Everything a phase gate runs, against the stack (`make gate PHASE=9` runs phases 0 to 8 inside `phase_9.sh`) |
+| `make github-setup` | Protect `main` and `dev` and import the backlog. It needs a signed-in `gh` |
+
+### Compose variables
+
+These are read by `deploy/docker-compose.yml` from the shell or from `.env` (the file `.env.example` is the template). The Keystone settings the container receives are in the table under "Keystone settings".
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KEYSTONE_PORT` | `8080` | Host port of Keystone. `KEYSTONE_PUBLIC_BASE_URL` in the container is built from it |
+| `KEYSTONE_CLI_SECRET` | `keystone-cli-dev-secret` | Secret of the `keystone-cli` client in the Keycloak realm (the client the CLI and the approvers use). Also read by the realm import, so change it before the first `make up` or reset the stack |
+| `KEYSTONE_HEALTH_INTERVAL_S` | `30` | Seconds between health probes of the upstreams, passed to the container as `KEYSTONE_HEALTH__INTERVAL_S`. 0 turns the probes off |
+
 ## Host ports
 
 The defaults are in `.env.example`. Copy it to `.env` to move a port, then run `make up` again.
