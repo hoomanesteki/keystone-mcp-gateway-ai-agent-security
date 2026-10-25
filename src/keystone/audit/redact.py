@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from bisect import bisect_left
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -39,9 +40,15 @@ MAX_KEY = 256
 MAX_REDACTED_BYTES = 16 * 1024
 TRUNCATED = "[truncated]"
 
-# Thirteen to nineteen digits, with single spaces or dashes between them, not part of a longer run
-# of digits. Luhn decides whether it is a card number.
-CARD = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
+# A run of digits with single spaces or dashes between them, not part of a longer run of digits.
+# A card number is a stretch of whole groups inside such a run, 13 to 19 digits long, that passes
+# Luhn. Whole groups, so that a number inside a longer number is not one; a stretch and not the
+# run, so that an expiry or a code written after the number does not hide it (a pattern that took
+# the whole run failed Luhn on the longer text and kept the number as it was).
+DIGIT_RUN = re.compile(r"(?<!\d)\d(?:[ -]?\d)+(?!\d)")
+DIGIT_GROUP = re.compile(r"\d+")
+MIN_CARD_DIGITS, MAX_CARD_DIGITS = 13, 19
+CARD_MASK = "[redacted:card]"
 SSN = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")
 BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 AWS_KEY_ID = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
@@ -63,23 +70,81 @@ class RedactionConfig:
         return cls(frozenset(key.casefold() for key in keys))
 
 
+def _fold(digit: int) -> int:
+    """A digit doubled, with the digits of the result added, as Luhn weighs every second one."""
+    doubled = digit * 2
+    return doubled - 9 if doubled > 9 else doubled
+
+
 def luhn_valid(digits: str) -> bool:
     total = 0
     for index, char in enumerate(reversed(digits)):
         number = int(char)
-        if index % 2 == 1:
-            number *= 2
-            if number > 9:
-                number -= 9
-        total += number
+        total += _fold(number) if index % 2 == 1 else number
     return total % 10 == 0
 
 
-def _mask_card(match: re.Match[str]) -> str:
-    digits = re.sub(r"\D", "", match.group())
-    if 13 <= len(digits) <= 19 and luhn_valid(digits):
-        return "[redacted:card]"
-    return match.group()
+def _luhn_sums(digits: str) -> tuple[list[int], list[int]]:
+    """Prefix sums that give the Luhn total of any stretch of `digits` in constant time: `even[k]`
+    is over the first k digits with the ones at an even index doubled, `odd[k]` with the odd ones
+    doubled. A stretch that ends before index `stop` doubles every second digit from its right end,
+    which are the indexes with the parity of `stop`. One pass over a run, however many stretches
+    are then tried, so a long run of small groups costs what its length costs."""
+    even, odd = [0], [0]
+    for index, char in enumerate(digits):
+        digit = int(char)
+        even.append(even[-1] + (_fold(digit) if index % 2 == 0 else digit))
+        odd.append(odd[-1] + (_fold(digit) if index % 2 == 1 else digit))
+    return even, odd
+
+
+def _card_stretches(run: re.Match[str]) -> list[tuple[int, int]]:
+    """Where the card numbers in one run of digits start and end in the text. From each group a
+    stretch may start at, the longest one that passes Luhn is taken, and the search goes on after
+    it."""
+    text = run.string
+    groups = [
+        (run.start() + m.start(), run.start() + m.end()) for m in DIGIT_GROUP.finditer(run.group())
+    ]
+    digits = "".join(text[start:end] for start, end in groups)
+    if len(digits) < MIN_CARD_DIGITS:
+        return []
+    even, odd = _luhn_sums(digits)
+    offsets = [0]
+    for start, end in groups:
+        offsets.append(offsets[-1] + end - start)
+    found: list[tuple[int, int]] = []
+    first = 0
+    while first < len(groups):
+        begin = offsets[first]
+        chosen = None
+        # Groups that end before the stretch has 13 digits cannot close a card number.
+        enough = max(first, bisect_left(offsets, begin + MIN_CARD_DIGITS) - 1)
+        for last in range(enough, len(groups)):
+            stop = offsets[last + 1]
+            if stop - begin > MAX_CARD_DIGITS:
+                break
+            sums = even if stop % 2 == 0 else odd
+            if stop - begin >= MIN_CARD_DIGITS and (sums[stop] - sums[begin]) % 10 == 0:
+                chosen = last
+        if chosen is None:
+            first += 1
+        else:
+            found.append((groups[first][0], groups[chosen][1]))
+            first = chosen + 1
+    return found
+
+
+def _mask_cards(text: str) -> str:
+    pieces: list[str] = []
+    position = 0
+    for run in DIGIT_RUN.finditer(text):
+        for start, end in _card_stretches(run):
+            pieces.append(text[position:start])
+            pieces.append(CARD_MASK)
+            position = end
+    pieces.append(text[position:])
+    return "".join(pieces)
 
 
 def mask_patterns(text: str) -> str:
@@ -89,7 +154,7 @@ def mask_patterns(text: str) -> str:
     text = BEARER.sub("Bearer [redacted]", text)
     text = AWS_KEY_ID.sub("[redacted:aws-key-id]", text)
     text = SSN.sub("[redacted:ssn]", text)
-    return CARD.sub(_mask_card, text)
+    return _mask_cards(text)
 
 
 def redact_string(text: str) -> str:
