@@ -1756,7 +1756,7 @@ An output that scores `suspicious` or `injection` is handled by the risk of the 
 | Action | Default for | What the agent gets |
 |---|---|---|
 | `annotate` | low, medium | A warning block in front, then `<<<untrusted>>>`, the upstream's blocks as they were, then `<<<end untrusted>>>` |
-| `redact` | high | The same, with the invisible characters and the leaking images and links cut out of every text, resource and structured value first |
+| `redact` | high | The same, with the invisible characters and the leaking images and links cut out of every text, resource and structured value first. The cut follows the view the rules read: an image hidden by a zero-width character goes with the character, and a string whose address is a link only after normalizing (fullwidth letters) is dropped whole |
 | `block` | critical | Only `[keystone:KS_OUTPUT_BLOCKED] output withheld (score 0.93, rules: ...). Call id <id>.`, as an error |
 | `pass` | none | The output as it was. The score is still recorded |
 
