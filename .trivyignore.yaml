@@ -1,0 +1,55 @@
+# Findings of the image scan (CI job "security") that I accept, each with the reason.
+# An entry with no statement fails tests/unit/test_trivy_exceptions.py.
+#
+# All twelve are matched by name: Trivy sees a Python package called "keystone" and reports the
+# CVEs of OpenStack Keystone, an identity service that shares the name. This project is not that
+# package. It is installed from this repository (version 0.0.1) and none of those CVEs apply.
+vulnerabilities:
+  - id: CVE-2012-3542
+    purls:
+      - "pkg:pypi/keystone"
+    statement: "Name collision with OpenStack Keystone. This is a different project."
+  - id: CVE-2012-5563
+    purls:
+      - "pkg:pypi/keystone"
+    statement: "Name collision with OpenStack Keystone. This is a different project."
+  - id: CVE-2014-2237
+    purls:
+      - "pkg:pypi/keystone"
+    statement: "Name collision with OpenStack Keystone. This is a different project."
+  - id: CVE-2014-2828
+    purls:
+      - "pkg:pypi/keystone"
+    statement: "Name collision with OpenStack Keystone. This is a different project."
+  - id: CVE-2014-5251
+    purls:
+      - "pkg:pypi/keystone"
+    statement: "Name collision with OpenStack Keystone. This is a different project."
+  - id: CVE-2014-5252
+    purls:
+      - "pkg:pypi/keystone"
+    statement: "Name collision with OpenStack Keystone. This is a different project."
+  - id: CVE-2014-5253
+    purls:
+      - "pkg:pypi/keystone"
+    statement: "Name collision with OpenStack Keystone. This is a different project."
+  - id: CVE-2020-12689
+    purls:
+      - "pkg:pypi/keystone"
+    statement: "Name collision with OpenStack Keystone. This is a different project."
+  - id: CVE-2020-12690
+    purls:
+      - "pkg:pypi/keystone"
+    statement: "Name collision with OpenStack Keystone. This is a different project."
+  - id: CVE-2020-12691
+    purls:
+      - "pkg:pypi/keystone"
+    statement: "Name collision with OpenStack Keystone. This is a different project."
+  - id: CVE-2025-65073
+    purls:
+      - "pkg:pypi/keystone"
+    statement: "Name collision with OpenStack Keystone. This is a different project."
+  - id: CVE-2026-40683
+    purls:
+      - "pkg:pypi/keystone"
+    statement: "Name collision with OpenStack Keystone. This is a different project."

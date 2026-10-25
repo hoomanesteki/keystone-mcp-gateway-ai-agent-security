@@ -8,3 +8,6 @@
 # A made-up API key in the approval service test, as first committed (an argument whose name
 # triggers masking, put there to be masked). The test builds the value at run time now.
 f5a5384f50bbd8acf99fa4f415716ad1533c3f03:tests/integration/test_approvals_service.py:generic-api-key:396
+
+# A made-up access key id in the fuzz test, as first committed. The test splits the value now.
+29729a35e39123918bc8f6455f9e1ec3e9fb700a:tests/unit/test_fuzz.py:aws-access-token:41
