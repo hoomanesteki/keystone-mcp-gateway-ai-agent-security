@@ -350,6 +350,9 @@ class SandboxRunner:
             raise SandboxUnavailable(f"the container did not start ({_why(error)})") from None
         collector = OutputCollector()
         try:
+            # A timeout belongs to the socket, not to a thread. It is set before the feeder starts,
+            # so that the feeder sends under it from its first byte, and `_read` keeps it.
+            sock.settimeout(POLL_S)
             if stdin:
                 threading.Thread(
                     target=_feed, args=(sock, stdin), name="sandbox-stdin", daemon=True
@@ -524,11 +527,19 @@ def _why(error: BaseException) -> str:
 
 
 def _feed(sock: socket.socket, data: bytes) -> None:
-    """Write the input and close the write side, so the script sees the end of its stdin. The
-    thread ends with an error when the container is killed and the socket closed."""
+    """Write the input and close the write side, so the script sees the end of its stdin. It sends
+    under the reader's poll timeout and tries again when a send times out, because the timeout is
+    the socket's and both threads share it: a feeder that set its own took the reader's away, and
+    a run that had read its input and then hung was never killed (KS-998). The thread ends with an
+    error when the container is killed and the socket closed."""
+    view = memoryview(data)
     try:
-        sock.settimeout(None)
-        sock.sendall(data)
+        while view:
+            try:
+                sent = sock.send(view)
+            except TimeoutError:
+                continue  # the container has not read what was sent so far
+            view = view[sent:]
         sock.shutdown(socket.SHUT_WR)
     except OSError:
         pass
