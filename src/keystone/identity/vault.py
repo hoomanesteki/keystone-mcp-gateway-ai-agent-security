@@ -16,7 +16,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
@@ -211,10 +212,43 @@ class Rotation:
     failed: list[str] = field(default_factory=list)
 
 
+DEFAULT_CACHE_TTL_S = 60.0
+MAX_CACHED = 10_000
+
+
 class Vault:
-    def __init__(self, cipher: Cipher, store: CredentialStore) -> None:
+    """The credentials of the upstreams, encrypted in the store.
+
+    `headers_for` runs on every call, and each time it read the row and decrypted it: a query and
+    a Fernet decryption, a tenth of what a call cost in CPU (KS-992). The opened headers are kept
+    for `cache_ttl_s` (60 s; 0 turns the cache off) for each (tenant, upstream, user). `set`,
+    `seed` and `rotate_keys` in this process drop them at once. A change made by another process
+    (`keystone cred set` in the CLI) is seen when the entry expires, so a credential taken away
+    can still be sent for up to that long. Only a success is kept: an upstream with no credential
+    for the user is asked again on the next call. The values are SecretStr, so what is kept does
+    not print.
+    """
+
+    def __init__(
+        self,
+        cipher: Cipher,
+        store: CredentialStore,
+        *,
+        cache_ttl_s: float = DEFAULT_CACHE_TTL_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._cipher = cipher
         self._store = store
+        self._cache_ttl_s = cache_ttl_s
+        self._clock = clock
+        self._opened: dict[tuple[str, str, str | None], tuple[float, dict[str, SecretStr]]] = {}
+        # Counts the changes made here, so a read that began before one is not kept after it.
+        self._generation = 0
+
+    def invalidate(self) -> None:
+        """Forget every opened credential."""
+        self._generation += 1
+        self._opened.clear()
 
     @property
     def cipher(self) -> Cipher:
@@ -235,7 +269,10 @@ class Vault:
         for value in clean.values():
             register_secret(value)
         ciphertext, kid = self._cipher.encrypt(clean)
-        await self._store.put(tenant_id, upstream_id, user_id, ciphertext, kid)
+        try:
+            await self._store.put(tenant_id, upstream_id, user_id, ciphertext, kid)
+        finally:
+            self.invalidate()
 
     async def seed(self, tenant_id: str, upstream_id: str, headers: Mapping[str, str]) -> bool:
         """Make these the upstream's static credential, unless they already are, and under the
@@ -260,6 +297,21 @@ class Vault:
         """The headers to send for this caller, by the upstream's credential mode: none sends
         nothing, static sends the upstream's own credential, per_user sends the user's and
         refuses the call when there is none."""
+        key = (tenant_id, upstream_id, user_id)
+        kept = self._opened.get(key)
+        if kept is not None and self._clock() < kept[0]:
+            return dict(kept[1])
+        generation = self._generation
+        opened = await self._open_for(tenant_id, upstream_id, user_id)
+        if self._cache_ttl_s > 0 and generation == self._generation:
+            if len(self._opened) >= MAX_CACHED:
+                self._opened.clear()
+            self._opened[key] = (self._clock() + self._cache_ttl_s, opened)
+        return dict(opened)
+
+    async def _open_for(
+        self, tenant_id: str, upstream_id: str, user_id: str | None
+    ) -> dict[str, SecretStr]:
         found = await self._store.lookup(tenant_id, upstream_id, user_id)
         if found is None:
             raise UnknownUpstream(f"there is no upstream {upstream_id!r}")
@@ -281,6 +333,7 @@ class Vault:
 
     async def rotate_keys(self) -> Rotation:
         """Re-encrypt every credential under the first master key."""
+        self.invalidate()
         report = Rotation()
         for row_id, ciphertext, kid in await self._store.rows():
             if kid == self._cipher.primary_id:
@@ -295,6 +348,7 @@ class Vault:
                 report.rotated += 1
             else:
                 report.unchanged += 1  # replaced by `cred set` meanwhile, under the first key
+        self.invalidate()
         return report
 
     async def infos(self) -> list[CredentialInfo]:

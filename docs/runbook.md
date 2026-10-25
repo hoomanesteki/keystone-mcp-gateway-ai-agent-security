@@ -353,6 +353,9 @@ Environment variables win over the YAML file named by `KEYSTONE_CONFIG`.
 | `KEYSTONE_MIGRATE_DATABASE_URL` | unset | Where `keystone db upgrade` and `keystone serve --migrate` connect, when that is not `KEYSTONE_DATABASE_URL`: creating tables takes the role that owns them. Unset means they use `KEYSTONE_DATABASE_URL`. Compose sets it to the owner. |
 | `KEYSTONE_APP_DB_PASSWORD` | the development password | Read by the migration that creates the `keystone_app` role. With `KEYSTONE_ENV=prod` and no value, that migration stops. It is not a Keystone setting: set the same value in the password of `KEYSTONE_DATABASE_URL`. |
 | `KEYSTONE_REDIS_URL` | `redis://localhost:56379/0` | Redis URL. Session state lives here. Set it to an empty string to keep session state in the gateway process instead (one process only, lost on restart). |
+| `KEYSTONE_REDIS_POOL_SIZE` | `500` | Connections in the one Redis pool that sessions, rate limits, budgets and approvals share. A caller that finds them all in use waits for one. |
+| `KEYSTONE_REDIS_POOL_TIMEOUT_S` | `2` | How long such a caller waits, in seconds. After that the call is refused as before (`session state is unavailable`), because a call that cannot read its session must not run. |
+| `KEYSTONE_CREDENTIAL_CACHE_TTL_S` | `60` | How long the gateway keeps an upstream's opened credential instead of reading and decrypting it on every call. `keystone cred set` and `rotate-keys` run in the CLI, another process, so the gateway sends the old credential until the entry expires: set `0` to read it every call. |
 | `KEYSTONE_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` |
 | `KEYSTONE_CONFIG` | unset | Path to a YAML file with the same keys |
 | `KEYSTONE_ALLOWED_HOSTS` | `["127.0.0.1:*","localhost:*","[::1]:*"]` | JSON list of `Host` header values the MCP endpoint accepts (DNS rebinding guard). `:*` matches any port. Add the service name, for example `keystone:*`, to reach it from another container. |
@@ -1278,9 +1281,11 @@ of one user is read from `KEYSTONE_RATE_LIMIT_USER_CAPACITY` and `KEYSTONE_RATE_
 in the environment of `docker compose` (300 and 50), which `scripts/smoke/phase_8.sh` lowers for its
 burst and puts back.
 
-Two limits to know about. A call to a tool that does not exist is refused before it enters the
-pipeline and is not counted, so it is not limited either (it is audited). And the proxy for model
-calls (KS-806) is not rate limited: a budget caps it.
+A call to a tool that does not exist is refused before it enters the pipeline, and it takes a
+token from the principal's buckets (tenant, user and agent; the tool has none) all the same
+(KS-992). When one is empty the agent gets `KS_RATE_LIMITED` and not `KS_TOOL_NOT_FOUND`. A limiter
+that cannot be reached leaves the refusal as `KS_TOOL_NOT_FOUND`. The proxy for model calls
+(KS-806) is not rate limited: a budget caps it.
 
 ## Budgets
 
@@ -1634,6 +1639,13 @@ reads about 1,500 characters on a laptop with windows of 128 tokens (3,500 with 
 a longer output is judged by the rules alone. Raise the timeout to let the model read more, at that
 much more time on each such call, and measure it (`scripts/bench_scanner.py --classifier`,
 `docs/spikes/scanner.md`). On the test split 12 percent of the scans fell back to the rules at 300 ms.
+The model also has a limit on how many scans run in it at once. A scan that finds every place taken
+does not queue: the model is left out of it, the rules decide, and the result says `model: "busy"`
+(KS-992). The limit comes from the CPUs the process may use, a container's limit counted, keeping
+one for the event loop: 1 scan at a time with the other CPUs as threads below 5 CPUs, 2 scans from
+5. `scanner.classifier_concurrency` and `scanner.classifier_threads` set them. Without a limit, 200
+sessions of calls gave the model every core of a 4 CPU container, the event loop starved, the
+health probes of the upstreams timed out and calls failed with `upstream echo is down`.
 The image sets `HF_HUB_OFFLINE=1`: the model is in it, and the container never goes to the network
 for it.
 
@@ -1901,6 +1913,7 @@ Edit the file, not the UI: the provisioned dashboard is read-only.
 | `keystone_scan_score` | `tenant` | A histogram of the score of each output the scanner read, in tenths from 0.1 to 1.0. A scan that failed has no score and is not in it |
 | `keystone_sessions_tainted_total` | `tenant` | Outputs that scored as an injection in a session that was not tainted yet (see Scanner) |
 | `keystone_scan_errors_total` | `stage` | A scan that failed and was worked around: `classifier`, `rules` or `action` (see Scanner) |
+| `keystone_scan_model_total` | `model` | What the model did for each scan: `answered`, `skipped` (the rules had flagged the text), `timeout`, `busy` (every place for a scan was taken), `error` or `none` (no model) |
 
 The labels are bounded on purpose. There is no label for a user, a session or an argument: a label
 whose values come from callers would give Prometheus a series for each of them, and metrics are

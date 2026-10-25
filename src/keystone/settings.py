@@ -219,6 +219,13 @@ class ScannerSettings(BaseModel):
     # The longest a scan waits for the model. A model that has not answered by then is left out
     # of that scan, which is then scored by the rules alone (`model` says "timeout").
     classifier_timeout_ms: int = Field(default=300, ge=1, le=10_000)
+    # How many scans run in the model at once, and how many CPU threads each uses. Unset, they come
+    # from the CPUs the process may use (a container's limit counts), keeping one for the event
+    # loop: with the model free to take every core, 200 sessions of calls starved the loop, the
+    # health probes of the upstreams timed out and the calls failed (KS-992). A scan that finds all
+    # places taken is not queued: the model is left out of it and `model` says "busy".
+    classifier_concurrency: int | None = Field(default=None, ge=1, le=64)
+    classifier_threads: int | None = Field(default=None, ge=1, le=64)
     # How the score of the rules and the score of the model make one (ADR-0011). `rules_first`: a
     # text that the rules flag (their score is at `thresholds.suspicious` or more) keeps the rules'
     # score and is not given to the model; for any other text the model adds to the rules' score
@@ -492,6 +499,16 @@ class Settings(BaseSettings):
     # Without it, migrations use `database_url`.
     migrate_database_url: SecretStr | None = None
     redis_url: SecretStr = SecretStr(DEFAULT_REDIS_URL)
+    # One pool serves sessions, rate limits, budgets and approvals. The pool waits for a free
+    # connection for `redis_pool_timeout_s` instead of refusing at once (KS-992): 200 sessions that
+    # open together went past redis-py's default of 100 connections and 2.4 to 4.6% of the calls
+    # were refused.
+    # How long the gateway keeps an upstream's opened credential (KS-992). A credential set or
+    # rotated through this process is dropped at once; one changed by the CLI is seen after this
+    # long. 0 reads and decrypts it on every call.
+    credential_cache_ttl_s: float = Field(default=60.0, ge=0)
+    redis_pool_size: int = Field(default=500, ge=1)
+    redis_pool_timeout_s: float = Field(default=2.0, gt=0)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     # `passthrough` is the baseline of the red-team runs (KS-902, ADR-0017): the pipeline keeps its
     # order, its audit record and the credentials it adds for an upstream, and every other slot is

@@ -26,7 +26,14 @@ import structlog
 
 from keystone.core.errors import Code, Reject
 from keystone.core.types import CallContext, Decision, Effect
-from keystone.metering.ratelimit import KEY_PREFIX, Bucket, RateLimiter, whole_milliseconds
+from keystone.gateway.hooks import noop_hook
+from keystone.metering.ratelimit import (
+    KEY_PREFIX,
+    Bucket,
+    RateLimiter,
+    Verdict,
+    whole_milliseconds,
+)
 from keystone.settings import RateLimitSettings
 from keystone.telemetry.metrics import Metrics
 
@@ -67,7 +74,7 @@ class RateLimitInterceptor:
         self._metrics = metrics
         self._clock = clock
 
-    def _buckets(self, ctx: CallContext) -> list[Bucket]:
+    def _buckets(self, ctx: CallContext, *, with_tool: bool = True) -> list[Bucket]:
         principal, tenant = ctx.principal, ctx.principal.tenant_id
         # The tenant is in every key, so two tenants never share a bucket, whatever their users
         # are called.
@@ -80,6 +87,7 @@ class RateLimitInterceptor:
         return [
             Bucket(scope, f"{KEY_PREFIX}{scope}:{names[scope]}", limit.capacity, limit.refill_per_s)
             for scope, limit in self._limits
+            if with_tool or scope != "per_tool"
         ]
 
     async def before_call(self, ctx: CallContext) -> None:
@@ -88,13 +96,28 @@ class RateLimitInterceptor:
         verdict = await self._limiter.check(self._buckets(ctx), self._clock())
         if verdict.allowed:
             return
+        raise self._refusal(ctx, verdict)
+
+    async def charge_principal(self, ctx: CallContext) -> None:
+        """Take a token from the principal's buckets for a call that never reached the pipeline,
+        because the tool it names does not exist (KS-992). The tool's own bucket is left alone: the
+        tool is not one. Raises the same Reject as `before_call` when a bucket is empty. An agent
+        that makes up tool names in a loop is audited on every call and is now limited as well."""
+        buckets = self._buckets(ctx, with_tool=False)
+        if not buckets:
+            return
+        verdict = await self._limiter.check(buckets, self._clock())
+        if not verdict.allowed:
+            raise self._refusal(ctx, verdict)
+
+    def _refusal(self, ctx: CallContext, verdict: Verdict) -> Reject:
         scope = verdict.scope or "per_user"
         retry = whole_milliseconds(verdict.retry_after_s)
         self._count(ctx, scope)
         ctx.decision = Decision(
             effect=Effect.DENY, reasons=[f"rate-limit:{scope}"], source="rate_limit"
         )
-        raise Reject(
+        return Reject(
             Code.RATE_LIMITED,
             f"too many calls: {WHO.get(scope, 'a')} limit is used up, "
             f"try again in {max(retry, 0.1):.1f} seconds",
@@ -107,6 +130,7 @@ class RateLimitInterceptor:
             },
         )
 
+    @noop_hook
     async def after_call(self, ctx: CallContext) -> None:
         return None
 

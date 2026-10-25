@@ -73,6 +73,12 @@ class ClassifierUnavailable(RuntimeError):
     """The model cannot be used: the extra is not installed, or it did not load."""
 
 
+class ClassifierBusy(Exception):
+    """Every place for a scan is taken. The scanner leaves the model out of this scan (`model` says
+    "busy") and the rules decide: waiting would spend the call's time on a queue the model cannot
+    clear, and a scan that cannot start must not hold the call back (KS-992)."""
+
+
 @dataclass(frozen=True)
 class ClassifierSpec:
     """A model the scanner knows, pinned to a revision."""
@@ -267,6 +273,7 @@ class HFClassifier:
         revision: str | None = None,
         batch_size: int = BATCH_SIZE,
         concurrency: int | None = None,
+        threads: int | None = None,
         loader: Callable[[], Engine] | None = None,
     ) -> None:
         self.name = name or model_id
@@ -275,7 +282,7 @@ class HFClassifier:
         self.max_length = max_length
         self.stride = stride
         self._loader: Callable[[], Engine] = loader or partial(
-            build_engine, model_id, revision, labels_map, max_length, stride, batch_size
+            build_engine, model_id, revision, labels_map, max_length, stride, batch_size, threads
         )
         self._concurrency = concurrency or os.cpu_count() or 1
         self._loading: _Loading | None = None
@@ -293,7 +300,10 @@ class HFClassifier:
         engine = loading.engine
         if engine is None:  # `_ready` raises before this, so this is for the type checker
             raise ClassifierUnavailable(f"{self.name} has no model")
-        await loading.places.acquire()
+        try:
+            loading.places.acquire_nowait()
+        except anyio.WouldBlock:
+            raise ClassifierBusy from None
         loop = asyncio.get_running_loop()
 
         def give_back() -> None:
@@ -359,17 +369,28 @@ class FakeClassifier:
         *,
         name: str = "fake",
         delay_s: float = 0.0,
+        places: int | None = None,
     ) -> None:
         self.name = name
         self.asked: list[str] = []
         self._score_fn = score_fn
         self._delay_s = delay_s
+        # Like the places of HFClassifier: a scan that finds them all taken is busy.
+        self._free = places
 
     async def score(self, text: str) -> float | None:
+        if self._free is not None:
+            if self._free <= 0:
+                raise ClassifierBusy
+            self._free -= 1
         self.asked.append(text)
-        if self._delay_s:
-            await anyio.sleep(self._delay_s)
-        return self._score_fn(text)
+        try:
+            if self._delay_s:
+                await anyio.sleep(self._delay_s)
+            return self._score_fn(text)
+        finally:
+            if self._free is not None:
+                self._free += 1
 
 
 def build_engine(
@@ -379,12 +400,16 @@ def build_engine(
     max_length: int,
     stride: int,
     batch_size: int,
+    threads: int | None = None,
 ) -> WindowedEngine:
     """Load the model and its tokenizer and wrap them. This is the one place that imports torch
     and transformers, by name at run time, so that neither is needed to import this module or to
     type check it."""
     torch = importlib.import_module("torch")
     transformers = importlib.import_module("transformers")
+    if threads is not None:
+        # torch sizes its pool by the host's CPUs, not the container's (see `available_cpus`).
+        torch.set_num_threads(threads)
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id, revision=revision)
     model = transformers.AutoModelForSequenceClassification.from_pretrained(
         model_id, revision=revision
@@ -421,6 +446,41 @@ def build_engine(
     )
 
 
+def available_cpus() -> int:
+    """The CPUs this process may use: the container's limit when there is one, else the host's.
+    `os.cpu_count()` reports the host (the Docker VM), so a container limited to 4 CPUs on 10 would
+    size its thread pools for 10 and be throttled by the kernel, which stops the event loop too."""
+    count = os.cpu_count() or 1
+    affinity = getattr(os, "sched_getaffinity", None)  # not on macOS
+    if affinity is not None:
+        with contextlib.suppress(OSError):
+            count = min(count, len(affinity(0)))
+    for path in ("/sys/fs/cgroup/cpu.max", "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"):
+        try:
+            parts = Path(path).read_text().split()
+            if path.endswith("cpu.max"):
+                quota, period = parts[0], parts[1]
+            else:
+                quota = parts[0]
+                period = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text().strip()
+            if quota not in ("max", "-1"):
+                count = min(count, max(1, round(int(quota) / int(period))))
+            break
+        except (OSError, ValueError, IndexError):
+            continue
+    return count
+
+
+def classifier_limits(cfg: ScannerSettings, cpus: int | None = None) -> tuple[int, int]:
+    """`(scans at once, threads for each)`. One CPU stays with the event loop. Few CPUs run one
+    scan at a time with all the threads there are, because two scans at half the threads each both
+    miss the scanner's timeout; from four spare CPUs, two scans run side by side."""
+    spare = max(1, (cpus if cpus is not None else available_cpus()) - 1)
+    concurrency = cfg.classifier_concurrency or (1 if spare < 4 else 2)
+    threads = cfg.classifier_threads or max(1, spare // concurrency)
+    return concurrency, threads
+
+
 def load_classifier(cfg: ScannerSettings) -> Classifier | None:
     """The classifier the settings ask for, or None: `none` turns it off, and without the extra the
     scanner runs on its rules alone and says so once, loudly. The model is not loaded here."""
@@ -437,6 +497,7 @@ def load_classifier(cfg: ScannerSettings) -> Classifier | None:
             fix="install keystone[scanner], or set scanner.classifier to none",
         )
         return None
+    concurrency, threads = classifier_limits(cfg)
     return HFClassifier(
         spec.model_id,
         spec.labels,
@@ -444,6 +505,8 @@ def load_classifier(cfg: ScannerSettings) -> Classifier | None:
         stride=cfg.window_overlap,
         name=spec.key,
         revision=spec.revision,
+        concurrency=concurrency,
+        threads=threads,
     )
 
 

@@ -119,6 +119,9 @@ class _NoSpan:
         return None
 
 
+NO_SPAN: SpanHandle = _NoSpan()
+
+
 class _NoOpenSpan(_NoSpan):
     def end(self) -> None:
         return None

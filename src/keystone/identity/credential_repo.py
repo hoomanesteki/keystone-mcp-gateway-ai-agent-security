@@ -143,4 +143,4 @@ def vault_from_settings(
     if keys is None or not keys.get_secret_value().strip():
         return None
     cipher = Cipher(keys, refuse_published=settings.env == "prod")
-    return Vault(cipher, CredentialRepo(sessionmaker))
+    return Vault(cipher, CredentialRepo(sessionmaker), cache_ttl_s=settings.credential_cache_ttl_s)

@@ -61,3 +61,24 @@ def test_the_metrics_are_declared_with_the_tenant_as_their_only_label() -> None:
     assert declared["keystone_scan_score"].kind == "histogram"
     assert declared["keystone_scan_score"].labels == ("tenant",)
     assert declared["keystone_sessions_tainted_total"].labels == ("tenant",)
+
+
+def test_what_the_model_did_is_counted_for_each_scan() -> None:
+    """KS-992: the share of scans the model answered, and why the others went without it."""
+    metrics = Metrics(tenants=["acme"])
+
+    for model in ("protectai-deberta-v2", "protectai-deberta-v2", "busy", "timeout", "skipped"):
+        metrics.scan_modelled(model)
+    metrics.scan_modelled(None)
+
+    def counted(kind: str) -> float:
+        return sample(metrics, "keystone_scan_model_total", {"model": kind})
+
+    assert [counted(k) for k in ("answered", "busy", "timeout", "skipped", "error", "none")] == [
+        2,
+        1,
+        1,
+        1,
+        0,
+        1,
+    ]

@@ -8,7 +8,6 @@ import structlog
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
 from pydantic import SecretStr
-from redis.asyncio import Redis
 
 from keystone import __version__
 from keystone.admin.api import PREFIX, AdminDeps, create_admin_app
@@ -57,6 +56,7 @@ from keystone.policy.engine import CedarPolicyEngine, ObservedEngine
 from keystone.policy.schema_info import args_fields
 from keystone.policy.store import PolicyStore, reload_on_sighup
 from keystone.policy.versions import PolicyVersionRepo
+from keystone.redis_pool import build_redis
 from keystone.registry.config import (
     apply_config_upstreams,
     container_networks,
@@ -201,7 +201,11 @@ def create_app(
     )
     # An empty KEYSTONE_REDIS_URL keeps session state in this process, for a single-process setup.
     redis = (
-        Redis.from_url(settings.redis_url.get_secret_value(), decode_responses=True)
+        build_redis(
+            settings.redis_url.get_secret_value(),
+            pool_size=settings.redis_pool_size,
+            pool_timeout_s=settings.redis_pool_timeout_s,
+        )
         if settings.redis_url.get_secret_value()
         else None
     )
