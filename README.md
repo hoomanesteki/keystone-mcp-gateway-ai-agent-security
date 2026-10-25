@@ -306,9 +306,9 @@ I built Keystone one phase at a time. Each phase ended with a gate report and a 
 | 6 Approvals and the console | v0.6.0 | [phase-6](docs/gates/phase-6.md) |
 | 7 Injection defense and the Rule of Two | v0.7.0 | [phase-7](docs/gates/phase-7.md) |
 | 8 Sandbox, rate limits, budgets, LLM proxy | v0.8.0 | [phase-8](docs/gates/phase-8.md) |
-| 9 Proof and release | v1.0.0, not released | |
+| 9 Proof and release | v1.0.0 | [phase-9](docs/gates/phase-9.md) |
 
-Phase 9 so far: the red team, the detector join, the performance harness, the AgentDojo adapter, the untrusted-then-external rule, the load fixes (KS-992) and the Terraform module are done. The hardening pass with fuzz tests (KS-906) and the final review (KS-993) are done too. Still open: a decision on the classifier in the container (M6), the fresh-clone check (KS-907) and the release (KS-908). Two gaps are accepted for v1: pinning the resolved address of an upstream (KS-995) and publishing the head of the audit chain (KS-996). Status per story: [docs/progress.md](docs/progress.md).
+Phase 9 is done: the red team, the detector join, the performance harness, the AgentDojo adapter, the untrusted-then-external rule, the load fixes (KS-992), the Terraform module, the hardening pass with fuzz tests (KS-906), the final review (KS-993) and the fresh-clone check (KS-907). v1.0.0 was tagged on 2026-10-25. Still open after v1: a decision on the classifier in the container (M6). Two gaps are accepted for v1: pinning the resolved address of an upstream (KS-995) and publishing the head of the audit chain (KS-996). Status per story: [docs/progress.md](docs/progress.md).
 
 After v1:
 
