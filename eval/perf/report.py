@@ -316,7 +316,58 @@ def verdicts(document: Mapping[str, Any]) -> list[str]:
             ("met" if all(passed) else "not met") if passed else "",
         ]
     )
+    rows += one_session_rows(document)
     return [table(["Metric", "What", "Target", "Measured", "Verdict"], rows)]
+
+
+def one_session_rows(document: Mapping[str, Any]) -> list[list[str]]:
+    """M5 and M6 again for one session making its calls one after the other, so that nothing
+    waits for another call. The metrics are defined at 200 sessions and are judged there, in the
+    rows above; these say what a call needs, apart from the queue."""
+    rows: list[list[str]] = []
+    sizes = document["settings"]["sizes"]
+    shown, passed = [], []
+    for size in sizes:
+        extra = added(document, "scanner-off", size, sequential=True)
+        if extra is None or extra["p50_ms"] is None or extra["p95_ms"] is None:
+            continue
+        shown.append(
+            f"{kb(size)}: p50 {signed(extra['p50_ms'])} ms, p95 {signed(extra['p95_ms'])} ms"
+        )
+        passed.append(extra["p50_ms"] <= M5_P50_MS and extra["p95_ms"] <= M5_P95_MS)
+    if shown:
+        rows.append(
+            [
+                "M5, one session",
+                "Added latency per call, scanner off, one session, no queue",
+                f"p50 at most {M5_P50_MS:.0f} ms, p95 at most {M5_P95_MS:.0f} ms",
+                "; ".join(shown),
+                "met" if all(passed) else "not met",
+            ]
+        )
+    shown, passed = [], []
+    for size in sizes:
+        if tokens_of(document, size) > M6_TOKENS:
+            continue
+        extra = added(document, "classifier", size, sequential=True)
+        if extra is None or extra["p95_ms"] is None:
+            continue
+        shown.append(
+            f"{kb(size)} ({tokens_of(document, size)} tokens): p95 {signed(extra['p95_ms'])} ms"
+        )
+        passed.append(extra["p95_ms"] <= M6_P95_MS)
+    if shown:
+        rows.append(
+            [
+                "M6, one session",
+                f"Added latency per call, classifier, outputs up to {M6_TOKENS:,} tokens, one "
+                "session, no queue",
+                f"p95 at most {M6_P95_MS:.0f} ms",
+                "; ".join(shown),
+                "met" if all(passed) else "not met",
+            ]
+        )
+    return rows
 
 
 def served(run: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -357,7 +408,11 @@ def queue_line(sessions: int, alone: Mapping[str, Any], many: Mapping[str, Any])
     return text
 
 
-def reading(document: Mapping[str, Any]) -> list[str]:
+def reading(
+    document: Mapping[str, Any],
+    previous: Mapping[str, Any] | None = None,
+    previous_commit: str = "",
+) -> list[str]:
     """What the numbers say, each sentence made from them."""
     out: list[str] = []
     sizes = document["settings"]["sizes"]
@@ -407,6 +462,7 @@ def reading(document: Mapping[str, Any]) -> list[str]:
     alone = served(runs_of(document, "scanner-off", sequential=True).get(first))
     if mine and alone:
         out.append(queue_line(sessions, alone, mine))
+    out += process_lines(document, previous, previous_commit)
     seq_extra = added(document, "scanner-off", first, sequential=True)
     off_extra = added(document, "scanner-off", first)
     if (
@@ -460,6 +516,7 @@ def reading(document: Mapping[str, Any]) -> list[str]:
             )
             + "."
         )
+    out += model_lines(document)
     out += failure_lines(document)
     stopped = [
         f"{document['targets'][key]['label']} at {kb(size)}"
@@ -486,6 +543,115 @@ def reading(document: Mapping[str, Any]) -> list[str]:
     if unquiet:
         out.append("The host was not idle enough before: " + ", ".join(unquiet) + ".")
     return [f"- {line}" for line in out]
+
+
+MODEL_KINDS = ("answered", "skipped", "timeout", "busy", "error", "none")
+
+
+def models_table(document: Mapping[str, Any]) -> list[str]:
+    """What the scanner's model did for the scans of the timed calls, for each run that counted
+    it: scored the text, was not asked (the rules had flagged it), ran out of time, found every
+    place taken, or failed. Only the classifier target has a model, and only a build that counts
+    it has these figures."""
+    rows = []
+    for sequential in (True, False):
+        for size, run in runs_of(document, "classifier", sequential).items():
+            counted = run.get("models") or {}
+            total = sum(counted.values())
+            if not total:
+                continue
+            rows.append(
+                [
+                    f"{run['sessions']} session{'s' if run['sessions'] != 1 else ''}",
+                    kb(size),
+                    *[
+                        f"{counted.get(kind, 0) / total * 100:.0f}%" if counted.get(kind) else "0"
+                        for kind in MODEL_KINDS[:5]
+                    ],
+                    f"{total:,.0f}",
+                ]
+            )
+    if not rows:
+        return []
+    header = ["Run", "Payload", "Answered", "Skipped", "Timed out", "Busy", "Failed", "Scans"]
+    return [table(header, rows)]
+
+
+def rate_per_process(document: Mapping[str, Any], size: int) -> dict[str, float] | None:
+    """Calls a second of the scanner-off gateway with one session and with many, and the CPU a
+    call cost at many, for the first payload size. None if the file lacks any of them."""
+    many = served(runs_of(document, "scanner-off").get(size))
+    one = served(runs_of(document, "scanner-off", sequential=True).get(size))
+    if not many or not one:
+        return None
+    found: dict[str, float] = {
+        "one": one["throughput"],
+        "many": many["throughput"],
+        "p50_one": one["p50_ms"],
+    }
+    box = (runs_of(document, "scanner-off").get(size) or {}).get("container") or {}
+    if box.get("samples"):
+        found["cpu_ms"] = box["cpu_percent_mean"] / 100 * many["wall_s"] / many["calls"] * 1000
+    return found
+
+
+def process_lines(
+    document: Mapping[str, Any], previous: Mapping[str, Any] | None, previous_commit: str
+) -> list[str]:
+    """What one process serves, now and in the measurement before: the calls a second with one
+    session and with many, and the CPU for a call. The 200-session latency is the sessions
+    divided by the first, so this is the sentence that explains it."""
+    first = document["settings"]["sizes"][0]
+    sessions = document["settings"]["sessions"]
+    now = rate_per_process(document, first)
+    if now is None:
+        return []
+    direct = served(runs_of(document, "direct").get(first))
+    out = []
+    if previous is not None:
+        before = rate_per_process(previous, first)
+        if before is not None:
+            text = (
+                f"One process of Keystone with the scanner off at {kb(first)} serves "
+                f"{now['one']:.1f} calls a second with one session and {now['many']:.1f} with "
+                f"{sessions} sessions. In the measurement before this one (commit "
+                f"`{previous_commit}`) it was {before['one']:.1f} and {before['many']:.1f}."
+            )
+            if "cpu_ms" in now and "cpu_ms" in before:
+                text += (
+                    f" A call cost {now['cpu_ms']:.1f} ms of CPU, against "
+                    f"{before['cpu_ms']:.1f} ms then."
+                )
+            out.append(text)
+    if direct:
+        needed = sessions / ((direct["p50_ms"] + M5_P50_MS) / 1000)
+        out.append(
+            f"To add at most {M5_P50_MS:.0f} ms at the median with {sessions} sessions that call "
+            f"one after the other, the gateway would have to serve about {needed:.0f} calls a "
+            f"second, as many as the echo upstream alone does ({direct['throughput']:.0f}). "
+            f"`keystone serve` is one uvicorn worker on one event loop, which is one core, and "
+            f"serves {now['many']:.0f}. MCP sessions live in the process, so a second worker is "
+            "not a setting: M5 at 200 sessions is a measure of calls a second per process, and "
+            "the single-session row above is the one that says what a call needs."
+        )
+    return out
+
+
+def model_lines(document: Mapping[str, Any]) -> list[str]:
+    """One sentence about how much of the scanning the model did at many sessions."""
+    run = runs_of(document, "classifier").get(document["settings"]["sizes"][0])
+    counted = (run or {}).get("models") or {}
+    total = sum(counted.values())
+    if not total:
+        return []
+    answered = counted.get("answered", 0) / total
+    skipped = counted.get("busy", 0) / total
+    return [
+        f"With the classifier at {document['settings']['sessions']} sessions the model scored "
+        f"{answered * 100:.0f}% of the scans and was left out of {skipped * 100:.0f}% because "
+        "every place for a scan was taken (`busy`); the rules decided those, as they do for a "
+        "timeout. A call that the model could not serve costs the rules' time and not a wait."
+    ]
 
 
 def failure_lines(document: Mapping[str, Any]) -> list[str]:
@@ -572,7 +738,17 @@ def machine_text(machine: Mapping[str, Any], box: Mapping[str, Any]) -> str:
     return text
 
 
-def render_section(document: Mapping[str, Any], source: Path | None = None) -> str:
+def commit_of(document: Mapping[str, Any]) -> str:
+    return str(document["machine"].get("commit", ""))[:12]
+
+
+def render_section(
+    document: Mapping[str, Any],
+    source: Path | None = None,
+    previous: Mapping[str, Any] | None = None,
+) -> str:
+    """The section for a result file. `previous` is the measurement before it, if there is one:
+    the section compares the calls a second of one process with it."""
     machine = document["machine"]
     settings = document["settings"]
     box = settings.get("container") or {}
@@ -650,6 +826,20 @@ def render_section(document: Mapping[str, Any], source: Path | None = None) -> s
             *alone,
             "",
         ]
+    modelled = models_table(document)
+    if modelled:
+        out += [
+            "### What the model did",
+            "",
+            "For the scans of the timed calls with the classifier: how many the model scored "
+            "(`answered`), how many it was not asked about because the rules had flagged the "
+            "text (`skipped`), how many ran out of the 300 ms the scan waits (`timed out`), how "
+            "many found every place for a scan taken (`busy`), and how many failed. Counted from "
+            "`keystone_scan_model_total`.",
+            "",
+            *modelled,
+            "",
+        ]
     failed = failures_table(document)
     if failed:
         out += [
@@ -665,7 +855,7 @@ def render_section(document: Mapping[str, Any], source: Path | None = None) -> s
     out += [
         "### What the numbers say",
         "",
-        *reading(document),
+        *reading(document, previous, commit_of(previous) if previous else ""),
         "",
         "### The conditions of the runs",
         "",
@@ -679,27 +869,73 @@ def render_section(document: Mapping[str, Any], source: Path | None = None) -> s
     return "\n".join(out).rstrip() + "\n"
 
 
+PREVIOUS_START = "<!-- perf-previous:start -->"
+PREVIOUS_END = "<!-- perf-previous:end -->"
+
+
+def render_previous(document: Mapping[str, Any], source: Path | None = None) -> str:
+    """The measurement before the newest, kept with the commit it was made at: the verdicts, and
+    the tables of the first payload at many sessions and at one. The rest of it is in the file."""
+    settings = document["settings"]
+    first = settings["sizes"][0]
+    named = f"`{source}`" if source else "its result file"
+    commit = commit_of(document)
+    where = (
+        f"`{commit}` plus uncommitted changes"
+        if document["machine"].get("dirty")
+        else f"`{commit}`"
+    )
+    out = [
+        f"### The measurement before this one (commit {where}, {document['date']})",
+        "",
+        "Made by the same matrix on the build before, and kept here to compare with. The figures "
+        f"are computed from {named}, which holds every call. The rows are its verdicts, then "
+        f"the {kb(first)} payload at {settings['sessions']} sessions and with one.",
+        "",
+        *verdicts(document),
+        "",
+        f"{settings['sessions']} sessions, {settings['calls_each']} calls each, {kb(first)} "
+        "payload:",
+        "",
+        latency_table(document, first, sequential=False),
+    ]
+    if settings.get("sequential_calls"):
+        out += [
+            "",
+            f"One session, {settings['sequential_calls']} calls, {kb(first)} payload:",
+            "",
+            latency_table(document, first, sequential=True),
+        ]
+    failed = failure_lines(document)
+    if failed:
+        out += ["", *[f"- {line}" for line in failed]]
+    return "\n".join(out).rstrip() + "\n"
+
+
 # -- the document
 
 
-def update_document(path: Path, section: str) -> None:
+def update_document(path: Path, section: str, start: str = START, end: str = END) -> None:
     """Put `section` between the markers of the document, or at its end."""
-    block = f"{START}\n{section.rstrip()}\n{END}\n"
+    block = f"{start}\n{section.rstrip()}\n{end}\n"
     text = path.read_text(encoding="utf-8") if path.is_file() else ""
-    if START in text:
-        head, _, rest = text.partition(START)
-        if END not in rest:
+    if start in text:
+        head, _, rest = text.partition(start)
+        if end not in rest:
             raise ValueError(f"{path.name} has the start marker of the section and not its end")
-        _, _, tail = rest.partition(END)
-        path.write_text(head + block + tail.lstrip("\n"), encoding="utf-8")
+        _, _, tail = rest.partition(end)
+        rest_of_document = tail.lstrip("\n")
+        path.write_text(
+            head + block + ("\n" + rest_of_document if rest_of_document else ""), encoding="utf-8"
+        )
         return
     path.write_text(text.rstrip("\n") + ("\n\n" if text else "") + block, encoding="utf-8")
 
 
-def section_in(text: str) -> str | None:
-    if START not in text or END not in text:
+def section_in(text: str, start: str = START, end: str = END) -> str | None:
+    if start not in text or end not in text:
         return None
-    return text.partition(START)[2].partition(END)[0].strip()
+    return text.partition(start)[2].partition(end)[0].strip()
 
 
 def short(path: Path) -> str:
@@ -721,15 +957,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("there is no result file: run python -m eval.perf.matrix", file=sys.stderr)
         return 2
     path: Path = args.file or found[-1]
-    section = render_section(load(path), Path(short(path)))
+    # The measurement before this one, if the folder has one: the section compares with it, and the
+    # document keeps its headline tables next to the new ones.
+    earlier = [other for other in find_files(path.parent) if other.name < path.name]
+    previous_path = earlier[-1] if earlier else None
+    previous = load(previous_path) if previous_path else None
+    section = render_section(load(path), Path(short(path)), previous)
+    kept = (
+        render_previous(previous, Path(short(previous_path)))
+        if previous and previous_path
+        else None
+    )
     if args.check:
         text = args.doc.read_text(encoding="utf-8") if args.doc.is_file() else ""
-        if section_in(text) == section.strip():
+        same = section_in(text) == section.strip()
+        if kept is not None:
+            same = same and section_in(text, PREVIOUS_START, PREVIOUS_END) == kept.strip()
+        if same:
             print("docs/results.md is what the result file renders")
             return 0
         print("docs/results.md is not what the result file renders", file=sys.stderr)
         return 1
     update_document(args.doc, section)
+    if kept is not None:
+        # After the section, so that the current figures come first.
+        text = args.doc.read_text(encoding="utf-8")
+        if PREVIOUS_START not in text:
+            args.doc.write_text(
+                text.replace(END, f"{END}\n{PREVIOUS_START}\n{PREVIOUS_END}", 1), encoding="utf-8"
+            )
+        update_document(args.doc, kept, PREVIOUS_START, PREVIOUS_END)
     print(f"wrote the performance section of {short(args.doc)} from {short(path)}")
     return 0
 

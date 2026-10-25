@@ -399,6 +399,8 @@ The run: 200 MCP sessions opened at once, each making 20 calls of the echo tool 
 |---|---|---|---|---|
 | M5 | Added latency per call, scanner off, 200 sessions | p50 at most 10 ms, p95 at most 25 ms | 1 KB: p50 +2695.0 ms, p95 +3686.9 ms (3.2% of the calls failed); 8 KB: p50 +2941.7 ms, p95 +3816.9 ms (4.0% of the calls failed) | not met |
 | M6 | Added latency per call, classifier, outputs up to 2,000 tokens, 200 sessions | p95 at most 150 ms | 1 KB (197 tokens): p95 +40963.9 ms (57.1% of the calls failed); 8 KB (1581 tokens): p95 +56045.5 ms (75.8% of the calls failed) | not met |
+| M5, one session | Added latency per call, scanner off, one session, no queue | p50 at most 10 ms, p95 at most 25 ms | 1 KB: p50 +13.8 ms, p95 +23.8 ms; 8 KB: p50 +15.9 ms, p95 +30.4 ms | not met |
+| M6, one session | Added latency per call, classifier, outputs up to 2,000 tokens, one session, no queue | p95 at most 150 ms | 1 KB (197 tokens): p95 +895.4 ms; 8 KB (1581 tokens): p95 +1315.5 ms | not met |
 
 ### 200 sessions, 20 calls each, 1 KB payload
 
@@ -493,6 +495,7 @@ The calls that failed, by what Keystone answered, where in the run they were, an
 - While those calls were made the keystone container used 101% of CPU on average, of the 400% it was allowed. One event loop on one core can use about 100%. That is 15.3 ms of CPU for each call made, those that failed included.
 - A call spent 2793.5 ms on average inside the gateway, 2664.2 ms of it waiting for the upstream and 111.4 ms in the nine slots, the largest of them `pinning` at 57.0 ms. The client saw a mean of 3028.6 ms. The other 235.1 ms is outside what the gateway counts: the request and the answer on the wire, the check of the token, the wait for the event loop before the pipeline starts, and the generator's own time.
 - One session alone makes 56.8 calls a second through the scanner-off gateway and 200 sessions make 63.9, 13% more. 200 sessions that call one after the other wait for each call 200 / 63.9 = 3.13 s on average, and the clients measured a mean of 3.03 s. The other 199 sessions added little to what the gateway serves, so what it adds at 200 sessions is the wait for one event loop and not the work of a call.
+- To add at most 10 ms at the median with 200 sessions that call one after the other, the gateway would have to serve about 730 calls a second, as many as the echo upstream alone does (676). `keystone serve` is one uvicorn worker on one event loop, which is one core, and serves 64. MCP sessions live in the process, so a second worker is not a setting: M5 at 200 sessions is a measure of calls a second per process, and the single-session row above is the one that says what a call needs.
 - With one session and no queue the scanner-off gateway adds p50 13.8 ms and p95 23.8 ms at 1 KB; with 200 sessions it adds p50 2695.0 ms and p95 3686.9 ms.
 - With one session the scan took 158.4 ms on average with the classifier and 0.2 ms with the rules alone at 1 KB, and 136.2 ms with the classifier at 200 sessions.
 - With the classifier every stage is slower, not only the scan, though none of them waits for the model: `pinning` 24.3 ms against 1.0, `credential` 20.6 ms against 1.5, `session_flags` 5.4 ms against 0.3 with one session at 1 KB. While it worked the container used 380% of CPU on average, against about 100% without it.
